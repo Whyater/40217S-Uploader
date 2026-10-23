@@ -23,7 +23,8 @@ The installer downloads the official PROS uploader and the Scourge Uploader app.
 2. Open **Scourge Uploader**.
 3. If it says newer code is available, click **Get latest code**. On the very first launch it downloads the code for you.
 4. Pick a slot (1 to 8).
-5. Click **Upload to robot** and keep the cable plugged in until it finishes.
+5. Check the **Program name** box. This is the name the brain shows for the program. It starts as `Scourge`. Names can use letters, numbers, spaces, `_`, `.`, and `-`, up to 20 characters, and must start with a letter or number.
+6. Click **Upload to robot** and keep the cable plugged in until it finishes.
 
 When it is done, the program shows on the brain. Run it from the brain screen.
 
@@ -36,17 +37,17 @@ When it is done, the program shows on the brain. Run it from the brain screen.
 - **"No internet connection":** connect to Wi-Fi and click **Get latest code**. You can still upload the code you already have.
 - **SmartScreen or antivirus warning:** the PROS uploader is not code-signed. It is the official release from [purduesigbots/pros-cli](https://github.com/purduesigbots/pros-cli).
 - **Scripts blocked:** some school-managed laptops do not allow running scripts. Use a personal laptop or ask the programmer.
-- **Uninstall:** delete the `%LOCALAPPDATA%\ScourgeUploader` folder and the two Scourge Uploader shortcuts (Desktop and Start menu).
+- **Uninstall:** remove the `%LOCALAPPDATA%\ScourgeUploader` folder along with the Desktop and Start menu shortcuts named Scourge Uploader. Unless you use PROS for other projects, delete the PROS settings folder at `%APPDATA%\PROS` as well.
 
 ---
 
 ## How it works
 
-The robot source code is private. Each time the programmer pushes to the main branch of the private repository, GitHub Actions builds it and publishes the compiled program to this repository's [Releases](https://github.com/Whyater/40217S-Uploader/releases). A release has three files: `hot.package.bin`, `cold.package.bin`, and `project.pros`.
+The robot source code is private. Each time the programmer pushes to the main branch of the private repository, GitHub Actions builds it and publishes the compiled program to this repository's [Releases](https://github.com/Whyater/40217S-Uploader/releases). A release has four files: `hot.package.bin`, `cold.package.bin`, `project.pros`, and `release.json` (the build's tag, title, notes, and time, plus SHA-256 hashes of the other three files in newer builds).
 
-**Get latest code** downloads the newest release. Nothing is built on your laptop. **Upload to robot** hands those files to the official PROS command line tool, pros-cli 3.5.6.
+**Get latest code** downloads the newest release and, when the release lists SHA-256 hashes, checks each file before using it. Nothing is built on your laptop. **Upload to robot** hands those files to the official PROS command line tool, pros-cli 3.5.6.
 
-The installer downloads pros-cli from [github.com/purduesigbots/pros-cli](https://github.com/purduesigbots/pros-cli) and checks its SHA-256 hash before using it. Everything goes into `%LOCALAPPDATA%\ScourgeUploader`. Apart from the two shortcuts, it does not touch the rest of your system.
+The installer downloads pros-cli from [github.com/purduesigbots/pros-cli](https://github.com/purduesigbots/pros-cli) and checks its SHA-256 hash before using it. The app and its files go into `%LOCALAPPDATA%\ScourgeUploader`. pros-cli also writes a small settings folder at `%APPDATA%\PROS`. Apart from those two folders and the two shortcuts, nothing else on your system changes.
 
 ## Status
 

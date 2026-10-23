@@ -49,8 +49,12 @@ jobs:
         run: |
           set -euo pipefail
           tag=$(jq -er '.tag | select(type == "string" and length > 0)' release.json)
-          title=$(jq -er '.title | select(type == "string" and length > 0)' release.json)
-          notes=$(jq -er '.notes | select(type == "string")' release.json)
+          # title must be a non-empty string and notes a string (they are read
+          # again in the next step when the release is created).
+          if ! jq -e '(.title | type == "string" and length > 0) and (.notes | type == "string")' release.json > /dev/null; then
+            echo "::error::release.json needs a non-empty title and a notes string"
+            exit 1
+          fi
           if ! [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]]; then
             echo "::error::release.json tag has unexpected characters"
             exit 1

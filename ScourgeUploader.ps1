@@ -197,8 +197,18 @@ $SharedCode = {
         if (Test-Path $mono) { Remove-Item -Path $mono -Force }
         $arguments = 'upload --slot ' + $Slot + ' --name "' + $Name + '" --after screen --no-analytics --no-sentry'
         Add-SharedLog $Sync ('> pros ' + $arguments)
-        # Three "y" answers: old-library cleanup and the "this is a wireless
-        # upload, it may be slow" warning are the only yes/no prompts PROS uses.
+        # PROS (pros-cli 3.5.6) can ask two yes/no questions during an upload,
+        # and we answer "y" to each (three y's to be safe):
+        #   1. "There are too many files on the V5. PROS can remove the following
+        #      suggested old files: ..." The brain holds at most 3 PROS
+        #      libraries. If there are more, PROS offers to delete the oldest
+        #      libraries AND the programs on the brain that use them (they could
+        #      not run without them anyway). Saying yes is what a programmer
+        #      uploading from the PROS VS Code extension normally clicks. It can
+        #      remove older programs from other slots. (PROS also deletes broken
+        #      leftover files on its own, without asking.)
+        #   2. "You're about to upload ... bytes wirelessly" (only when going
+        #      through a controller). Yes means wait for the slow upload.
         return Invoke-Pros -ProsExe $ProsExe -Arguments $arguments -WorkDir $ProjectDir -TimeoutSec $TimeoutSec -StdinText "y`ny`ny`n" -Sync $Sync
     }
 
@@ -312,6 +322,14 @@ $SharedCode = {
         # Keep the date as text. Some PowerShell versions turn it into a DateTime.
         $built = $rel.built_at
         if ($built -is [datetime]) { $built = $built.ToUniversalTime().ToString('o') }
+        # SHA-256 fingerprints of each file (newer builds only). $null = not given.
+        $hashes = $null
+        if ($null -ne $rel.sha256) {
+            $hashes = @{}
+            foreach ($prop in $rel.sha256.PSObject.Properties) {
+                $hashes[[string]$prop.Name] = ([string]$prop.Value).ToLowerInvariant()
+            }
+        }
         return @{
             Status  = 'ok'
             Release = @{
@@ -319,6 +337,7 @@ $SharedCode = {
                 Name    = [string]$rel.title
                 Notes   = [string]$rel.notes
                 BuiltAt = [string]$built
+                Sha256  = $hashes
             }
         }
     }
@@ -378,8 +397,42 @@ $SharedCode = {
             return @{ Status = 'error'; Error = $err.Message }
         }
 
-        if (Test-Path $projectDir) { Remove-Item -Path $projectDir -Recurse -Force }
-        Move-Item -Path $stage -Destination $projectDir
+        # Check every file against the fingerprint the build published. Any
+        # difference at all (a cut-off or corrupted download) changes the hash.
+        # Older releases have no fingerprints, so the check is skipped for them.
+        if ($null -ne $rel.Sha256) {
+            foreach ($n in $AssetNames) {
+                if ($n -eq 'project.pros') { $file = Join-Path $stage $n } else { $file = Join-Path $stage ('bin\' + $n) }
+                $expected = $rel.Sha256[$n]
+                $actual = (Get-FileHash -Path $file -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ((-not $expected) -or ($actual -ne $expected)) {
+                    Remove-Item -Path $stage -Recurse -Force -ErrorAction SilentlyContinue
+                    return @{ Status = 'error'; Error = ('Download was damaged (' + $n + ' failed its SHA-256 check), try Get latest code again.') }
+                }
+            }
+        }
+
+        # Swap the new folder in without ever deleting the working one first:
+        #   project -> project.old, new -> project, then delete project.old.
+        # If the middle step fails, project.old goes back to being project.
+        $old = Join-Path $InstallDir 'project.old'
+        if (Test-Path $old) { Remove-Item -Path $old -Recurse -Force }
+        $hadOld = Test-Path $projectDir
+        try {
+            if ($hadOld) { Move-Item -Path $projectDir -Destination $old }
+        } catch {
+            Remove-Item -Path $stage -Recurse -Force -ErrorAction SilentlyContinue
+            return @{ Status = 'error'; Error = ('Could not replace the old code (is a file open?). Your old code is unchanged. ' + $_.Exception.Message) }
+        }
+        try {
+            Move-Item -Path $stage -Destination $projectDir
+        } catch {
+            $moveError = $_.Exception.Message
+            if ($hadOld) { Move-Item -Path $old -Destination $projectDir }
+            Remove-Item -Path $stage -Recurse -Force -ErrorAction SilentlyContinue
+            return @{ Status = 'error'; Error = ('Could not put the new code in place. Your old code is unchanged. ' + $moveError) }
+        }
+        if ($hadOld) { Remove-Item -Path $old -Recurse -Force -ErrorAction SilentlyContinue }
 
         $ver = @{
             tag           = $rel.Tag
@@ -1215,10 +1268,17 @@ function Start-Upload {
         param($r)
         Set-Busy $false
         $outcome = Get-UploadOutcome -Run $r -Slot $script:UploadSlot
+        $message = $outcome.Message
+        # PROS asked to clean up old libraries (we answered yes): say so plainly.
+        if ([string]$r.Output -match 'There are too many files on the V5') {
+            $evictNote = 'PROS removed old libraries (and programs that used them) to make room.'
+            Add-LogText $evictNote
+            $message = $message + ' ' + $evictNote
+        }
         if ($outcome.Ok) {
-            Set-Status $outcome.Message 'success'
+            Set-Status $message 'success'
         } else {
-            Set-Status $outcome.Message 'error'
+            Set-Status $message 'error'
             if ($outcome.Detail -and ($outcome.Kind -eq 'NoPros')) { Add-LogText $outcome.Detail }
             if ($outcome.Kind -eq 'Failed') { Set-DetailsVisible $true }
         }
@@ -1265,6 +1325,21 @@ try {
 try { [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false) } catch { }
 
 Initialize-Theme
+
+# If the app was closed in the middle of swapping in new code, finish the job:
+# a leftover project.old is either the only copy (put it back) or junk (delete it).
+function Repair-ProjectFolder {
+    $old = Join-Path $InstallDir 'project.old'
+    if (-not (Test-Path $old)) { return }
+    try {
+        if (Test-Path $script:ProjectDir) {
+            Remove-Item -Path $old -Recurse -Force
+        } else {
+            Move-Item -Path $old -Destination $script:ProjectDir
+        }
+    } catch { }
+}
+Repair-ProjectFolder
 
 if ($SelfTest) {
     # No window is shown here. Each check adds to $failures if it goes wrong.
@@ -1355,8 +1430,27 @@ if ($SelfTest) {
 }
 
 # Normal mode: show the window and run until it is closed.
-$mainForm = New-MainForm
-[System.Windows.Forms.Application]::Run($mainForm)
+# The shortcut starts PowerShell hidden, so if anything breaks here nobody would
+# see an error. Show a message box instead and save the details to a file.
+try {
+    $mainForm = New-MainForm
+    [System.Windows.Forms.Application]::Run($mainForm)
+} catch {
+    $errText = ($_ | Out-String)
+    $errMsg = $_.Exception.Message
+    try {
+        New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+        $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+        [System.IO.File]::WriteAllText((Join-Path $InstallDir 'last-error.txt'), ($stamp + "`r`n" + $errText))
+    } catch { }
+    try {
+        [void][System.Windows.Forms.MessageBox]::Show(
+            ('Scourge Uploader could not start. Try running the install command again. If it keeps happening, send this to the programmer:' + "`r`n`r`n" + $errMsg),
+            'Scourge Uploader',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error)
+    } catch { }
+}
 # FormClosing already cleaned up; running it again is harmless and covers any
 # other way the window might have closed.
 Stop-Background

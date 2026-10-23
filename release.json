@@ -1,0 +1,11 @@
+{
+  "tag": "build-8-f166f1e",
+  "title": "Build 8 (f166f1e)",
+  "notes": "Built from robot code commit f166f1e",
+  "built_at": "2026-10-23T04:34:45Z",
+  "sha256": {
+    "hot.package.bin": "008c688b56d3cd94a7377b75abb41de578107a23f979e8d6f060ffff55fb7992",
+    "cold.package.bin": "b28fcf607e274ac602351fa15b6dec116d64da9863784c7d623d07cbca4e31ad",
+    "project.pros": "3334ee11d05552c44076bd6a7b41db6058a44761af0fd01a6d67eedcc6868294"
+  }
+}

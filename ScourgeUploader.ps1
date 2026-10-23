@@ -282,7 +282,10 @@ $SharedCode = {
         $tmp = [System.IO.Path]::GetTempFileName()
         try {
             try {
-                Invoke-WebRequest -Uri ($ReleasesUrl + '/latest/download/release.json') -OutFile $tmp -UseBasicParsing -TimeoutSec 20
+                # GitHub caches the 'latest' redirect for a few minutes; a unique query string skips that
+                # cache so a build published a moment ago shows up right away.
+                $fresh = '?t=' + [DateTime]::UtcNow.Ticks
+                Invoke-WebRequest -Uri ($ReleasesUrl + '/latest/download/release.json' + $fresh) -OutFile $tmp -UseBasicParsing -TimeoutSec 20
             } catch {
                 $code = 0
                 $resp = $_.Exception.Response

@@ -43,7 +43,9 @@ if (-not $InstallDir) {
 # ---------------------------------------------------------------------------
 # Settings
 # ---------------------------------------------------------------------------
-$script:ApiUrl     = 'https://api.github.com/repos/Whyater/40217S-Uploader/releases/latest'
+# Releases page of the public repo. Files are downloaded from
+#   <ReleasesUrl>/latest/download/release.json and <ReleasesUrl>/download/<tag>/<file>
+$script:ReleasesUrl = 'https://github.com/Whyater/40217S-Uploader/releases'
 $script:AssetNames = @('hot.package.bin', 'cold.package.bin', 'project.pros')
 $script:ProjectDir = Join-Path $InstallDir 'project'
 $script:BinDir     = Join-Path $script:ProjectDir 'bin'
@@ -266,35 +268,54 @@ $SharedCode = {
         return 'brain'
     }
 
-    # Ask GitHub about the newest release.
+    # Ask GitHub about the newest release by downloading its small release.json
+    # file. This goes through github.com release downloads (served from a CDN),
+    # not the GitHub API, so there is no 60-requests-per-hour limit to hit on a
+    # shared school network.
+    # release.json fields: tag, title, notes, built_at (built_at may be missing
+    # on older builds).
     # Returns @{ Status = 'ok' | 'none' | 'offline' | 'error'; Release; Error }.
+    # 'none' means there is no release.json yet (no build published, or the
+    # newest build is from before release.json existed).
     function Get-LatestRelease {
-        param([string]$ApiUrl)
+        param([string]$ReleasesUrl)
+        $tmp = [System.IO.Path]::GetTempFileName()
         try {
-            $rel = Invoke-RestMethod -Uri $ApiUrl -UseBasicParsing -TimeoutSec 20 -Headers @{ 'Accept' = 'application/vnd.github+json' }
-        } catch {
-            $code = 0
-            $resp = $_.Exception.Response
-            if ($null -ne $resp) {
-                try { $code = [int]$resp.StatusCode } catch { }
+            try {
+                Invoke-WebRequest -Uri ($ReleasesUrl + '/latest/download/release.json') -OutFile $tmp -UseBasicParsing -TimeoutSec 20
+            } catch {
+                $code = 0
+                $resp = $_.Exception.Response
+                if ($null -ne $resp) {
+                    try { $code = [int]$resp.StatusCode } catch { }
+                }
+                if ($code -eq 404) { return @{ Status = 'none' } }
+                if ($code -eq 0) { return @{ Status = 'offline'; Error = $_.Exception.Message } }
+                return @{ Status = 'error'; Error = ('GitHub answered with HTTP ' + $code + '.') }
             }
-            if ($code -eq 404) { return @{ Status = 'none' } }
-            if ($code -eq 0) { return @{ Status = 'offline'; Error = $_.Exception.Message } }
-            return @{ Status = 'error'; Error = ('GitHub answered with HTTP ' + $code + '.') }
+            try {
+                $rel = [System.IO.File]::ReadAllText($tmp, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+            } catch {
+                return @{ Status = 'error'; Error = 'The release information file is damaged.' }
+            }
+        } finally {
+            Remove-Item -Path $tmp -Force -ErrorAction SilentlyContinue
         }
-        $assets = @{}
-        foreach ($a in @($rel.assets)) { $assets[[string]$a.name] = [string]$a.browser_download_url }
+        $tag = [string]$rel.tag
+        # The tag becomes part of a web address, so only allow safe characters.
+        if ($tag -notmatch '^[A-Za-z0-9._-]+$') {
+            return @{ Status = 'error'; Error = 'The release information has no valid tag.' }
+        }
         # Keep the date as text. Some PowerShell versions turn it into a DateTime.
-        $published = $rel.published_at
-        if ($published -is [datetime]) { $published = $published.ToUniversalTime().ToString('o') }
+        $built = $rel.built_at
+        if ($built -is [datetime]) { $built = $built.ToUniversalTime().ToString('o') }
         return @{
             Status  = 'ok'
             Release = @{
-                Tag       = [string]$rel.tag_name
-                Name      = [string]$rel.name
-                Notes     = [string]$rel.body
-                Published = [string]$published
-                Assets    = $assets
+                Tag     = $tag
+                Name    = [string]$rel.title
+                Notes   = [string]$rel.notes
+                BuiltAt = [string]$built
             }
         }
     }
@@ -302,8 +323,8 @@ $SharedCode = {
     # Download the newest release into <InstallDir>\project.
     # Returns @{ Status = 'downloaded' | 'current' | 'none' | 'offline' | 'error'; Release; Error }.
     function Save-LatestRelease {
-        param([string]$ApiUrl, [string]$InstallDir, [string[]]$AssetNames, [string]$InstalledTag)
-        $info = Get-LatestRelease -ApiUrl $ApiUrl
+        param([string]$ReleasesUrl, [string]$InstallDir, [string[]]$AssetNames, [string]$InstalledTag)
+        $info = Get-LatestRelease -ReleasesUrl $ReleasesUrl
         if ($info.Status -ne 'ok') { return $info }
         $rel = $info.Release
 
@@ -314,14 +335,10 @@ $SharedCode = {
         if ($haveAll -and ($rel.Tag -eq $InstalledTag)) {
             return @{ Status = 'current'; Release = $rel }
         }
-        foreach ($n in $AssetNames) {
-            if (-not $rel.Assets.ContainsKey($n)) {
-                return @{ Status = 'error'; Error = ('The newest release is missing ' + $n + '. Ask the programmer to check the build.') }
-            }
-        }
 
         # Download into a side folder first, then swap it in. If the download
-        # breaks halfway, the old working code is still there.
+        # breaks halfway, the old working code is still there. Every file comes
+        # from the same tag, so all of them belong to one build.
         $stage = Join-Path $InstallDir 'project.download'
         if (Test-Path $stage) { Remove-Item -Path $stage -Recurse -Force }
         New-Item -ItemType Directory -Path (Join-Path $stage 'bin') -Force | Out-Null
@@ -332,7 +349,16 @@ $SharedCode = {
                 } else {
                     $dest = Join-Path $stage ('bin\' + $n)
                 }
-                Invoke-WebRequest -Uri $rel.Assets[$n] -OutFile $dest -UseBasicParsing -TimeoutSec 120
+                $url = $ReleasesUrl + '/download/' + $rel.Tag + '/' + $n
+                try {
+                    Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -TimeoutSec 120
+                } catch {
+                    $resp = $_.Exception.Response
+                    if (($null -ne $resp) -and ([int]$resp.StatusCode -eq 404)) {
+                        throw ('The newest build (' + $rel.Tag + ') is missing ' + $n + '. Ask the programmer to check the build.')
+                    }
+                    throw
+                }
                 if ((-not (Test-Path $dest)) -or ((Get-Item $dest).Length -eq 0)) {
                     throw ('Downloaded file ' + $n + ' is empty.')
                 }
@@ -340,7 +366,10 @@ $SharedCode = {
         } catch {
             $err = $_.Exception
             Remove-Item -Path $stage -Recurse -Force -ErrorAction SilentlyContinue
-            if (($err -is [System.Net.WebException]) -and ($null -eq $err.Response)) {
+            # No server answer at all means no internet.
+            # (PowerShell 5.1 reports that as a WebException with no Response.)
+            if ((($err -is [System.Net.WebException]) -and ($null -eq $err.Response)) -or
+                ($err.GetType().Name -eq 'HttpRequestException')) {
                 return @{ Status = 'offline'; Error = $err.Message }
             }
             return @{ Status = 'error'; Error = $err.Message }
@@ -353,7 +382,7 @@ $SharedCode = {
             tag           = $rel.Tag
             name          = $rel.Name
             notes         = $rel.Notes
-            published_at  = $rel.Published
+            built_at      = $rel.BuiltAt
             downloaded_at = (Get-Date).ToUniversalTime().ToString('o')
         }
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -370,8 +399,8 @@ $SharedCode = {
 # body outputs is its result.
 $UploadBody   = { Invoke-RobotUpload -ProsExe $A.ProsExe -ProjectDir $A.ProjectDir -Slot $A.Slot -Name $A.Name -TimeoutSec $A.Timeout -Sync $Sync }
 $LsusbBody    = { Invoke-Pros -ProsExe $A.ProsExe -Arguments 'lsusb --target v5 --no-analytics --no-sentry' -WorkDir $A.WorkDir -TimeoutSec 20 -Sync $Sync -Quiet }
-$CheckBody    = { Get-LatestRelease -ApiUrl $A.ApiUrl }
-$DownloadBody = { Save-LatestRelease -ApiUrl $A.ApiUrl -InstallDir $A.InstallDir -AssetNames $A.AssetNames -InstalledTag $A.InstalledTag }
+$CheckBody    = { Get-LatestRelease -ReleasesUrl $A.ReleasesUrl }
+$DownloadBody = { Save-LatestRelease -ReleasesUrl $A.ReleasesUrl -InstallDir $A.InstallDir -AssetNames $A.AssetNames -InstalledTag $A.InstalledTag }
 
 # ---------------------------------------------------------------------------
 # Small helpers used by the window and by -SelfTest
@@ -1015,8 +1044,11 @@ function Update-BuildInfo {
         $ui.BuildTitle.Text = $title
         $meta = 'Build ' + $b.tag
         if ($parts.Sha) { $meta += ', commit ' + $parts.Sha }
-        $when = Format-BuildDate ([string]$b.published_at)
-        if ($when) { $meta += "`n" + 'Published ' + $when }
+        # built_at comes from release.json. Older version.json files have published_at.
+        $stamp = [string]$b.built_at
+        if (-not $stamp) { $stamp = [string]$b.published_at }
+        $when = Format-BuildDate $stamp
+        if ($when) { $meta += "`n" + 'Built ' + $when }
         $ui.BuildMeta.Text = $meta
     }
     Update-Notice
@@ -1105,7 +1137,7 @@ function Start-ConnectionCheck {
 
 # Quietly asks GitHub whether newer code exists (on launch).
 function Start-ReleaseCheck {
-    Start-BgJob $CheckBody @{ ApiUrl = $script:ApiUrl } {
+    Start-BgJob $CheckBody @{ ReleasesUrl = $script:ReleasesUrl } {
         param($r)
         if ($r.Status -eq 'ok') {
             $script:LatestTag = [string]$r.Release.Tag
@@ -1119,7 +1151,7 @@ function Start-Download {
     Set-Busy $true 'download' 'Downloading the latest robot code...'
     Add-LogText ('[' + (Get-Date).ToString('HH:mm:ss') + '] Checking GitHub for the latest robot code')
     $jobArgs = @{
-        ApiUrl       = $script:ApiUrl
+        ReleasesUrl  = $script:ReleasesUrl
         InstallDir   = $InstallDir
         AssetNames   = $script:AssetNames
         InstalledTag = $script:InstalledTag
@@ -1132,7 +1164,13 @@ function Start-Download {
         switch ([string]$r.Status) {
             'downloaded' { Set-Status ('Downloaded build ' + $r.Release.Tag + '. Ready to upload.') 'success' }
             'current'    { Set-Status 'You already have the latest code.' 'info' }
-            'none'       { Set-Status 'No robot code published yet. Ask the programmer to push code, then click Get latest code.' 'info' }
+            'none'       {
+                if ($script:InstalledTag) {
+                    Set-Status 'Waiting for the next build to be published. The code you have is still ready to upload.' 'info'
+                } else {
+                    Set-Status 'No robot code published yet. Waiting for the next build, so try Get latest code again later.' 'info'
+                }
+            }
             'offline'    { Set-Status 'No internet connection. Connect to Wi-Fi and click Get latest code. You can still upload the code you already have.' 'error' }
             default      { Set-Status ('Could not download the code. ' + [string]$r.Error) 'error' }
         }
@@ -1278,7 +1316,7 @@ if ($SelfTest) {
 
         # 3b. CI only: download the latest release the same way a first launch does.
         if ($env:SCOURGE_SELFTEST_DOWNLOAD -eq '1') {
-            $dl = Save-LatestRelease -ApiUrl $script:ApiUrl -InstallDir $InstallDir -AssetNames $script:AssetNames -InstalledTag $script:InstalledTag
+            $dl = Save-LatestRelease -ReleasesUrl $script:ReleasesUrl -InstallDir $InstallDir -AssetNames $script:AssetNames -InstalledTag $script:InstalledTag
             if (@('downloaded', 'current') -contains [string]$dl.Status) {
                 Write-Host ('  Download: OK (' + $dl.Release.Tag + ')')
             } else {

@@ -73,7 +73,7 @@ jobs:
             echo "Release $tag already exists, skipping."
             exit 0
           fi
-          gh release create "$tag" hot.package.bin cold.package.bin project.pros \
+          gh release create "$tag" hot.package.bin cold.package.bin project.pros release.json \
             --target "$GITHUB_SHA" \
             --title "$title" \
             --notes "$notes" \

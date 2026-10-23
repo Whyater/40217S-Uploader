@@ -1,0 +1,11 @@
+{
+  "tag": "build-10-29b1fb5",
+  "title": "Build 10 (29b1fb5)",
+  "notes": "Built from robot code commit 29b1fb5",
+  "built_at": "2026-10-23T05:06:30Z",
+  "sha256": {
+    "hot.package.bin": "bbf574925fb85d1b8014be1d93105d240eee3c5002edcdbded45f30982ced505",
+    "cold.package.bin": "b28fcf607e274ac602351fa15b6dec116d64da9863784c7d623d07cbca4e31ad",
+    "project.pros": "3334ee11d05552c44076bd6a7b41db6058a44761af0fd01a6d67eedcc6868294"
+  }
+}

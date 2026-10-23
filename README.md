@@ -28,6 +28,24 @@ The installer downloads the official PROS uploader and the Scourge Uploader app.
 
 When it is done, the program shows on the brain. Run it from the brain screen.
 
+## Check the drive (first time, and after any rewiring)
+
+Do this before driving, so a wrongly wired motor shows up on a screen instead of on the field.
+
+1. Put the robot flat on the floor, not on a stand, with about 2 feet of open space on every side.
+2. Turn on the controller and run the program from the brain. Do not touch the robot for 3 seconds while its sensors calibrate.
+3. Tap the left or right button at the bottom of the brain screen until the selected auton reads **Check: drive + sensors**.
+4. Press **A** on the controller. The robot turns a little one way, then the other, rolls forward a few inches, and backs up. Press **B** at any time to stop it.
+5. Take a photo of the brain screen and the controller screen and send it to the programmer.
+
+Each line reads OK, REVERSED, NO TURN, or NOT TURNING. Only drive with the sticks once both **Left** and **Right** say OK.
+
+**A** and **B** only start and stop tests when the robot is not plugged into a field or competition switch.
+
+## Drive
+
+Left stick up and down drives forward and back. Right stick left and right turns.
+
 ---
 
 ## If something goes wrong

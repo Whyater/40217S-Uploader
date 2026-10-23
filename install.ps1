@@ -1,5 +1,4 @@
 # Scourge Uploader installer (team 40217S "Scourge")
-# Written with help from Claude (AI) for team 40217S.
 #
 # What this does, in order:
 #   1. Downloads the official PROS command line tool for Windows (pinned to

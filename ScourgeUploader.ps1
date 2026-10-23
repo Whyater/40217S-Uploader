@@ -1,5 +1,4 @@
 # Scourge Uploader: a small Windows app that puts 40217S robot code on the V5 brain.
-# Written with help from Claude (AI) for team 40217S.
 #
 # How it works, in plain terms:
 #   * The programmer pushes code to GitHub. A GitHub Action builds it and posts a

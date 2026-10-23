@@ -1,7 +1,7 @@
 name: Publish release
 
-# The private robot-code repo force-pushes one orphan commit to the `incoming`
-# branch. That commit holds the two program images, project.pros, and
+# The private robot-code repo force-pushes one commit (main plus the build) to `incoming`.
+# That commit adds the two program images, project.pros, and
 # release.json. This workflow turns it into a GitHub release, then checks the
 # real install path end to end on Windows.
 on:

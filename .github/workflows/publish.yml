@@ -1,0 +1,147 @@
+name: Publish release
+
+# The private robot-code repo force-pushes one orphan commit to the `incoming`
+# branch. That commit holds the two program images, project.pros, and
+# release.json. This workflow turns it into a GitHub release, then checks the
+# real install path end to end on Windows.
+on:
+  push:
+    branches: [incoming]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the pushed commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate the incoming files
+        run: |
+          set -euo pipefail
+          for f in hot.package.bin cold.package.bin project.pros release.json; do
+            if [ ! -f "$f" ]; then
+              echo "::error::Missing required file: $f"
+              exit 1
+            fi
+          done
+          for f in hot.package.bin cold.package.bin; do
+            if [ ! -s "$f" ]; then
+              echo "::error::$f is empty"
+              exit 1
+            fi
+          done
+          ls -l hot.package.bin cold.package.bin project.pros release.json
+
+      - name: Read release.json
+        id: meta
+        run: |
+          set -euo pipefail
+          tag=$(jq -er '.tag | select(type == "string" and length > 0)' release.json)
+          title=$(jq -er '.title | select(type == "string" and length > 0)' release.json)
+          notes=$(jq -er '.notes | select(type == "string")' release.json)
+          if ! [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::release.json tag has unexpected characters"
+            exit 1
+          fi
+          {
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release tag: $tag"
+
+      - name: Create the release (skip if the tag already has one)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag=$(jq -r '.tag' release.json)
+          title=$(jq -r '.title' release.json)
+          notes=$(jq -r '.notes' release.json)
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "Release $tag already exists, skipping."
+            exit 0
+          fi
+          gh release create "$tag" hot.package.bin cold.package.bin project.pros \
+            --target "$GITHUB_SHA" \
+            --title "$title" \
+            --notes "$notes" \
+            --latest
+          echo "Created release $tag"
+
+  windows-test:
+    needs: release
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - name: Set up environment
+        run: |
+          function Set-GhEnv([string]$Name, [string]$Value) {
+            [System.IO.File]::AppendAllText($env:GITHUB_ENV, ($Name + '=' + $Value + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+          }
+          Set-GhEnv 'SCOURGE_NO_SHORTCUTS' '1'
+          Set-GhEnv 'SCOURGE_INSTALL_DIR' (Join-Path $env:RUNNER_TEMP 'ScourgeUploader')
+          Set-GhEnv 'SCOURGE_SELFTEST_DOWNLOAD' '1'
+          Set-GhEnv 'SCOURGE_SCREENSHOT' (Join-Path $env:RUNNER_TEMP 'uploader-window.png')
+
+      - name: Install with the real one-liner
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $out = & { irm https://raw.githubusercontent.com/Whyater/40217S-Uploader/main/install.ps1 | iex } *>&1 | Out-String
+          Write-Host $out
+          if ($out -notmatch 'Scourge Uploader installed to') {
+            Write-Host '::error::Installer did not report success'
+            exit 1
+          }
+          $pros = Get-ChildItem -Path (Join-Path $env:SCOURGE_INSTALL_DIR 'pros-cli') -Filter 'pros.exe' -Recurse -File | Select-Object -First 1
+          if (-not $pros) {
+            Write-Host '::error::pros.exe not found after install'
+            exit 1
+          }
+          $v = (& $pros.FullName --version 2>&1 | Out-String)
+          Write-Host $v
+          if (($LASTEXITCODE -ne 0) -or ($v -notmatch 'version')) {
+            Write-Host '::error::pros --version failed'
+            exit 1
+          }
+          exit 0
+
+      - name: Run the app self-test (downloads the latest release)
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $script = Join-Path $env:SCOURGE_INSTALL_DIR 'ScourgeUploader.ps1'
+          $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -SelfTest -InstallDir $env:SCOURGE_INSTALL_DIR 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host '----- self-test log -----'
+          Write-Host $out
+          Write-Host ('----- exit code ' + $code + ' -----')
+          if ($code -ne 0) {
+            Write-Host '::error::Self-test exited non-zero'
+            exit 1
+          }
+          if ($out -notmatch 'Download: OK') {
+            Write-Host '::error::Self-test output has no "Download: OK"'
+            exit 1
+          }
+          exit 0
+
+      - name: Upload window screenshot
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: uploader-window
+          path: ${{ runner.temp }}\uploader-window.png
+          if-no-files-found: warn

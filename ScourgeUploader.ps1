@@ -1,0 +1,1323 @@
+# Scourge Uploader: a small Windows app that puts 40217S robot code on the V5 brain.
+# Written with help from Claude (AI) for team 40217S.
+#
+# How it works, in plain terms:
+#   * The programmer pushes code to GitHub. A GitHub Action builds it and posts a
+#     "release" with three files: hot.package.bin, cold.package.bin, project.pros.
+#   * This app downloads those three files into <InstallDir>\project.
+#   * When you click "Upload to robot", the app runs the official PROS tool
+#     (pros.exe upload ...) in that folder. PROS sends the files over USB.
+#
+# Why the code looks the way it does:
+#   * WinForms windows only like to be touched from the thread that made them
+#     (the "UI thread"). Slow work (downloads, uploads, USB checks) runs on
+#     background threads in a "runspace pool" so the window never freezes.
+#   * Background threads never touch the window. They hand back a result, and
+#     a WinForms Timer (which always fires on the UI thread) picks the result up
+#     and updates the screen. That is our way of marshaling work back to the
+#     UI thread, and it is safer in PowerShell than Control.Invoke because a
+#     PowerShell script block cannot run on a thread that has no runspace.
+#
+# Options:
+#   -SelfTest           build the window without showing it, run a few checks,
+#                       print a summary, exit 0 (pass) or 1 (fail). Used by CI.
+#   -InstallDir <path>  where pros-cli, the project files, and version.json live.
+#                       Default: %LOCALAPPDATA%\ScourgeUploader
+#
+# Must run on Windows PowerShell 5.1 (the version built into Windows 10 and 11),
+# so this file sticks to plain ASCII and 5.1 syntax.
+
+param(
+    [switch]$SelfTest,
+    [string]$InstallDir = ''
+)
+
+$ErrorActionPreference = 'Stop'
+if (-not $InstallDir) {
+    $InstallDir = Join-Path $env:LOCALAPPDATA 'ScourgeUploader'
+}
+
+# GitHub needs TLS 1.2. This setting covers every thread in this process.
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
+$script:ApiUrl     = 'https://api.github.com/repos/Whyater/40217S-Uploader/releases/latest'
+$script:AssetNames = @('hot.package.bin', 'cold.package.bin', 'project.pros')
+$script:ProjectDir = Join-Path $InstallDir 'project'
+$script:BinDir     = Join-Path $script:ProjectDir 'bin'
+$script:VersionFile = Join-Path $InstallDir 'version.json'
+$script:ProsDir    = Join-Path $InstallDir 'pros-cli'
+$script:PollSeconds = 5        # how often to check for a plugged-in brain while idle
+$script:UploadTimeoutSec = 600 # wireless uploads through a controller can take minutes
+
+# ---------------------------------------------------------------------------
+# Shared code. These functions are used in two places:
+#   1. on background threads (the text of this block is copied into each job)
+#   2. directly, in -SelfTest mode
+# So they must not touch the window or use any $script: variables.
+# ---------------------------------------------------------------------------
+$SharedCode = {
+    $ProgressPreference = 'SilentlyContinue'
+
+    # Put one line into the shared log queue (the UI shows it in Details).
+    function Add-SharedLog {
+        param($Sync, [string]$Line)
+        if ($null -ne $Sync) { $Sync.Log.Enqueue($Line) }
+    }
+
+    # Run pros.exe and collect what it prints.
+    # Returns a hashtable: ExitCode, Output (last 2000 lines), TimedOut, StartError.
+    #   -Sync   shared hashtable from the app. Lines go to $Sync.Log (unless
+    #           -Quiet) and the running process is listed in $Sync.Procs so the
+    #           app can kill it if the window is closed.
+    function Invoke-Pros {
+        param(
+            [string]$ProsExe,
+            [string]$Arguments,
+            [string]$WorkDir,
+            [int]$TimeoutSec = 60,
+            [string]$StdinText = '',
+            $Sync = $null,
+            [switch]$Quiet
+        )
+        $result = @{ ExitCode = -1; Output = ''; TimedOut = $false; StartError = '' }
+        # Only the newest lines are kept, so a process that prints forever
+        # cannot use up all the memory. Error messages are at the end anyway.
+        $maxLines = 2000
+        $lines = New-Object 'System.Collections.Generic.Queue[string]'
+        $logSync = $Sync
+        if ($Quiet) { $logSync = $null }
+
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $ProsExe
+        $psi.Arguments = $Arguments
+        $psi.WorkingDirectory = $WorkDir
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.RedirectStandardInput = $true
+        $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+        $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+        # Ask Python (PROS is written in Python) to print lines right away and in UTF-8.
+        $psi.EnvironmentVariables['PYTHONUNBUFFERED'] = '1'
+        $psi.EnvironmentVariables['PYTHONIOENCODING'] = 'utf-8'
+
+        $proc = New-Object System.Diagnostics.Process
+        $proc.StartInfo = $psi
+        try {
+            [void]$proc.Start()
+        } catch {
+            $result.StartError = $_.Exception.Message
+            return $result
+        }
+        $procId = $proc.Id
+        if ($null -ne $Sync) { $Sync.Procs[$procId] = $proc }
+
+        try {
+            # PROS can ask yes/no questions (for example "remove old libraries to
+            # make room?"). We pre-type the answers, then close the input so any
+            # other question ends right away instead of waiting forever.
+            try {
+                if ($StdinText) { $proc.StandardInput.Write($StdinText) }
+                $proc.StandardInput.Close()
+            } catch { }
+
+            # Read normal output and error output at the same time. Each
+            # ReadLineAsync() is a "Task" we can wait on for a short moment, so
+            # neither stream can fill up and block PROS.
+            $deadline = (Get-Date).AddSeconds($TimeoutSec)
+            $outTask = $proc.StandardOutput.ReadLineAsync()
+            $errTask = $proc.StandardError.ReadLineAsync()
+            try {
+                while (($null -ne $outTask) -or ($null -ne $errTask)) {
+                    if ((Get-Date) -gt $deadline) {
+                        $result.TimedOut = $true
+                        try { $proc.Kill() } catch { }
+                        break
+                    }
+                    if (($null -ne $outTask) -and $outTask.Wait(50)) {
+                        $line = $outTask.Result
+                        if ($null -eq $line) {
+                            $outTask = $null
+                        } else {
+                            $lines.Enqueue($line)
+                            if ($lines.Count -gt $maxLines) { [void]$lines.Dequeue() }
+                            Add-SharedLog $logSync $line
+                            $outTask = $proc.StandardOutput.ReadLineAsync()
+                        }
+                    }
+                    if (($null -ne $errTask) -and $errTask.Wait(50)) {
+                        $line = $errTask.Result
+                        if ($null -eq $line) {
+                            $errTask = $null
+                        } else {
+                            $lines.Enqueue($line)
+                            if ($lines.Count -gt $maxLines) { [void]$lines.Dequeue() }
+                            Add-SharedLog $logSync $line
+                            $errTask = $proc.StandardError.ReadLineAsync()
+                        }
+                    }
+                }
+            } catch {
+                $lines.Enqueue('(reading PROS output failed: ' + $_.Exception.Message + ')')
+            }
+
+            if (-not $result.TimedOut) { [void]$proc.WaitForExit(10000) }
+            if ($proc.HasExited) { $result.ExitCode = $proc.ExitCode }
+        } catch {
+            # Most likely the app is closing and already killed this process.
+            $lines.Enqueue('(PROS was stopped: ' + $_.Exception.Message + ')')
+        } finally {
+            # Runs even if the app stops this background job early: never
+            # leave pros.exe running, because it would keep the USB port busy.
+            try {
+                if (-not $proc.HasExited) {
+                    $proc.Kill()
+                    [void]$proc.WaitForExit(3000)
+                }
+            } catch { }
+            if ($null -ne $Sync) { $Sync.Procs.Remove($procId) }
+            try { $proc.Dispose() } catch { }
+        }
+        $result.Output = ($lines.ToArray() -join "`n")
+        return $result
+    }
+
+    # Upload the downloaded project to the brain. Never builds anything.
+    function Invoke-RobotUpload {
+        param([string]$ProsExe, [string]$ProjectDir, [int]$Slot, [string]$Name, [int]$TimeoutSec = 600, $Sync = $null)
+        # PROS prefers bin\monolith.bin if it is newer than the hot/cold files,
+        # so make sure one never sits in the folder.
+        $mono = Join-Path $ProjectDir 'bin\monolith.bin'
+        if (Test-Path $mono) { Remove-Item -Path $mono -Force }
+        $arguments = 'upload --slot ' + $Slot + ' --name "' + $Name + '" --after screen --no-analytics --no-sentry'
+        Add-SharedLog $Sync ('> pros ' + $arguments)
+        # Three "y" answers: old-library cleanup and the "this is a wireless
+        # upload, it may be slow" warning are the only yes/no prompts PROS uses.
+        return Invoke-Pros -ProsExe $ProsExe -Arguments $arguments -WorkDir $ProjectDir -TimeoutSec $TimeoutSec -StdinText "y`ny`ny`n" -Sync $Sync
+    }
+
+    # Turn PROS output into a plain-English result.
+    # Returns @{ Ok; Kind; Message; Detail }.
+    function Get-UploadOutcome {
+        param($Run, [int]$Slot)
+        if ($null -eq $Run) {
+            return @{ Ok = $false; Kind = 'Failed'; Message = 'Upload failed: nothing came back from the upload task.'; Detail = '' }
+        }
+        if ($Run.Error) {
+            return @{ Ok = $false; Kind = 'Failed'; Message = ('Upload failed: ' + $Run.Error); Detail = '' }
+        }
+        if ($Run.StartError) {
+            return @{ Ok = $false; Kind = 'NoPros'; Message = 'Could not start the PROS uploader. Run the install command again.'; Detail = $Run.StartError }
+        }
+        $out = [string]$Run.Output
+        if ($Run.TimedOut) {
+            return @{ Ok = $false; Kind = 'Timeout'; Message = 'The upload took too long and was stopped. Unplug the cable, plug it back in, and try again.'; Detail = '' }
+        }
+        if (($out -match 'Finished uploading') -and ($Run.ExitCode -eq 0)) {
+            return @{ Ok = $true; Kind = 'Success'; Message = ('Uploaded to slot ' + $Slot + '. Run it from the brain screen.'); Detail = '' }
+        }
+        if ($out -match 'Multiple .* were found') {
+            return @{ Ok = $false; Kind = 'Multiple'; Message = 'More than one VEX device is plugged in. Unplug everything except the brain, then try again.'; Detail = '' }
+        }
+        if (($out -match 'No v5 ports were found') -or ($out -match 'No port provided or located')) {
+            return @{ Ok = $false; Kind = 'NoBrain'; Message = 'No brain found. Plug the USB cable into the brain (not the controller), turn the brain on, and close VEXcode. Still failing? Try another cable, since some only charge.'; Detail = '' }
+        }
+        if ($out -match "doesn't appear to be connected to a V5 Brain") {
+            return @{ Ok = $false; Kind = 'NoLink'; Message = 'The controller is plugged in but is not linked to the brain. Plug the cable into the brain instead.'; Detail = '' }
+        }
+        if (($out -match 'could not open port') -or ($out -match 'Access is denied') -or ($out -match 'PermissionError')) {
+            return @{ Ok = $false; Kind = 'PortBusy'; Message = 'Another program is using the brain. Close VEXcode or any other VEX app, then try again.'; Detail = '' }
+        }
+        if ($out -match 'No output files were found') {
+            return @{ Ok = $false; Kind = 'NoCode'; Message = 'The robot code files are missing. Click Get latest code, then try again.'; Detail = '' }
+        }
+        # Anything else: show the last thing PROS said.
+        $last = ''
+        $all = @($out -split "`n" | Where-Object { $_.Trim() -ne '' })
+        if ($all.Count -gt 0) { $last = $all[$all.Count - 1].Trim() }
+        if ($last.Length -gt 140) { $last = $last.Substring(0, 140) + '...' }
+        $msg = 'Upload failed. See Details for the full PROS output.'
+        if ($last) { $msg = 'Upload failed. PROS said: ' + $last }
+        return @{ Ok = $false; Kind = 'Failed'; Message = $msg; Detail = $out }
+    }
+
+    # Read "pros lsusb" output. Looks like:
+    #   VEX EDR V5 System Ports:
+    #   COM3 - VEX Robotics V5 Brain - 1234 (COM3)
+    #   There are no connected VEX EDR V5 User Ports
+    # Returns 'brain', 'controller', 'multiple', or 'none'.
+    function Get-BrainState {
+        param([string]$Output)
+        $inSystem = $false
+        $ports = New-Object System.Collections.Generic.List[string]
+        foreach ($raw in ($Output -split "`n")) {
+            $line = $raw.Trim()
+            if ($line -match '^VEX EDR V5 System Ports:') { $inSystem = $true; continue }
+            if (($line -match '^VEX EDR') -or ($line -match '^There are no')) { $inSystem = $false; continue }
+            if ($inSystem -and ($line -match '^\S+ - ')) { $ports.Add($line) }
+        }
+        if ($ports.Count -eq 0) { return 'none' }
+        if ($ports.Count -gt 1) { return 'multiple' }
+        if ($ports[0] -match 'Controller') { return 'controller' }
+        return 'brain'
+    }
+
+    # Ask GitHub about the newest release.
+    # Returns @{ Status = 'ok' | 'none' | 'offline' | 'error'; Release; Error }.
+    function Get-LatestRelease {
+        param([string]$ApiUrl)
+        try {
+            $rel = Invoke-RestMethod -Uri $ApiUrl -UseBasicParsing -TimeoutSec 20 -Headers @{ 'Accept' = 'application/vnd.github+json' }
+        } catch {
+            $code = 0
+            $resp = $_.Exception.Response
+            if ($null -ne $resp) {
+                try { $code = [int]$resp.StatusCode } catch { }
+            }
+            if ($code -eq 404) { return @{ Status = 'none' } }
+            if ($code -eq 0) { return @{ Status = 'offline'; Error = $_.Exception.Message } }
+            return @{ Status = 'error'; Error = ('GitHub answered with HTTP ' + $code + '.') }
+        }
+        $assets = @{}
+        foreach ($a in @($rel.assets)) { $assets[[string]$a.name] = [string]$a.browser_download_url }
+        # Keep the date as text. Some PowerShell versions turn it into a DateTime.
+        $published = $rel.published_at
+        if ($published -is [datetime]) { $published = $published.ToUniversalTime().ToString('o') }
+        return @{
+            Status  = 'ok'
+            Release = @{
+                Tag       = [string]$rel.tag_name
+                Name      = [string]$rel.name
+                Notes     = [string]$rel.body
+                Published = [string]$published
+                Assets    = $assets
+            }
+        }
+    }
+
+    # Download the newest release into <InstallDir>\project.
+    # Returns @{ Status = 'downloaded' | 'current' | 'none' | 'offline' | 'error'; Release; Error }.
+    function Save-LatestRelease {
+        param([string]$ApiUrl, [string]$InstallDir, [string[]]$AssetNames, [string]$InstalledTag)
+        $info = Get-LatestRelease -ApiUrl $ApiUrl
+        if ($info.Status -ne 'ok') { return $info }
+        $rel = $info.Release
+
+        $projectDir = Join-Path $InstallDir 'project'
+        $haveAll = (Test-Path (Join-Path $projectDir 'project.pros')) -and
+                   (Test-Path (Join-Path $projectDir 'bin\hot.package.bin')) -and
+                   (Test-Path (Join-Path $projectDir 'bin\cold.package.bin'))
+        if ($haveAll -and ($rel.Tag -eq $InstalledTag)) {
+            return @{ Status = 'current'; Release = $rel }
+        }
+        foreach ($n in $AssetNames) {
+            if (-not $rel.Assets.ContainsKey($n)) {
+                return @{ Status = 'error'; Error = ('The newest release is missing ' + $n + '. Ask the programmer to check the build.') }
+            }
+        }
+
+        # Download into a side folder first, then swap it in. If the download
+        # breaks halfway, the old working code is still there.
+        $stage = Join-Path $InstallDir 'project.download'
+        if (Test-Path $stage) { Remove-Item -Path $stage -Recurse -Force }
+        New-Item -ItemType Directory -Path (Join-Path $stage 'bin') -Force | Out-Null
+        try {
+            foreach ($n in $AssetNames) {
+                if ($n -eq 'project.pros') {
+                    $dest = Join-Path $stage $n
+                } else {
+                    $dest = Join-Path $stage ('bin\' + $n)
+                }
+                Invoke-WebRequest -Uri $rel.Assets[$n] -OutFile $dest -UseBasicParsing -TimeoutSec 120
+                if ((-not (Test-Path $dest)) -or ((Get-Item $dest).Length -eq 0)) {
+                    throw ('Downloaded file ' + $n + ' is empty.')
+                }
+            }
+        } catch {
+            $err = $_.Exception
+            Remove-Item -Path $stage -Recurse -Force -ErrorAction SilentlyContinue
+            if (($err -is [System.Net.WebException]) -and ($null -eq $err.Response)) {
+                return @{ Status = 'offline'; Error = $err.Message }
+            }
+            return @{ Status = 'error'; Error = $err.Message }
+        }
+
+        if (Test-Path $projectDir) { Remove-Item -Path $projectDir -Recurse -Force }
+        Move-Item -Path $stage -Destination $projectDir
+
+        $ver = @{
+            tag           = $rel.Tag
+            name          = $rel.Name
+            notes         = $rel.Notes
+            published_at  = $rel.Published
+            downloaded_at = (Get-Date).ToUniversalTime().ToString('o')
+        }
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText((Join-Path $InstallDir 'version.json'), ($ver | ConvertTo-Json), $utf8NoBom)
+        return @{ Status = 'downloaded'; Release = $rel }
+    }
+}
+
+# Make the shared functions available on this (main) thread too.
+. $SharedCode
+
+# Background job bodies. Each runs on a background thread with two inputs:
+# $Sync (shared log queue) and $A (a hashtable of arguments). The last value a
+# body outputs is its result.
+$UploadBody   = { Invoke-RobotUpload -ProsExe $A.ProsExe -ProjectDir $A.ProjectDir -Slot $A.Slot -Name $A.Name -TimeoutSec $A.Timeout -Sync $Sync }
+$LsusbBody    = { Invoke-Pros -ProsExe $A.ProsExe -Arguments 'lsusb --target v5 --no-analytics --no-sentry' -WorkDir $A.WorkDir -TimeoutSec 20 -Sync $Sync -Quiet }
+$CheckBody    = { Get-LatestRelease -ApiUrl $A.ApiUrl }
+$DownloadBody = { Save-LatestRelease -ApiUrl $A.ApiUrl -InstallDir $A.InstallDir -AssetNames $A.AssetNames -InstalledTag $A.InstalledTag }
+
+# ---------------------------------------------------------------------------
+# Small helpers used by the window and by -SelfTest
+# ---------------------------------------------------------------------------
+function Find-ProsExe {
+    if (Test-Path $script:ProsDir) {
+        $f = Get-ChildItem -Path $script:ProsDir -Filter 'pros.exe' -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -ne $f) { return $f.FullName }
+    }
+    return $null
+}
+
+function Test-HaveCode {
+    return (Test-Path (Join-Path $script:ProjectDir 'project.pros')) -and
+           (Test-Path (Join-Path $script:BinDir 'hot.package.bin')) -and
+           (Test-Path (Join-Path $script:BinDir 'cold.package.bin'))
+}
+
+# Reads version.json. Returns $null if there is none.
+function Get-InstalledBuild {
+    if (-not (Test-Path $script:VersionFile)) { return $null }
+    try {
+        $text = [System.IO.File]::ReadAllText($script:VersionFile, [System.Text.Encoding]::UTF8)
+        return ($text | ConvertFrom-Json)
+    } catch {
+        return $null
+    }
+}
+
+# The CI notes look like "Built from <sha>: <commit subject>".
+function Split-ReleaseNotes {
+    param([string]$Notes)
+    $first = ''
+    if ($Notes) { $first = ($Notes -split "`n")[0].Trim() }
+    if ($first -match '^Built from ([0-9a-fA-F]+):\s*(.*)$') {
+        $sha = $Matches[1]
+        if ($sha.Length -gt 7) { $sha = $sha.Substring(0, 7) }
+        return @{ Sha = $sha; Subject = $Matches[2] }
+    }
+    return @{ Sha = ''; Subject = $first }
+}
+
+function Format-BuildDate {
+    param([string]$Text)
+    if (-not $Text) { return '' }
+    try {
+        $styles = [System.Globalization.DateTimeStyles]'AssumeUniversal, AdjustToUniversal'
+        $d = [datetime]::Parse($Text, [System.Globalization.CultureInfo]::InvariantCulture, $styles)
+        return $d.ToLocalTime().ToString('MMM d, yyyy h:mm tt')
+    } catch {
+        return $Text
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Look and feel. One accent color; everything else is neutral gray.
+# Sizes are in pixels at 100% scaling and follow an 8 px grid. Update-Layout
+# multiplies them by the screen scale (see Px) on high-DPI screens.
+# ---------------------------------------------------------------------------
+$script:Colors = @{}
+$script:Fonts = @{}
+
+function Initialize-Theme {
+    $c = $script:Colors
+    $c.Back        = [System.Drawing.Color]::White
+    $c.HeaderBack  = [System.Drawing.Color]::FromArgb(247, 248, 250)
+    $c.Line        = [System.Drawing.Color]::FromArgb(228, 231, 236)
+    $c.Text        = [System.Drawing.Color]::FromArgb(23, 26, 31)
+    $c.Muted       = [System.Drawing.Color]::FromArgb(102, 110, 122)
+    $c.Accent      = [System.Drawing.Color]::FromArgb(48, 86, 211)
+    $c.AccentHover = [System.Drawing.Color]::FromArgb(38, 72, 186)
+    $c.AccentDown  = [System.Drawing.Color]::FromArgb(30, 58, 156)
+    $c.Disabled    = [System.Drawing.Color]::FromArgb(228, 231, 236)
+    $c.SecHover    = [System.Drawing.Color]::FromArgb(242, 244, 247)
+    $c.SecDown     = [System.Drawing.Color]::FromArgb(230, 233, 238)
+    $c.Border      = [System.Drawing.Color]::FromArgb(200, 205, 213)
+    $c.Good        = [System.Drawing.Color]::FromArgb(31, 138, 76)
+    $c.Warn        = [System.Drawing.Color]::FromArgb(201, 138, 4)
+    $c.Bad         = [System.Drawing.Color]::FromArgb(180, 35, 24)
+    $c.Idle        = [System.Drawing.Color]::FromArgb(154, 161, 172)
+    $c.LogBack     = [System.Drawing.Color]::FromArgb(247, 248, 250)
+
+    $f = $script:Fonts
+    $f.Base    = New-Object System.Drawing.Font('Segoe UI', 9)
+    $f.Title   = New-Object System.Drawing.Font('Segoe UI Semibold', 15)
+    $f.Sub     = New-Object System.Drawing.Font('Segoe UI', 9.5)
+    $f.Section = New-Object System.Drawing.Font('Segoe UI Semibold', 8)
+    $f.Strong  = New-Object System.Drawing.Font('Segoe UI Semibold', 10)
+    $f.Small   = New-Object System.Drawing.Font('Segoe UI', 8.5)
+    $f.Button  = New-Object System.Drawing.Font('Segoe UI Semibold', 11)
+    $f.Status  = New-Object System.Drawing.Font('Segoe UI', 9.5)
+    $f.Mono    = New-Object System.Drawing.Font('Consolas', 8.5)
+}
+
+function New-Label {
+    param([string]$Text, [int]$X, [int]$Y, [int]$W, [int]$H, $Font, $Color)
+    $l = New-Object System.Windows.Forms.Label
+    $l.AutoSize = $false
+    $l.Text = $Text
+    $l.Location = New-Object System.Drawing.Point($X, $Y)
+    $l.Size = New-Object System.Drawing.Size($W, $H)
+    $l.Font = $Font
+    $l.ForeColor = $Color
+    $l.BackColor = [System.Drawing.Color]::Transparent
+    $l.AutoEllipsis = $true
+    return $l
+}
+
+function New-Line {
+    param([int]$X, [int]$Y, [int]$W)
+    $l = New-Object System.Windows.Forms.Label
+    $l.AutoSize = $false
+    $l.Location = New-Object System.Drawing.Point($X, $Y)
+    $l.Size = New-Object System.Drawing.Size($W, 1)
+    $l.BackColor = $script:Colors.Line
+    return $l
+}
+
+# Paints a button for its current state (normal or disabled).
+function Update-ButtonLook {
+    param($Button)
+    $c = $script:Colors
+    if ($Button.Tag -eq 'primary') {
+        if ($Button.Enabled) { $Button.BackColor = $c.Accent } else { $Button.BackColor = $c.Disabled }
+    } else {
+        if ($Button.Enabled) { $Button.FlatAppearance.BorderColor = $c.Border } else { $Button.FlatAppearance.BorderColor = $c.Line }
+    }
+}
+
+function New-FlatButton {
+    param([string]$Text, [int]$X, [int]$Y, [int]$W, [int]$H, [bool]$Primary)
+    $c = $script:Colors
+    $b = New-Object System.Windows.Forms.Button
+    $b.Text = $Text
+    $b.Location = New-Object System.Drawing.Point($X, $Y)
+    $b.Size = New-Object System.Drawing.Size($W, $H)
+    $b.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $b.UseVisualStyleBackColor = $false
+    $b.Cursor = [System.Windows.Forms.Cursors]::Hand
+    if ($Primary) {
+        $b.Tag = 'primary'
+        $b.Font = $script:Fonts.Button
+        $b.ForeColor = [System.Drawing.Color]::White
+        $b.FlatAppearance.BorderSize = 0
+        $b.FlatAppearance.MouseOverBackColor = $c.AccentHover
+        $b.FlatAppearance.MouseDownBackColor = $c.AccentDown
+    } else {
+        $b.Tag = 'secondary'
+        $b.Font = $script:Fonts.Base
+        $b.ForeColor = $c.Text
+        $b.BackColor = $c.Back
+        $b.FlatAppearance.BorderSize = 1
+        $b.FlatAppearance.MouseOverBackColor = $c.SecHover
+        $b.FlatAppearance.MouseDownBackColor = $c.SecDown
+    }
+    Update-ButtonLook $b
+    $b.Add_EnabledChanged({ param($s, $e) Update-ButtonLook $s })
+    return $b
+}
+
+# A small rounded "S" tile used as the window icon.
+function New-AppIcon {
+    $size = 32
+    $bmp = New-Object System.Drawing.Bitmap($size, $size)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+    $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+    $d = 14
+    $e = $size - 1
+    $path.AddArc(0, 0, $d, $d, 180, 90)
+    $path.AddArc($e - $d, 0, $d, $d, 270, 90)
+    $path.AddArc($e - $d, $e - $d, $d, $d, 0, 90)
+    $path.AddArc(0, $e - $d, $d, $d, 90, 90)
+    $path.CloseFigure()
+    $brush = New-Object System.Drawing.SolidBrush($script:Colors.Accent)
+    $g.FillPath($brush, $path)
+    $font = New-Object System.Drawing.Font('Segoe UI Semibold', 17, [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)
+    $fmt = New-Object System.Drawing.StringFormat
+    $fmt.Alignment = [System.Drawing.StringAlignment]::Center
+    $fmt.LineAlignment = [System.Drawing.StringAlignment]::Center
+    $g.DrawString('S', $font, [System.Drawing.Brushes]::White, (New-Object System.Drawing.RectangleF(0, 0, $size, $size)), $fmt)
+    $g.Dispose(); $brush.Dispose(); $font.Dispose(); $fmt.Dispose(); $path.Dispose()
+    return [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
+}
+
+# ---------------------------------------------------------------------------
+# The window. All controls are stored in $script:Ui so other functions can
+# reach them. New-MainForm only creates the controls; Update-Layout (below)
+# decides where each one goes, top to bottom:
+#   header
+#   ROBOT CODE: build title + Get latest code button, build details,
+#               newer-code notice (only when there is one)
+#   UPLOAD:     slot + program name, name problem message (only when needed),
+#               big upload button
+#   brain connection indicator
+#   status line (only when it has text)
+#   Show details link, then the raw PROS log (only when expanded)
+# Hidden items take no space, and the window height always fits the content.
+# ---------------------------------------------------------------------------
+$script:Ui = @{}
+$script:Scale = 1.0
+$script:NoticeShown = $false
+$script:NameErrorShown = $false
+$script:DetailsShown = $false
+
+# Converts a size picked at 100% scaling into real pixels for this screen.
+function Px {
+    param([double]$Value)
+    return [int][math]::Round($Value * $script:Scale)
+}
+
+# Places a wrapping label and makes it exactly as tall as its text needs.
+function Set-WrappedLabel {
+    param($Label, [int]$X, [int]$Y, [int]$W)
+    $pref = $Label.GetPreferredSize((New-Object System.Drawing.Size($W, 0)))
+    $Label.SetBounds($X, $Y, $W, [math]::Max($pref.Height, 1))
+}
+
+function New-MainForm {
+    $c = $script:Colors
+    $f = $script:Fonts
+    $ui = $script:Ui
+
+    # How big is a "pixel at 100%" on this screen? 96 DPI = 100%, 144 DPI = 150%.
+    # Fonts are in points, so Windows already draws them at the right size.
+    try {
+        $g = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero)
+        $script:Scale = $g.DpiX / 96.0
+        $g.Dispose()
+    } catch {
+        $script:Scale = 1.0
+    }
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.SuspendLayout()
+    # We place everything ourselves (Update-Layout), so no automatic scaling.
+    $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
+    $form.Text = 'Scourge Uploader'
+    $form.Font = $f.Base
+    $form.BackColor = $c.Back
+    $form.ForeColor = $c.Text
+    # Fixed size: no resizing and no maximize, but minimize still works.
+    $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedSingle
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $true
+    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+    try { $form.Icon = New-AppIcon } catch { }
+    $ui.Form = $form
+
+    # Header band
+    $ui.Header = New-Object System.Windows.Forms.Panel
+    $ui.Header.BackColor = $c.HeaderBack
+    $ui.HeaderTitle = New-Label 'Scourge Uploader' 0 0 10 10 $f.Title $c.Text
+    $ui.HeaderSub = New-Label '40217S robot code' 0 0 10 10 $f.Sub $c.Muted
+    $ui.Header.Controls.AddRange(@($ui.HeaderTitle, $ui.HeaderSub))
+    $ui.HeaderLine = New-Line 0 0 10
+    $form.Controls.AddRange(@($ui.Header, $ui.HeaderLine))
+
+    # Robot code section
+    $ui.CodeLabel = New-Label 'ROBOT CODE' 0 0 10 10 $f.Section $c.Muted
+    $ui.BuildTitle = New-Label 'No robot code downloaded yet' 0 0 10 10 $f.Strong $c.Text
+    $ui.BuildMeta = New-Label '' 0 0 10 10 $f.Small $c.Muted
+    $ui.BuildMeta.AutoEllipsis = $false
+    $ui.GetButton = New-FlatButton 'Get latest code' 0 0 10 10 $false
+    $ui.Notice = New-Label '' 0 0 10 10 $f.Small $c.Accent
+    $ui.Notice.AutoEllipsis = $false
+    $ui.Notice.Visible = $false
+    $ui.MidLine = New-Line 0 0 10
+    $form.Controls.AddRange(@($ui.CodeLabel, $ui.BuildTitle, $ui.BuildMeta, $ui.GetButton, $ui.Notice, $ui.MidLine))
+
+    # Upload section
+    $ui.UploadLabel = New-Label 'UPLOAD' 0 0 10 10 $f.Section $c.Muted
+    $ui.SlotLabel = New-Label 'Slot' 0 0 10 10 $f.Base $c.Muted
+    $ui.NameLabel = New-Label 'Program name' 0 0 10 10 $f.Base $c.Muted
+    $ui.SlotBox = New-Object System.Windows.Forms.ComboBox
+    $ui.SlotBox.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    foreach ($n in 1..8) { [void]$ui.SlotBox.Items.Add([string]$n) }
+    $ui.SlotBox.SelectedIndex = 0
+    $ui.NameBox = New-Object System.Windows.Forms.TextBox
+    # AutoSize off so the text box can be made exactly as tall as the slot box.
+    $ui.NameBox.AutoSize = $false
+    $ui.NameBox.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $ui.NameBox.MaxLength = 20
+    $ui.NameBox.Text = 'Scourge'
+    $ui.NameError = New-Label '' 0 0 10 10 $f.Small $c.Bad
+    $ui.NameError.AutoEllipsis = $false
+    $ui.NameError.Visible = $false
+    $ui.UploadButton = New-FlatButton 'Upload to robot' 0 0 10 10 $true
+    $form.Controls.AddRange(@($ui.UploadLabel, $ui.SlotLabel, $ui.NameLabel, $ui.SlotBox, $ui.NameBox, $ui.NameError, $ui.UploadButton))
+
+    # Connection indicator: a small colored dot plus a label.
+    $ui.Dot = New-Object System.Windows.Forms.Panel
+    $ui.Dot.BackColor = $c.Back
+    $ui.Dot.Tag = $c.Idle
+    $ui.Dot.Add_Paint({
+        param($s, $e)
+        $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $brush = New-Object System.Drawing.SolidBrush($s.Tag)
+        $e.Graphics.FillEllipse($brush, 0, 0, $s.Width - 1, $s.Height - 1)
+        $brush.Dispose()
+    })
+    $ui.ConnLabel = New-Label 'Checking for a brain...' 0 0 10 10 $f.Base $c.Muted
+    $form.Controls.AddRange(@($ui.Dot, $ui.ConnLabel))
+
+    # Status line (as tall as its text)
+    $ui.Status = New-Label '' 0 0 10 10 $f.Status $c.Text
+    $ui.Status.AutoEllipsis = $false
+    $ui.Status.Visible = $false
+    $form.Controls.Add($ui.Status)
+
+    # Collapsible details log (collapsed by default)
+    $ui.DetailsLink = New-Object System.Windows.Forms.LinkLabel
+    $ui.DetailsLink.Text = 'Show details'
+    $ui.DetailsLink.AutoSize = $true
+    $ui.DetailsLink.LinkColor = $c.Accent
+    $ui.DetailsLink.ActiveLinkColor = $c.AccentDown
+    $ui.DetailsLink.LinkBehavior = [System.Windows.Forms.LinkBehavior]::HoverUnderline
+    $ui.Log = New-Object System.Windows.Forms.TextBox
+    $ui.Log.Multiline = $true
+    $ui.Log.ReadOnly = $true
+    $ui.Log.WordWrap = $true
+    $ui.Log.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
+    $ui.Log.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $ui.Log.BackColor = $c.LogBack
+    $ui.Log.Font = $f.Mono
+    $ui.Log.Visible = $false
+    $form.Controls.AddRange(@($ui.DetailsLink, $ui.Log))
+
+    Update-Layout
+    $form.ResumeLayout($false)
+
+    # Timers fire on the UI thread, so their handlers may touch controls.
+    $ui.JobTimer = New-Object System.Windows.Forms.Timer
+    $ui.JobTimer.Interval = 100
+    $ui.JobTimer.Add_Tick({ Invoke-Safe { Update-Jobs } })
+    $ui.PollTimer = New-Object System.Windows.Forms.Timer
+    $ui.PollTimer.Interval = $script:PollSeconds * 1000
+    $ui.PollTimer.Add_Tick({ Invoke-Safe { Start-ConnectionCheck } })
+
+    # Button, text box, and link handlers
+    $ui.GetButton.Add_Click({ Invoke-Safe { Start-Download } })
+    $ui.UploadButton.Add_Click({ Invoke-Safe { Start-Upload } })
+    $ui.NameBox.Add_TextChanged({ Invoke-Safe { Update-NameError } })
+    $ui.DetailsLink.Add_LinkClicked({ Invoke-Safe { Set-DetailsVisible (-not $script:DetailsShown) } })
+    # Shown: the controls now have their real sizes, so lay out again. In
+    # -SelfTest the window may be shown for a screenshot; do not start the app.
+    $form.Add_Shown({
+        Invoke-Safe {
+            Update-Layout
+            if (-not $SelfTest) { Start-App }
+        }
+    })
+    $form.Add_FormClosing({
+        param($s, $e)
+        if ($script:Busy -and ($script:BusyKind -eq 'upload')) {
+            $answer = [System.Windows.Forms.MessageBox]::Show($s,
+                'An upload is still running. If you close now, the program on the brain may be incomplete. Close anyway?',
+                'Scourge Uploader',
+                [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                [System.Windows.Forms.MessageBoxIcon]::Warning)
+            if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { $e.Cancel = $true; return }
+        }
+        $script:Ui.JobTimer.Stop()
+        $script:Ui.PollTimer.Stop()
+        # Kill any pros.exe still running. Otherwise it could keep holding the
+        # brain's USB port and the next upload would fail.
+        Stop-Background
+    })
+
+    return $form
+}
+
+# Puts every control in place, top to bottom, skipping hidden ones, then sizes
+# the window to fit. Called whenever something that changes height changes.
+# (We track visibility in our own flags because WinForms reports every
+# control as hidden until the window itself is on screen.)
+function Update-Layout {
+    $ui = $script:Ui
+    $form = $ui.Form
+    if ($null -eq $form) { return }
+    $W = Px 480
+    $M = Px 24
+    $inner = $W - 2 * $M
+
+    $form.SuspendLayout()
+
+    # Header
+    $ui.Header.SetBounds(0, 0, $W, (Px 72))
+    $ui.HeaderTitle.SetBounds($M, (Px 12), $inner, (Px 30))
+    $ui.HeaderSub.SetBounds($M, (Px 42), $inner, (Px 20))
+    $ui.HeaderLine.SetBounds(0, (Px 72), $W, 1)
+
+    # Robot code section
+    $y = Px 88
+    $ui.CodeLabel.SetBounds($M, $y, $inner, (Px 16))
+    $y += Px 24
+    $btnW = Px 128
+    $ui.GetButton.SetBounds(($M + $inner - $btnW), ($y - (Px 4)), $btnW, (Px 32))
+    $textW = $inner - $btnW - (Px 16)
+    $ui.BuildTitle.SetBounds($M, $y, $textW, (Px 22))
+    $y += Px 24
+    Set-WrappedLabel $ui.BuildMeta $M $y $textW
+    $y += $ui.BuildMeta.Height
+    # Keep clear of the button even when the details text is short.
+    $y = [math]::Max($y, $ui.GetButton.Bottom)
+    $ui.Notice.Visible = $script:NoticeShown
+    if ($script:NoticeShown) {
+        $y += Px 8
+        Set-WrappedLabel $ui.Notice $M $y $inner
+        $y += $ui.Notice.Height
+    }
+    $y += Px 16
+    $ui.MidLine.SetBounds($M, $y, $inner, 1)
+    $y += Px 16
+
+    # Upload section
+    $ui.UploadLabel.SetBounds($M, $y, $inner, (Px 16))
+    $y += Px 24
+    $slotW = Px 96
+    $nameX = $M + $slotW + (Px 16)
+    $nameW = $M + $inner - $nameX
+    $ui.SlotLabel.SetBounds($M, $y, $slotW, (Px 18))
+    $ui.NameLabel.SetBounds($nameX, $y, $nameW, (Px 18))
+    $y += Px 22
+    # A drop-down list sets its own height from the font; match the text box to it.
+    $ui.SlotBox.SetBounds($M, $y, $slotW, $ui.SlotBox.Height)
+    $inputH = $ui.SlotBox.Height
+    $ui.NameBox.SetBounds($nameX, $y, $nameW, $inputH)
+    $y += $inputH
+    $ui.NameError.Visible = $script:NameErrorShown
+    if ($script:NameErrorShown) {
+        $y += Px 4
+        Set-WrappedLabel $ui.NameError $nameX $y $nameW
+        $y += $ui.NameError.Height
+    }
+    $y += Px 16
+    $ui.UploadButton.SetBounds($M, $y, $inner, (Px 48))
+    $y += Px 48
+
+    # Connection row
+    $y += Px 16
+    $rowH = Px 20
+    $dot = Px 10
+    $ui.Dot.SetBounds($M, ($y + [int](($rowH - $dot) / 2)), $dot, $dot)
+    $ui.ConnLabel.SetBounds(($M + $dot + (Px 8)), $y, ($inner - $dot - (Px 8)), $rowH)
+    $y += $rowH
+
+    # Status line
+    $hasStatus = [bool]$ui.Status.Text
+    $ui.Status.Visible = $hasStatus
+    if ($hasStatus) {
+        $y += Px 8
+        Set-WrappedLabel $ui.Status $M $y $inner
+        $y += $ui.Status.Height
+    }
+
+    # Details
+    $y += Px 12
+    $ui.DetailsLink.Location = New-Object System.Drawing.Point($M, $y)
+    $y += $ui.DetailsLink.PreferredSize.Height
+    $ui.Log.Visible = $script:DetailsShown
+    if ($script:DetailsShown) {
+        $y += Px 8
+        $ui.Log.SetBounds($M, $y, $inner, (Px 176))
+        $y += Px 176
+    }
+    $y += Px 16
+
+    $size = New-Object System.Drawing.Size($W, $y)
+    if ($form.ClientSize -ne $size) { $form.ClientSize = $size }
+    $form.ResumeLayout($false)
+}
+
+# ---------------------------------------------------------------------------
+# Screen updates (UI thread only)
+# ---------------------------------------------------------------------------
+$script:Busy = $false
+$script:BusyKind = ''
+$script:BusyStarted = Get-Date
+$script:BusyMessage = ''
+$script:LastElapsed = -1
+$script:LsusbRunning = $false
+$script:InstalledTag = ''
+$script:LatestTag = ''
+$script:UploadSlot = 1
+$script:ProsExe = $null
+$script:Jobs = New-Object System.Collections.ArrayList
+$script:Pool = $null
+# Shared with background threads: Log = lines for the Details box,
+# Procs = every pros.exe that is running right now (process id -> Process).
+$script:Sync = [hashtable]::Synchronized(@{
+    Log   = (New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]')
+    Procs = [hashtable]::Synchronized(@{})
+})
+
+# Runs a handler and turns any error into a status message instead of a crash.
+function Invoke-Safe {
+    param([scriptblock]$Action)
+    try {
+        & $Action
+    } catch {
+        try {
+            Set-Status ('Something went wrong: ' + $_.Exception.Message) 'error'
+            Add-LogText ('Error: ' + ($_ | Out-String))
+        } catch { }
+    }
+}
+
+function Set-Status {
+    param([string]$Text, [string]$Kind = 'info')
+    $c = $script:Colors
+    $color = $c.Text
+    if ($Kind -eq 'success') { $color = $c.Good }
+    if ($Kind -eq 'error') { $color = $c.Bad }
+    if ($Kind -eq 'working') { $color = $c.Muted }
+    $script:Ui.Status.ForeColor = $color
+    if ($script:Ui.Status.Text -ne $Text) {
+        $script:Ui.Status.Text = $Text
+        Update-Layout
+    }
+}
+
+function Add-LogText {
+    param([string]$Text)
+    $log = $script:Ui.Log
+    if ($log.TextLength -gt 200000) { $log.Text = $log.Text.Substring($log.TextLength - 100000) }
+    $clean = $Text -replace "`r?`n", "`r`n"
+    if (-not $clean.EndsWith("`r`n")) { $clean += "`r`n" }
+    $log.AppendText($clean)
+}
+
+function Set-DetailsVisible {
+    param([bool]$Show)
+    $script:DetailsShown = $Show
+    if ($Show) { $script:Ui.DetailsLink.Text = 'Hide details' } else { $script:Ui.DetailsLink.Text = 'Show details' }
+    Update-Layout
+}
+
+# Program names: start with a letter or number, then letters, numbers, spaces,
+# underscores, periods, or hyphens, 20 characters max. PROS itself allows a bit
+# more, but these are always safe on the brain screen and on the command line
+# (a name starting with "-" would look like an option to PROS).
+function Test-ProgramName {
+    param([string]$Name)
+    return ($Name -cmatch '^[A-Za-z0-9][A-Za-z0-9 _.\-]{0,19}\z')
+}
+
+# Shows or hides the small red message under the program name box.
+function Update-NameError {
+    $name = $script:Ui.NameBox.Text.Trim()
+    $bad = -not (Test-ProgramName $name)
+    if ($bad) {
+        if (-not $name) {
+            $script:Ui.NameError.Text = 'Enter a program name.'
+        } else {
+            $script:Ui.NameError.Text = 'Use letters, numbers, spaces, - _ or . (20 max), starting with a letter or number.'
+        }
+    }
+    $script:NameErrorShown = $bad
+    Update-Layout
+}
+
+# Closing time: kill every pros.exe we started, stop background jobs, and close
+# the runspace pool. Each wait is capped so closing never hangs.
+function Stop-Background {
+    $procs = $script:Sync.Procs
+    $ids = @()
+    [System.Threading.Monitor]::Enter($procs.SyncRoot)
+    try { $ids = @($procs.Keys) } finally { [System.Threading.Monitor]::Exit($procs.SyncRoot) }
+    foreach ($id in $ids) {
+        $p = $procs[$id]
+        if ($null -eq $p) { continue }
+        try { if (-not $p.HasExited) { $p.Kill() } } catch { }
+        try { [void]$p.WaitForExit(3000) } catch { }
+        try { $p.Dispose() } catch { }
+        $procs.Remove($id)
+    }
+    foreach ($job in @($script:Jobs)) {
+        try {
+            $h = $job.PS.BeginStop($null, $null)
+            [void]$h.AsyncWaitHandle.WaitOne(2000)
+        } catch { }
+        try { $job.PS.Dispose() } catch { }
+    }
+    $script:Jobs.Clear()
+    if ($null -ne $script:Pool) {
+        try {
+            $h = $script:Pool.BeginClose($null, $null)
+            [void]$h.AsyncWaitHandle.WaitOne(3000)
+        } catch { }
+        try { $script:Pool.Dispose() } catch { }
+        $script:Pool = $null
+    }
+}
+
+function Set-Busy {
+    param([bool]$On, [string]$Kind = '', [string]$Message = '')
+    $ui = $script:Ui
+    $script:Busy = $On
+    $script:BusyKind = $Kind
+    $script:BusyMessage = $Message
+    $script:BusyStarted = Get-Date
+    $script:LastElapsed = -1
+    foreach ($ctl in @($ui.GetButton, $ui.UploadButton, $ui.SlotBox, $ui.NameBox)) { $ctl.Enabled = -not $On }
+    if ($On -and ($Kind -eq 'upload')) { $ui.UploadButton.Text = 'Uploading...' } else { $ui.UploadButton.Text = 'Upload to robot' }
+    if ($On -and ($Kind -eq 'download')) { $ui.GetButton.Text = 'Downloading...' } else { $ui.GetButton.Text = 'Get latest code' }
+    if ($On) { Set-Status $Message 'working' }
+}
+
+function Set-Connection {
+    param([string]$State)
+    $c = $script:Colors
+    $ui = $script:Ui
+    $color = $c.Idle
+    $text = 'No brain found'
+    if ($State -eq 'brain') { $color = $c.Good; $text = 'Brain connected' }
+    elseif ($State -eq 'controller') { $color = $c.Warn; $text = 'Controller connected (uploads go over radio, slower)' }
+    elseif ($State -eq 'multiple') { $color = $c.Warn; $text = 'More than one VEX device plugged in' }
+    elseif ($State -eq 'unknown') { $text = 'Connection status unavailable' }
+    $ui.Dot.Tag = $color
+    $ui.Dot.Invalidate()
+    $ui.ConnLabel.Text = $text
+    if ($State -eq 'brain') { $ui.ConnLabel.ForeColor = $c.Text } else { $ui.ConnLabel.ForeColor = $c.Muted }
+}
+
+# Shows what is downloaded, from version.json.
+function Update-BuildInfo {
+    $ui = $script:Ui
+    $b = Get-InstalledBuild
+    if (($null -eq $b) -or (-not (Test-HaveCode))) {
+        $script:InstalledTag = ''
+        $ui.BuildTitle.Text = 'No robot code downloaded yet'
+        $ui.BuildMeta.Text = 'Click Get latest code to download it.'
+    } else {
+        $script:InstalledTag = [string]$b.tag
+        $parts = Split-ReleaseNotes ([string]$b.notes)
+        $title = $parts.Subject
+        if (-not $title) { $title = [string]$b.name }
+        if (-not $title) { $title = 'Build ' + $b.tag }
+        $ui.BuildTitle.Text = $title
+        $meta = 'Build ' + $b.tag
+        if ($parts.Sha) { $meta += ', commit ' + $parts.Sha }
+        $when = Format-BuildDate ([string]$b.published_at)
+        if ($when) { $meta += "`n" + 'Published ' + $when }
+        $ui.BuildMeta.Text = $meta
+    }
+    Update-Notice
+}
+
+function Update-Notice {
+    $show = [bool]($script:LatestTag -and ($script:LatestTag -ne $script:InstalledTag) -and $script:InstalledTag)
+    if ($show) {
+        $script:Ui.Notice.Text = 'Newer code is available (' + $script:LatestTag + '). Click Get latest code to download it.'
+    }
+    $script:NoticeShown = $show
+    Update-Layout
+}
+
+# ---------------------------------------------------------------------------
+# Background jobs
+# ---------------------------------------------------------------------------
+
+# Starts $Body on a background thread. When it finishes, Update-Jobs (on the
+# UI thread) calls $OnDone with the result.
+function Start-BgJob {
+    param([scriptblock]$Body, [hashtable]$JobArgs, [scriptblock]$OnDone)
+    if ($null -eq $script:Pool) {
+        $script:Pool = [runspacefactory]::CreateRunspacePool(1, 4)
+        $script:Pool.Open()
+    }
+    # Each job gets the shared functions plus its own body, as plain text, so
+    # nothing from the UI thread leaks onto the background thread.
+    $code = 'param($Sync, $A)' + "`n" + $SharedCode.ToString() + "`n" + $Body.ToString()
+    $ps = [powershell]::Create()
+    $ps.RunspacePool = $script:Pool
+    [void]$ps.AddScript($code).AddArgument($script:Sync).AddArgument($JobArgs)
+    $handle = $ps.BeginInvoke()
+    [void]$script:Jobs.Add(@{ PS = $ps; Handle = $handle; OnDone = $OnDone })
+}
+
+# Called every 100 ms by JobTimer (UI thread).
+function Update-Jobs {
+    # 1. Move new log lines from the background queue into the Details box.
+    $line = $null
+    $sb = New-Object System.Text.StringBuilder
+    while ($script:Sync.Log.TryDequeue([ref]$line)) { [void]$sb.AppendLine($line) }
+    if ($sb.Length -gt 0) { Add-LogText $sb.ToString() }
+
+    # 2. Show elapsed time while busy so it is clear the app is still working.
+    if ($script:Busy) {
+        $secs = [int]((Get-Date) - $script:BusyStarted).TotalSeconds
+        if ($secs -ne $script:LastElapsed) {
+            $script:LastElapsed = $secs
+            Set-Status ($script:BusyMessage + ' (' + $secs + ' s)') 'working'
+        }
+    }
+
+    # 3. Finish any background job that is done.
+    foreach ($job in @($script:Jobs)) {
+        if (-not $job.Handle.IsCompleted) { continue }
+        [void]$script:Jobs.Remove($job)
+        $result = $null
+        try {
+            $out = $job.PS.EndInvoke($job.Handle)
+            if ($out.Count -gt 0) { $result = $out[$out.Count - 1] }
+            if (($null -eq $result) -and ($job.PS.Streams.Error.Count -gt 0)) {
+                $result = @{ Status = 'error'; Error = [string]$job.PS.Streams.Error[0] }
+            }
+        } catch {
+            $result = @{ Status = 'error'; Error = $_.Exception.Message }
+        } finally {
+            $job.PS.Dispose()
+        }
+        if ($null -eq $result) { $result = @{ Status = 'error'; Error = 'The background task returned nothing.' } }
+        Invoke-Safe { & $job.OnDone $result }
+    }
+}
+
+# Checks for a plugged-in brain. Only while idle, one check at a time.
+function Start-ConnectionCheck {
+    if ($script:Busy -or $script:LsusbRunning -or (-not $script:ProsExe)) { return }
+    $script:LsusbRunning = $true
+    Start-BgJob $LsusbBody @{ ProsExe = $script:ProsExe; WorkDir = $InstallDir } {
+        param($r)
+        $script:LsusbRunning = $false
+        if ($r.StartError -or $r.TimedOut -or $r.Error) { Set-Connection 'unknown'; return }
+        Set-Connection (Get-BrainState ([string]$r.Output))
+    }
+}
+
+# Quietly asks GitHub whether newer code exists (on launch).
+function Start-ReleaseCheck {
+    Start-BgJob $CheckBody @{ ApiUrl = $script:ApiUrl } {
+        param($r)
+        if ($r.Status -eq 'ok') {
+            $script:LatestTag = [string]$r.Release.Tag
+            Update-Notice
+        }
+    }
+}
+
+function Start-Download {
+    if ($script:Busy) { return }
+    Set-Busy $true 'download' 'Downloading the latest robot code...'
+    Add-LogText ('[' + (Get-Date).ToString('HH:mm:ss') + '] Checking GitHub for the latest robot code')
+    $jobArgs = @{
+        ApiUrl       = $script:ApiUrl
+        InstallDir   = $InstallDir
+        AssetNames   = $script:AssetNames
+        InstalledTag = $script:InstalledTag
+    }
+    Start-BgJob $DownloadBody $jobArgs {
+        param($r)
+        Set-Busy $false
+        if ($r.Release) { $script:LatestTag = [string]$r.Release.Tag }
+        Update-BuildInfo
+        switch ([string]$r.Status) {
+            'downloaded' { Set-Status ('Downloaded build ' + $r.Release.Tag + '. Ready to upload.') 'success' }
+            'current'    { Set-Status 'You already have the latest code.' 'info' }
+            'none'       { Set-Status 'No robot code published yet. Ask the programmer to push code, then click Get latest code.' 'info' }
+            'offline'    { Set-Status 'No internet connection. Connect to Wi-Fi and click Get latest code. You can still upload the code you already have.' 'error' }
+            default      { Set-Status ('Could not download the code. ' + [string]$r.Error) 'error' }
+        }
+        if ($r.Error) { Add-LogText ('Download: ' + [string]$r.Error) }
+        Start-ConnectionCheck
+    }
+}
+
+function Start-Upload {
+    if ($script:Busy) { return }
+    if (-not $script:ProsExe) {
+        Set-Status 'The PROS uploader is missing. Run the install command again.' 'error'
+        return
+    }
+    if (-not (Test-HaveCode)) {
+        Set-Status 'No robot code downloaded yet. Click Get latest code first.' 'error'
+        return
+    }
+    # Check the program name first and explain any problem next to the box.
+    $name = $script:Ui.NameBox.Text.Trim()
+    if (-not (Test-ProgramName $name)) {
+        Update-NameError
+        Set-Status 'Fix the program name, then click Upload to robot.' 'error'
+        [void]$script:Ui.NameBox.Focus()
+        return
+    }
+    $script:UploadSlot = [int]$script:Ui.SlotBox.SelectedItem
+
+    Set-Busy $true 'upload' ('Uploading to slot ' + $script:UploadSlot + '. Keep the cable plugged in.')
+    Add-LogText ('[' + (Get-Date).ToString('HH:mm:ss') + '] Uploading ' + $script:InstalledTag + ' to slot ' + $script:UploadSlot)
+    $jobArgs = @{
+        ProsExe    = $script:ProsExe
+        ProjectDir = $script:ProjectDir
+        Slot       = $script:UploadSlot
+        Name       = $name
+        Timeout    = $script:UploadTimeoutSec
+    }
+    Start-BgJob $UploadBody $jobArgs {
+        param($r)
+        Set-Busy $false
+        $outcome = Get-UploadOutcome -Run $r -Slot $script:UploadSlot
+        if ($outcome.Ok) {
+            Set-Status $outcome.Message 'success'
+        } else {
+            Set-Status $outcome.Message 'error'
+            if ($outcome.Detail -and ($outcome.Kind -eq 'NoPros')) { Add-LogText $outcome.Detail }
+            if ($outcome.Kind -eq 'Failed') { Set-DetailsVisible $true }
+        }
+        Start-ConnectionCheck
+    }
+}
+
+# Runs once, right after the window appears.
+function Start-App {
+    $script:ProsExe = Find-ProsExe
+    Update-BuildInfo
+    $script:Ui.JobTimer.Start()
+    $script:Ui.PollTimer.Start()
+    if (-not $script:ProsExe) {
+        Set-Connection 'unknown'
+        Set-Status 'The PROS uploader is missing. Run the install command again.' 'error'
+    } else {
+        Start-ConnectionCheck
+    }
+    if (-not (Test-HaveCode)) {
+        # First launch: grab the code automatically.
+        Start-Download
+    } else {
+        Set-Status 'Ready. Plug the USB cable into the brain, then click Upload to robot.' 'info'
+        Start-ReleaseCheck
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Start up
+# ---------------------------------------------------------------------------
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+# Sharp text on high-DPI screens. Without this, Windows stretches a blurry
+# 96 DPI picture of the window.
+try {
+    if (-not ('Scourge.NativeMethods' -as [type])) {
+        Add-Type -Namespace Scourge -Name NativeMethods -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetProcessDPIAware();'
+    }
+    [void][Scourge.NativeMethods]::SetProcessDPIAware()
+} catch { }
+[System.Windows.Forms.Application]::EnableVisualStyles()
+try { [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false) } catch { }
+
+Initialize-Theme
+
+if ($SelfTest) {
+    # No window is shown here. Each check adds to $failures if it goes wrong.
+    $failures = New-Object System.Collections.Generic.List[string]
+    Write-Host ('Scourge Uploader self-test (install dir: ' + $InstallDir + ')')
+
+    # 1. Build the whole window (catches WinForms mistakes) and fill it in.
+    try {
+        $testForm = New-MainForm
+        Update-BuildInfo
+        Set-Connection 'none'
+        Set-Status 'Self-test' 'info'
+        Set-DetailsVisible $true
+        # CI only: save a picture of the window so its layout can be checked without a Windows PC.
+        if ($env:SCOURGE_SCREENSHOT) {
+            # Child controls only paint once the window has really been shown.
+            $testForm.Show()
+            [System.Windows.Forms.Application]::DoEvents()
+            $testForm.Refresh()
+            $bmp = New-Object System.Drawing.Bitmap $testForm.Width, $testForm.Height
+            $testForm.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle 0, 0, $testForm.Width, $testForm.Height))
+            $bmp.Save($env:SCOURGE_SCREENSHOT, [System.Drawing.Imaging.ImageFormat]::Png)
+            $bmp.Dispose()
+            Write-Host ('  Screenshot saved: ' + $env:SCOURGE_SCREENSHOT)
+            $testForm.Hide()
+        }
+        Set-DetailsVisible $false
+        $testForm.Dispose()
+        Write-Host '  Window build: OK'
+    } catch {
+        $failures.Add('window build failed: ' + $_.Exception.Message)
+        Write-Host ('  Window build: FAIL (' + $_.Exception.Message + ')')
+    }
+
+    # 2. PROS runs and reports its version.
+    $exe = Find-ProsExe
+    if (-not $exe) {
+        $failures.Add('pros.exe not found under ' + $script:ProsDir)
+        Write-Host '  pros --version: FAIL (pros.exe not found)'
+    } else {
+        $v = Invoke-Pros -ProsExe $exe -Arguments '--version' -WorkDir $InstallDir -TimeoutSec 120
+        if (($v.ExitCode -eq 0) -and ($v.Output -match 'version')) {
+            Write-Host ('  pros --version: OK (' + ($v.Output -split "`n" | Where-Object { $_ -match 'version' } | Select-Object -First 1) + ')')
+        } else {
+            $failures.Add('pros --version failed (exit ' + $v.ExitCode + '): ' + $v.StartError + ' ' + $v.Output)
+            Write-Host ('  pros --version: FAIL (exit ' + $v.ExitCode + ')')
+        }
+
+        # 3. USB scan (information only, CI has no robot).
+        $ls = Invoke-Pros -ProsExe $exe -Arguments 'lsusb --target v5 --no-analytics --no-sentry' -WorkDir $InstallDir -TimeoutSec 120
+        Write-Host ('  pros lsusb: exit ' + $ls.ExitCode + ', brain state = ' + (Get-BrainState $ls.Output))
+
+        # 3b. CI only: download the latest release the same way a first launch does.
+        if ($env:SCOURGE_SELFTEST_DOWNLOAD -eq '1') {
+            $dl = Save-LatestRelease -ApiUrl $script:ApiUrl -InstallDir $InstallDir -AssetNames $script:AssetNames -InstalledTag $script:InstalledTag
+            if (@('downloaded', 'current') -contains [string]$dl.Status) {
+                Write-Host ('  Download: OK (' + $dl.Release.Tag + ')')
+            } else {
+                $failures.Add('download status ' + $dl.Status + ': ' + $dl.Error)
+                Write-Host ('  Download: FAIL (' + $dl.Status + ': ' + $dl.Error + ')')
+            }
+        }
+
+        # 4. Real upload, if code has been downloaded. "No brain found" is a
+        #    pass here because it proves PROS read the project and looked for a brain.
+        if (Test-Path (Join-Path $script:BinDir 'hot.package.bin')) {
+            $run = Invoke-RobotUpload -ProsExe $exe -ProjectDir $script:ProjectDir -Slot 1 -Name 'Scourge' -TimeoutSec $script:UploadTimeoutSec -Sync $script:Sync
+            $outcome = Get-UploadOutcome -Run $run -Slot 1
+            if ($outcome.Ok -or ($outcome.Kind -eq 'NoBrain')) {
+                Write-Host ('  Upload: PASS (' + $outcome.Kind + ': ' + $outcome.Message + ')')
+            } else {
+                $failures.Add('upload outcome ' + $outcome.Kind + ': ' + $outcome.Message)
+                Write-Host ('  Upload: FAIL (' + $outcome.Kind + ': ' + $outcome.Message + ')')
+                Write-Host '  PROS output:'
+                foreach ($l in ($run.Output -split "`n")) { Write-Host ('    ' + $l) }
+            }
+        } else {
+            Write-Host '  Upload: skipped (no project\bin\hot.package.bin downloaded)'
+        }
+    }
+
+    if ($failures.Count -eq 0) {
+        Write-Host 'SELFTEST PASS'
+        exit 0
+    }
+    Write-Host ('SELFTEST FAIL: ' + ($failures -join '; '))
+    exit 1
+}
+
+# Normal mode: show the window and run until it is closed.
+$mainForm = New-MainForm
+[System.Windows.Forms.Application]::Run($mainForm)
+# FormClosing already cleaned up; running it again is harmless and covers any
+# other way the window might have closed.
+Stop-Background
+# End the process right away so no background thread keeps it alive.
+[Environment]::Exit(0)

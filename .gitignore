@@ -1,0 +1,6 @@
+.DS_Store
+# AI instruction files never go in this repo
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+.claude/

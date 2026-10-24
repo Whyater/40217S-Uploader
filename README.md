@@ -35,12 +35,12 @@ Do this before driving, so a wrongly wired motor shows up on a screen instead of
 1. Put the robot flat on the floor, not on a stand, with about 2 feet of open space on every side.
 2. Turn on the controller and run the program from the brain. Do not touch the robot for 3 seconds while its sensors calibrate.
 3. Tap the left or right button at the bottom of the brain screen until the selected auton reads **Check: drive + sensors**.
-4. Press **D-pad Left** on the controller. The robot turns a little one way, then the other, rolls forward a few inches, and backs up. Press **D-pad Down** at any time to stop it.
+4. Press **D-pad Down** on the controller to start. The robot turns a little one way, then the other, rolls forward a few inches, and backs up. Press **D-pad Down** again at any time to stop it.
 5. Take a photo of the brain screen and the controller screen and send it to the programmer.
 
 Each line reads OK, REVERSED, NO TURN, or NOT TURNING. Only drive with the sticks once both **Left** and **Right** say OK.
 
-**D-pad Left** and **D-pad Down** only start and stop tests when the robot is not plugged into a field or competition switch.
+**D-pad Down** only starts and stops tests when the robot is not plugged into a field or competition switch.
 
 ## Controls
 
@@ -57,9 +57,14 @@ Each line reads OK, REVERSED, NO TURN, or NOT TURNING. Only drive with the stick
 | B | Lift down one level |
 | A | Reset: open the claw and lower the lift to the bottom |
 | D-pad Up | Tilt the claw down (only with the lift at the bottom) |
+| D-pad Left | Close the claw |
 | Y | Open the claw |
 
 If the claw is tilted down when you press a lift up button, the robot closes the claw and lifts it off the floor. Then it tilts the claw up and goes to the first level.
+
+The claw also closes on its own when a Pin or Cup is right inside it. Press **Y** to open it again.
+
+Before each match, press the middle button under the brain screen until line 3 shows our alliance color (**RED** or **BLUE**). If it still says to pick one, the toggles will not spin on their own.
 
 The lift heights are not set yet. Until the programmer measures them, the lift buttons only go a short way. Start the program with the lift all the way down.
 

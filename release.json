@@ -1,0 +1,11 @@
+{
+  "tag": "build-11-be188dc",
+  "title": "Build 11 (be188dc)",
+  "notes": "Built from robot code commit be188dc",
+  "built_at": "2026-10-24T00:43:45Z",
+  "sha256": {
+    "hot.package.bin": "70b01084409aa2b2dabce278dc4006d068ed78fed1866d880c22f45054303e4d",
+    "cold.package.bin": "b28fcf607e274ac602351fa15b6dec116d64da9863784c7d623d07cbca4e31ad",
+    "project.pros": "3334ee11d05552c44076bd6a7b41db6058a44761af0fd01a6d67eedcc6868294"
+  }
+}

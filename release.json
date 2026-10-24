@@ -1,0 +1,11 @@
+{
+  "tag": "build-12-13a2883",
+  "title": "Build 12 (13a2883)",
+  "notes": "Built from robot code commit 13a2883",
+  "built_at": "2026-10-24T06:35:58Z",
+  "sha256": {
+    "hot.package.bin": "3a6e0fd61c4ae0558c0852d4f5ca675484cdba9963f16bb2971a00bc991e0d62",
+    "cold.package.bin": "b28fcf607e274ac602351fa15b6dec116d64da9863784c7d623d07cbca4e31ad",
+    "project.pros": "3334ee11d05552c44076bd6a7b41db6058a44761af0fd01a6d67eedcc6868294"
+  }
+}

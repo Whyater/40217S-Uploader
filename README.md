@@ -52,17 +52,17 @@ Each line reads OK, REVERSED, NO TURN, or NOT TURNING. Only drive with the stick
 | R2 (hold) | Intake out |
 | L1 (hold) | Roller |
 | L2 (hold) | Lift down |
-| X | Lift up one Pin level (alliance goals) |
+| Y | Lift up one Pin level (alliance goals) |
 | D-pad Right | Lift up one Pin level (neutral goals) |
-| B | Lift down one level |
-| A | Reset: open the claw and lower the lift to the bottom |
-| D-pad Up | Tilt the claw down (only with the lift at the bottom) |
-| D-pad Left | Close the claw |
-| Y | Open the claw |
+| A | Lift down one level |
+| B | Reset: open the claw and lower the lift to the bottom |
+| D-pad Up | Tilt the claw down (only with the lift at the bottom). If the claw is closed and empty, it opens first |
+| D-pad Left | Open or close the claw (switches each press) |
+| X | Open the claw |
 
 If the claw is tilted down when you press a lift up button, the robot closes the claw and lifts it off the floor. Then it tilts the claw up and goes to the first level.
 
-The claw also closes on its own when a Pin or Cup is right inside it. Press **Y** to open it again.
+The claw also closes on its own when a Pin or Cup is right inside it. Press **X** or **D-pad Left** to open it again. D-pad Up does nothing while there's a Pin in the claw, so it can't drop one by accident.
 
 Before each match, press the middle button under the brain screen until line 3 shows our alliance color (**RED** or **BLUE**). If it still says to pick one, the toggles will not spin on their own.
 

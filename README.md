@@ -23,6 +23,16 @@ Uploader version 2.0.0 can update itself. To get it, run the install line above 
 
 After that, clicking **Get latest code** also updates the uploader whenever a newer one is published. It downloads the new version, checks its fingerprint, restarts, and then gets the code. If the update check fails, the code download still works.
 
+## On a Mac
+
+There is a Mac version with the same features (uploading, Robot tests, and self-update). It needs an Apple silicon Mac on macOS 26 or later, and the PROS extension installed in VS Code.
+
+1. Download `ScourgeUploader-mac.zip` from the [Mac uploader release](https://github.com/Whyater/40217S-Uploader/releases/tag/mac-uploader-1.1.0) and double-click it.
+2. Drag **Scourge Uploader** into your Applications folder and open it.
+3. The first time, macOS may say it can't check the app. Open **System Settings > Privacy & Security**, scroll down, and click **Open Anyway**.
+
+After that, clicking **Get Latest** also updates the Mac app when a newer one is published. On a Mac, buttons use title case (**Get Latest**, **Upload to Robot**, **Put Tester on Robot**), and **Robot Tests** is a section you open below the status line.
+
 ## Upload (every time)
 
 1. Plug a USB data cable into the **brain** (not the controller) and turn the brain on.

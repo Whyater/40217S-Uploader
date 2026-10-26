@@ -2,8 +2,10 @@
 #
 # How it works, in plain terms:
 #   * The programmer pushes code to GitHub. A GitHub Action builds it and posts a
-#     "release" with three files: hot.package.bin, cold.package.bin, project.pros.
-#   * This app downloads those three files into <InstallDir>\project.
+#     "release" with three core files: hot.package.bin, cold.package.bin,
+#     project.pros. Newer releases may also carry the three Scourge Tester files.
+#   * This app downloads the core files into <InstallDir>\project and tester
+#     files into <InstallDir>\project\tester when they are present.
 #   * When you click "Upload to robot", the app runs the official PROS tool
 #     (pros.exe upload ...) in that folder. PROS sends the files over USB.
 #
@@ -28,7 +30,8 @@
 
 param(
     [switch]$SelfTest,
-    [string]$InstallDir = ''
+    [string]$InstallDir = '',
+    [switch]$AfterUpdate
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,6 +49,10 @@ if (-not $InstallDir) {
 #   <ReleasesUrl>/latest/download/release.json and <ReleasesUrl>/download/<tag>/<file>
 $script:ReleasesUrl = 'https://github.com/Whyater/40217S-Uploader/releases'
 $script:AssetNames = @('hot.package.bin', 'cold.package.bin', 'project.pros')
+$script:TesterAssetNames = @('tester-hot.package.bin', 'tester-cold.package.bin', 'tester-project.pros')
+$script:UploaderVersion = '2.0.0'
+$script:UploaderScriptPath = $PSCommandPath
+$script:UploaderManifestUrl = 'https://raw.githubusercontent.com/Whyater/40217S-Uploader/main/uploader.json'
 $script:ProjectDir = Join-Path $InstallDir 'project'
 $script:BinDir     = Join-Path $script:ProjectDir 'bin'
 $script:VersionFile = Join-Path $InstallDir 'version.json'
@@ -66,6 +73,18 @@ $SharedCode = {
     function Add-SharedLog {
         param($Sync, [string]$Line)
         if ($null -ne $Sync) { $Sync.Log.Enqueue($Line) }
+    }
+
+    function Get-ReleaseAssetPath {
+        param([string]$Root, [string]$AssetName)
+        $assetRoot = $Root
+        $fileName = $AssetName
+        if ($AssetName -like 'tester-*') {
+            $assetRoot = Join-Path $Root 'tester'
+            $fileName = $AssetName.Substring(7)
+        }
+        if ($fileName -eq 'project.pros') { return Join-Path $assetRoot $fileName }
+        return Join-Path $assetRoot ('bin\' + $fileName)
     }
 
     # Run pros.exe and collect what it prints.
@@ -211,6 +230,96 @@ $SharedCode = {
         return Invoke-Pros -ProsExe $ProsExe -Arguments $arguments -WorkDir $ProjectDir -TimeoutSec $TimeoutSec -StdinText "y`ny`ny`n" -Sync $Sync
     }
 
+    function Invoke-ProsRecording {
+        param([string]$ProsExe, [string]$WorkDir, [string]$FilePath, $Sync)
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $ProsExe
+        $psi.Arguments = 'terminal --no-banner --no-analytics --no-sentry'
+        $psi.WorkingDirectory = $WorkDir
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+        $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+        $psi.EnvironmentVariables['PYTHONUNBUFFERED'] = '1'
+        $psi.EnvironmentVariables['PYTHONIOENCODING'] = 'utf-8'
+        $proc = New-Object System.Diagnostics.Process
+        $proc.StartInfo = $psi
+        try { [void]$proc.Start() } catch { return @{ Status = 'error'; Error = $_.Exception.Message } }
+        $id = $proc.Id
+        $Sync.Procs[$id] = $proc
+        $writer = $null
+        $stderrLines = New-Object 'System.Collections.Generic.Queue[string]'
+        $requestedStop = $false
+        $exitCode = -1
+        try {
+            $parent = Split-Path $FilePath -Parent
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+            $writer = New-Object System.IO.StreamWriter($FilePath, $false, (New-Object System.Text.UTF8Encoding($false)))
+            $writer.WriteLine('kind,test,key,value,unit')
+            $writer.Flush()
+            $outTask = $proc.StandardOutput.ReadLineAsync()
+            $errTask = $proc.StandardError.ReadLineAsync()
+            while (-not $Sync.RecordStop) {
+                $didRead = $false
+                foreach ($stream in @('out', 'err')) {
+                    $task = if ($stream -eq 'out') { $outTask } else { $errTask }
+                    if (($null -ne $task) -and $task.Wait(50)) {
+                        $line = $task.Result
+                        if ($stream -eq 'out') { if ($null -eq $line) { $outTask = $null } else { $outTask = $proc.StandardOutput.ReadLineAsync() } }
+                        else { if ($null -eq $line) { $errTask = $null } else { $errTask = $proc.StandardError.ReadLineAsync() } }
+                        if ($null -ne $line) {
+                            if ($stream -eq 'err') {
+                                $stderrLines.Enqueue([string]$line)
+                                Add-SharedLog $Sync ('[pros] ' + [string]$line)
+                            }
+                            $match = [regex]::Match([string]$line, 'SCOURGE,.*$')
+                            if ($match.Success) {
+                                $clean = $match.Value.Trim()
+                                $writer.WriteLine($clean)
+                                $writer.Flush()
+                                $parts = $clean.Split(',')
+                                if (($parts.Count -ge 3) -and ($parts[1] -notin @('BEGIN', 'END', 'HELLO'))) {
+                                    $Sync.RecordValues = [int]$Sync.RecordValues + 1
+                                    [void]$Sync.RecordTests.TryAdd([string]$parts[1], $true)
+                                } elseif (($parts.Count -ge 3) -and ($parts[1] -eq 'BEGIN')) {
+                                    [void]$Sync.RecordTests.TryAdd([string]$parts[2], $true)
+                                }
+                            }
+                        }
+                        $didRead = $true
+                    }
+                }
+                if ((-not $didRead) -and $proc.HasExited -and ($null -eq $outTask) -and ($null -eq $errTask)) { break }
+            }
+        } finally {
+            $requestedStop = [bool]$Sync.RecordStop
+            try { if (-not $proc.HasExited) { $proc.Kill(); [void]$proc.WaitForExit(3000) } } catch { }
+            try { if ($proc.HasExited) { $exitCode = $proc.ExitCode } } catch { }
+            if ($null -ne $writer) { try { $writer.Close() } catch { } }
+            $Sync.Procs.Remove($id)
+            try { $proc.Dispose() } catch { }
+        }
+        $stderr = ($stderrLines.ToArray() -join "`n")
+        if ((-not $requestedStop) -and ($exitCode -ne 0)) {
+            if (-not $stderr) { $stderr = 'pros terminal exited with code ' + $exitCode + '.' }
+            return @{ Status = 'error'; ExitCode = $exitCode; Error = $stderr; FilePath = $FilePath }
+        }
+        return @{ Status = 'stopped'; ExitCode = $exitCode; Error = $stderr; FilePath = $FilePath }
+    }
+
+    function Get-FileSha256 {
+        param([string]$Path)
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $bytes = [System.IO.File]::ReadAllBytes($Path)
+            return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $sha.Dispose()
+        }
+    }
+
     # Turn PROS output into a plain-English result.
     # Returns @{ Ok; Kind; Message; Detail }.
     function Get-UploadOutcome {
@@ -341,20 +450,75 @@ $SharedCode = {
         }
     }
 
+    function Get-RemoteUploaderManifest {
+        param([string]$ManifestUrl)
+        $tmp = [System.IO.Path]::GetTempFileName()
+        try {
+            try {
+                Invoke-WebRequest -Uri ($ManifestUrl + '?t=' + [DateTime]::UtcNow.Ticks) -OutFile $tmp -UseBasicParsing -TimeoutSec 20
+                $m = [System.IO.File]::ReadAllText($tmp, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+            } catch {
+                return @{ Status = 'offline'; Error = $_.Exception.Message }
+            }
+        } finally {
+            Remove-Item -Path $tmp -Force -ErrorAction SilentlyContinue
+        }
+        $version = [string]$m.version
+        $hash = ([string]$m.sha256).ToLowerInvariant()
+        if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') { return @{ Status = 'error'; Error = 'The uploader manifest has an invalid version.' } }
+        if ($hash -notmatch '^[0-9a-f]{64}$') { return @{ Status = 'error'; Error = 'The uploader manifest has an invalid SHA-256 fingerprint.' } }
+        return @{ Status = 'ok'; Version = $version; Sha256 = $hash }
+    }
+
+    function Save-UploaderUpdate {
+        param([string]$ScriptPath, [string]$ExpectedVersion, [string]$ExpectedSha256)
+        $tmp = [System.IO.Path]::GetTempFileName()
+        try {
+            try {
+                Invoke-WebRequest -Uri ('https://raw.githubusercontent.com/Whyater/40217S-Uploader/main/ScourgeUploader.ps1?t=' + [DateTime]::UtcNow.Ticks) -OutFile $tmp -UseBasicParsing -TimeoutSec 60
+            } catch { return @{ Status = 'error'; Error = ('Could not download the uploader update: ' + $_.Exception.Message) } }
+            # The raw GitHub response is LF text. Hash those downloaded bytes exactly.
+            $actual = Get-FileSha256 -Path $tmp
+            if ($actual -ne $ExpectedSha256) { return @{ Status = 'error'; Error = ('Uploader update SHA-256 mismatch. Expected ' + $ExpectedSha256 + ' but got ' + $actual + '.') } }
+            $bak = $ScriptPath + '.bak'
+            try {
+                if (Test-Path $bak) { Remove-Item -Path $bak -Force }
+                Copy-Item -Path $ScriptPath -Destination $bak -Force
+                Move-Item -Path $tmp -Destination $ScriptPath -Force
+            } catch { return @{ Status = 'error'; Error = ('Could not replace the uploader script. The current copy was kept. ' + $_.Exception.Message) } }
+            return @{ Status = 'updated'; Version = $ExpectedVersion }
+        } finally { Remove-Item -Path $tmp -Force -ErrorAction SilentlyContinue }
+    }
+
     # Download the newest release into <InstallDir>\project.
     # Returns @{ Status = 'downloaded' | 'current' | 'none' | 'offline' | 'error'; Release; Error }.
     function Save-LatestRelease {
-        param([string]$ReleasesUrl, [string]$InstallDir, [string[]]$AssetNames, [string]$InstalledTag)
+        param([string]$ReleasesUrl, [string]$InstallDir, [string[]]$AssetNames, [string]$InstalledTag, $Sync = $null)
         $info = Get-LatestRelease -ReleasesUrl $ReleasesUrl
         if ($info.Status -ne 'ok') { return $info }
         $rel = $info.Release
+        $testerNames = @('tester-hot.package.bin', 'tester-cold.package.bin', 'tester-project.pros')
+        $testerMentioned = $false
+        $testerCandidate = $false
+        if ($null -ne $rel.Sha256) {
+            $testerCandidate = $true
+            foreach ($n in $testerNames) {
+                if ($rel.Sha256.ContainsKey($n)) { $testerMentioned = $true } else { $testerCandidate = $false }
+            }
+        }
 
         $projectDir = Join-Path $InstallDir 'project'
-        $haveAll = (Test-Path (Join-Path $projectDir 'project.pros')) -and
-                   (Test-Path (Join-Path $projectDir 'bin\hot.package.bin')) -and
-                   (Test-Path (Join-Path $projectDir 'bin\cold.package.bin'))
+        $haveAll = $true
+        foreach ($n in $AssetNames) {
+            if (-not (Test-Path (Get-ReleaseAssetPath -Root $projectDir -AssetName $n))) { $haveAll = $false }
+        }
+        if ($testerCandidate) {
+            foreach ($n in $testerNames) {
+                if (-not (Test-Path (Get-ReleaseAssetPath -Root $projectDir -AssetName $n))) { $haveAll = $false }
+            }
+        }
         if ($haveAll -and ($rel.Tag -eq $InstalledTag)) {
-            return @{ Status = 'current'; Release = $rel }
+            return @{ Status = 'current'; Release = $rel; TesterAvailable = $testerCandidate }
         }
 
         # Download into a side folder first, then swap it in. If the download
@@ -365,11 +529,8 @@ $SharedCode = {
         New-Item -ItemType Directory -Path (Join-Path $stage 'bin') -Force | Out-Null
         try {
             foreach ($n in $AssetNames) {
-                if ($n -eq 'project.pros') {
-                    $dest = Join-Path $stage $n
-                } else {
-                    $dest = Join-Path $stage ('bin\' + $n)
-                }
+                $dest = Get-ReleaseAssetPath -Root $stage -AssetName $n
+                New-Item -ItemType Directory -Path (Split-Path $dest -Parent) -Force | Out-Null
                 $url = $ReleasesUrl + '/download/' + $rel.Tag + '/' + $n
                 try {
                     Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -TimeoutSec 120
@@ -384,6 +545,16 @@ $SharedCode = {
                     throw ('Downloaded file ' + $n + ' is empty.')
                 }
             }
+            if ($null -ne $rel.Sha256) {
+                foreach ($n in $AssetNames) {
+                    $file = Get-ReleaseAssetPath -Root $stage -AssetName $n
+                    $expected = $rel.Sha256[$n]
+                    $actual = (Get-FileHash -Path $file -Algorithm SHA256).Hash.ToLowerInvariant()
+                    if ((-not $expected) -or ($actual -ne $expected)) {
+                        throw ('Download was damaged (' + $n + ' failed its SHA-256 check), try Get latest code again.')
+                    }
+                }
+            }
         } catch {
             $err = $_.Exception
             Remove-Item -Path $stage -Recurse -Force -ErrorAction SilentlyContinue
@@ -396,19 +567,39 @@ $SharedCode = {
             return @{ Status = 'error'; Error = $err.Message }
         }
 
-        # Check every file against the fingerprint the build published. Any
-        # difference at all (a cut-off or corrupted download) changes the hash.
-        # Older releases have no fingerprints, so the check is skipped for them.
-        if ($null -ne $rel.Sha256) {
-            foreach ($n in $AssetNames) {
-                if ($n -eq 'project.pros') { $file = Join-Path $stage $n } else { $file = Join-Path $stage ('bin\' + $n) }
-                $expected = $rel.Sha256[$n]
-                $actual = (Get-FileHash -Path $file -Algorithm SHA256).Hash.ToLowerInvariant()
-                if ((-not $expected) -or ($actual -ne $expected)) {
-                    Remove-Item -Path $stage -Recurse -Force -ErrorAction SilentlyContinue
-                    return @{ Status = 'error'; Error = ('Download was damaged (' + $n + ' failed its SHA-256 check), try Get latest code again.') }
+        $testerReady = $false
+        if ($testerCandidate) {
+            try {
+                foreach ($n in $testerNames) {
+                    $dest = Get-ReleaseAssetPath -Root $stage -AssetName $n
+                    New-Item -ItemType Directory -Path (Split-Path $dest -Parent) -Force | Out-Null
+                    $url = $ReleasesUrl + '/download/' + $rel.Tag + '/' + $n
+                    try {
+                        Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -TimeoutSec 120
+                    } catch {
+                        $resp = $_.Exception.Response
+                        if (($null -ne $resp) -and ([int]$resp.StatusCode -eq 404)) {
+                            throw ('The newest build (' + $rel.Tag + ') is missing ' + $n + '.')
+                        }
+                        throw
+                    }
+                    if ((-not (Test-Path $dest)) -or ((Get-Item $dest).Length -eq 0)) {
+                        throw ('Downloaded file ' + $n + ' is empty.')
+                    }
+                    $expected = $rel.Sha256[$n]
+                    $actual = (Get-FileHash -Path $dest -Algorithm SHA256).Hash.ToLowerInvariant()
+                    if ($actual -ne $expected) {
+                        throw ('Download was damaged (' + $n + ' failed its SHA-256 check).')
+                    }
                 }
+                $testerReady = $true
+            } catch {
+                $testerError = $_.Exception.Message
+                Remove-Item -Path (Join-Path $stage 'tester') -Recurse -Force -ErrorAction SilentlyContinue
+                Add-SharedLog $Sync ('Tester download unavailable: ' + $testerError)
             }
+        } elseif ($testerMentioned) {
+            Add-SharedLog $Sync 'Tester download unavailable: the release tester fingerprints are incomplete.'
         }
 
         # Swap the new folder in without ever deleting the working one first:
@@ -442,7 +633,7 @@ $SharedCode = {
         }
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         [System.IO.File]::WriteAllText((Join-Path $InstallDir 'version.json'), ($ver | ConvertTo-Json), $utf8NoBom)
-        return @{ Status = 'downloaded'; Release = $rel }
+        return @{ Status = 'downloaded'; Release = $rel; TesterAvailable = $testerReady }
     }
 }
 
@@ -453,9 +644,11 @@ $SharedCode = {
 # $Sync (shared log queue) and $A (a hashtable of arguments). The last value a
 # body outputs is its result.
 $UploadBody   = { Invoke-RobotUpload -ProsExe $A.ProsExe -ProjectDir $A.ProjectDir -Slot $A.Slot -Name $A.Name -TimeoutSec $A.Timeout -Sync $Sync }
+$RecordBody  = { Invoke-ProsRecording -ProsExe $A.ProsExe -WorkDir $A.WorkDir -FilePath $A.FilePath -Sync $Sync }
 $LsusbBody    = { Invoke-Pros -ProsExe $A.ProsExe -Arguments 'lsusb --target v5 --no-analytics --no-sentry' -WorkDir $A.WorkDir -TimeoutSec 20 -Sync $Sync -Quiet }
 $CheckBody    = { Get-LatestRelease -ReleasesUrl $A.ReleasesUrl }
-$DownloadBody = { Save-LatestRelease -ReleasesUrl $A.ReleasesUrl -InstallDir $A.InstallDir -AssetNames $A.AssetNames -InstalledTag $A.InstalledTag }
+$UploaderCheckBody = { Get-RemoteUploaderManifest -ManifestUrl $A.ManifestUrl }
+$DownloadBody = { Save-LatestRelease -ReleasesUrl $A.ReleasesUrl -InstallDir $A.InstallDir -AssetNames $A.AssetNames -InstalledTag $A.InstalledTag -Sync $Sync }
 
 # ---------------------------------------------------------------------------
 # Small helpers used by the window and by -SelfTest
@@ -472,6 +665,13 @@ function Test-HaveCode {
     return (Test-Path (Join-Path $script:ProjectDir 'project.pros')) -and
            (Test-Path (Join-Path $script:BinDir 'hot.package.bin')) -and
            (Test-Path (Join-Path $script:BinDir 'cold.package.bin'))
+}
+
+function Test-HaveTester {
+    foreach ($n in $script:TesterAssetNames) {
+        if (-not (Test-Path (Get-ReleaseAssetPath -Root $script:ProjectDir -AssetName $n))) { return $false }
+    }
+    return $true
 }
 
 # Reads version.json. Returns $null if there is none.
@@ -661,6 +861,14 @@ $script:Scale = 1.0
 $script:NoticeShown = $false
 $script:NameErrorShown = $false
 $script:DetailsShown = $false
+$script:UploaderUpdateReady = $false
+$script:UploaderCheckForClick = $false
+$script:LatestUploaderVersion = ''
+$script:TesterBuildTag = ''
+$script:Recording = $false
+$script:ResultsPath = ''
+$script:RecordValues = 0
+$script:RecordTests = 0
 
 # Converts a size picked at 100% scaling into real pixels for this screen.
 function Px {
@@ -747,6 +955,22 @@ function New-MainForm {
     $ui.UploadButton = New-FlatButton 'Upload to robot' 0 0 10 10 $true
     $form.Controls.AddRange(@($ui.UploadLabel, $ui.SlotLabel, $ui.NameLabel, $ui.SlotBox, $ui.NameBox, $ui.NameError, $ui.UploadButton))
 
+    # Robot tests section
+    $ui.TestsLine = New-Line 0 0 10
+    $ui.TestsLabel = New-Label 'Robot tests' 0 0 10 10 $f.Section $c.Muted
+    $ui.TestsHelper = New-Label 'Measure the robot with the Scourge Tester program, then send the results.' 0 0 10 10 $f.Small $c.Muted
+    $ui.TesterButton = New-FlatButton 'Put tester on robot' 0 0 10 10 $false
+    $ui.RecordButton = New-FlatButton 'Record results' 0 0 10 10 $false
+    $ui.ResultsStatus = New-Label 'No results yet' 0 0 10 10 $f.Base $c.Muted
+    $ui.SendButton = New-FlatButton 'Send results' 0 0 10 10 $false
+    $ui.OpenFolderLink = New-Object System.Windows.Forms.LinkLabel
+    $ui.OpenFolderLink.Text = 'Open folder'
+    $ui.OpenFolderLink.AutoSize = $true
+    $ui.OpenFolderLink.LinkColor = $c.Accent
+    $ui.OpenFolderLink.ActiveLinkColor = $c.AccentDown
+    $ui.OpenFolderLink.LinkBehavior = [System.Windows.Forms.LinkBehavior]::HoverUnderline
+    $form.Controls.AddRange(@($ui.TestsLine, $ui.TestsLabel, $ui.TestsHelper, $ui.TesterButton, $ui.RecordButton, $ui.ResultsStatus, $ui.SendButton, $ui.OpenFolderLink))
+
     # Connection indicator: a small colored dot plus a label.
     $ui.Dot = New-Object System.Windows.Forms.Panel
     $ui.Dot.BackColor = $c.Back
@@ -799,6 +1023,10 @@ function New-MainForm {
     # Button, text box, and link handlers
     $ui.GetButton.Add_Click({ Invoke-Safe { Start-Download } })
     $ui.UploadButton.Add_Click({ Invoke-Safe { Start-Upload } })
+    $ui.TesterButton.Add_Click({ Invoke-Safe { Start-TesterUpload } })
+    $ui.RecordButton.Add_Click({ Invoke-Safe { if ($script:Recording) { Stop-Recording } else { Start-Recording } } })
+    $ui.SendButton.Add_Click({ Invoke-Safe { Send-Results } })
+    $ui.OpenFolderLink.Add_LinkClicked({ Invoke-Safe { Open-ResultsFolder } })
     $ui.NameBox.Add_TextChanged({ Invoke-Safe { Update-NameError } })
     $ui.DetailsLink.Add_LinkClicked({ Invoke-Safe { Set-DetailsVisible (-not $script:DetailsShown) } })
     # Shown: the controls now have their real sizes, so lay out again. In
@@ -896,6 +1124,25 @@ function Update-Layout {
     $ui.UploadButton.SetBounds($M, $y, $inner, (Px 48))
     $y += Px 48
 
+    # Robot tests section
+    $y += Px 20
+    $ui.TestsLine.SetBounds($M, $y, $inner, 1)
+    $y += Px 16
+    $ui.TestsLabel.SetBounds($M, $y, $inner, (Px 16))
+    $y += Px 22
+    Set-WrappedLabel $ui.TestsHelper $M $y $inner
+    $y += $ui.TestsHelper.Height + (Px 12)
+    $half = [int](($inner - (Px 8)) / 2)
+    $ui.TesterButton.SetBounds($M, $y, $half, (Px 34))
+    $ui.RecordButton.SetBounds(($M + $half + (Px 8)), $y, $half, (Px 34))
+    $y += (Px 34) + (Px 12)
+    $sendW = Px 112
+    $ui.SendButton.SetBounds(($M + $inner - $sendW), $y - (Px 4), $sendW, (Px 30))
+    $ui.ResultsStatus.SetBounds($M, $y, ($inner - $sendW - (Px 12)), (Px 22))
+    $y += Px 24
+    $ui.OpenFolderLink.Location = New-Object System.Drawing.Point($M, $y)
+    $y += $ui.OpenFolderLink.PreferredSize.Height
+
     # Connection row
     $y += Px 16
     $rowH = Px 20
@@ -950,6 +1197,9 @@ $script:Pool = $null
 $script:Sync = [hashtable]::Synchronized(@{
     Log   = (New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]')
     Procs = [hashtable]::Synchronized(@{})
+    RecordStop = $false
+    RecordValues = 0
+    RecordTests = (New-Object 'System.Collections.Concurrent.ConcurrentDictionary[string,bool]')
 })
 
 # Runs a handler and turns any error into a status message instead of a crash.
@@ -993,6 +1243,18 @@ function Set-DetailsVisible {
     $script:DetailsShown = $Show
     if ($Show) { $script:Ui.DetailsLink.Text = 'Hide details' } else { $script:Ui.DetailsLink.Text = 'Show details' }
     Update-Layout
+}
+
+function Update-RecordingStatus {
+    if ($script:ResultsPath) {
+        $script:RecordValues = [int]$script:Sync.RecordValues
+        $script:RecordTests = $script:Sync.RecordTests.Keys.Count
+        $newText = 'Recorded ' + $script:RecordValues + ' values from ' + $script:RecordTests + ' tests'
+        $textChanged = $script:Ui.ResultsStatus.Text -ne $newText
+        $script:Ui.ResultsStatus.Text = $newText
+        $script:Ui.OpenFolderLink.Visible = $true
+        if ($textChanged) { Update-Layout }
+    }
 }
 
 # Program names: start with a letter or number, then letters, numbers, spaces,
@@ -1060,7 +1322,12 @@ function Set-Busy {
     $script:BusyMessage = $Message
     $script:BusyStarted = Get-Date
     $script:LastElapsed = -1
-    foreach ($ctl in @($ui.GetButton, $ui.UploadButton, $ui.SlotBox, $ui.NameBox)) { $ctl.Enabled = -not $On }
+    foreach ($ctl in @($ui.GetButton, $ui.UploadButton, $ui.TesterButton, $ui.RecordButton, $ui.SendButton, $ui.SlotBox, $ui.NameBox)) { $ctl.Enabled = -not $On }
+    if ($script:Recording) { $ui.RecordButton.Enabled = $true }
+    if (-not $On) {
+        $ui.TesterButton.Enabled = Test-HaveTester
+        $ui.SendButton.Enabled = (-not $script:Recording) -and $script:ResultsPath -and (Test-Path $script:ResultsPath)
+    }
     if ($On -and ($Kind -eq 'upload')) { $ui.UploadButton.Text = 'Uploading...' } else { $ui.UploadButton.Text = 'Upload to robot' }
     if ($On -and ($Kind -eq 'download')) { $ui.GetButton.Text = 'Downloading...' } else { $ui.GetButton.Text = 'Get latest code' }
     if ($On) { Set-Status $Message 'working' }
@@ -1085,6 +1352,8 @@ function Set-Connection {
 # Shows what is downloaded, from version.json.
 function Update-BuildInfo {
     $ui = $script:Ui
+    $ui.TesterButton.Enabled = (Test-HaveTester) -and (-not $script:Busy)
+    $ui.SendButton.Enabled = (-not $script:Recording) -and $script:ResultsPath -and (Test-Path $script:ResultsPath)
     $b = Get-InstalledBuild
     if (($null -eq $b) -or (-not (Test-HaveCode))) {
         $script:InstalledTag = ''
@@ -1092,6 +1361,7 @@ function Update-BuildInfo {
         $ui.BuildMeta.Text = 'Click Get latest code to download it.'
     } else {
         $script:InstalledTag = [string]$b.tag
+        $script:TesterBuildTag = if (Test-HaveTester) { $script:InstalledTag } else { '' }
         $parts = Split-ReleaseNotes ([string]$b.notes)
         $title = $parts.Subject
         if (-not $title) { $title = [string]$b.name }
@@ -1110,10 +1380,11 @@ function Update-BuildInfo {
 }
 
 function Update-Notice {
-    $show = [bool]($script:LatestTag -and ($script:LatestTag -ne $script:InstalledTag) -and $script:InstalledTag)
-    if ($show) {
-        $script:Ui.Notice.Text = 'Newer code is available (' + $script:LatestTag + '). Click Get latest code to download it.'
-    }
+    $messages = New-Object System.Collections.Generic.List[string]
+    if ($script:UploaderUpdateReady) { [void]$messages.Add('A newer uploader is ready. Click Get latest code to update.') }
+    if ($script:LatestTag -and ($script:LatestTag -ne $script:InstalledTag) -and $script:InstalledTag) { [void]$messages.Add('Newer code is available (' + $script:LatestTag + '). Click Get latest code to download it.') }
+    $show = $messages.Count -gt 0
+    if ($show) { $script:Ui.Notice.Text = ($messages -join "`n") }
     $script:NoticeShown = $show
     Update-Layout
 }
@@ -1147,6 +1418,7 @@ function Update-Jobs {
     $sb = New-Object System.Text.StringBuilder
     while ($script:Sync.Log.TryDequeue([ref]$line)) { [void]$sb.AppendLine($line) }
     if ($sb.Length -gt 0) { Add-LogText $sb.ToString() }
+    if ($script:Recording) { Update-RecordingStatus }
 
     # 2. Show elapsed time while busy so it is clear the app is still working.
     if ($script:Busy) {
@@ -1201,8 +1473,51 @@ function Start-ReleaseCheck {
     }
 }
 
+function Start-UploaderCheck {
+    param([bool]$ForClick = $false)
+    $script:UploaderCheckForClick = [bool]$ForClick
+    Start-BgJob $UploaderCheckBody @{ ManifestUrl = $script:UploaderManifestUrl } {
+        param($r)
+        if ($r.Status -eq 'ok') {
+            try { $newer = ([version]$r.Version -gt [version]$script:UploaderVersion) } catch { $newer = $false }
+            $script:LatestUploaderVersion = [string]$r.Version
+            $script:UploaderUpdateReady = $newer
+            Update-Notice
+            if ($script:UploaderCheckForClick -and $newer) {
+                Set-Busy $true 'update' 'Updating the uploader...'
+                Start-BgJob { Save-UploaderUpdate -ScriptPath $A.ScriptPath -ExpectedVersion $A.Version -ExpectedSha256 $A.Sha256 } @{ ScriptPath = $script:UploaderScriptPath; Version = $r.Version; Sha256 = $r.Sha256 } {
+                    param($u)
+                    if ($u.Status -eq 'updated') {
+                        $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+                        $relaunchArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $script:UploaderScriptPath + '" -InstallDir "' + $InstallDir + '" -AfterUpdate'
+                        try {
+                            Start-Process -FilePath $ps -ArgumentList $relaunchArgs -WorkingDirectory $InstallDir -WindowStyle Hidden
+                            [System.Windows.Forms.Application]::Exit()
+                        } catch {
+                            Set-Busy $false
+                            Add-LogText ('Uploader relaunch: ' + $_.Exception.Message)
+                            Set-Status 'The uploader updated, but could not relaunch. Continuing with the robot code download.' 'error'
+                            Start-Download -SkipUploaderUpdate
+                        }
+                    } else {
+                        Set-Busy $false
+                        Add-LogText ('Uploader update: ' + [string]$u.Error)
+                        Set-Status 'The uploader update could not be installed. Continuing with the robot code download.' 'error'
+                        Start-Download -SkipUploaderUpdate
+                    }
+                }
+            } elseif ($script:UploaderCheckForClick) { Start-Download -SkipUploaderUpdate }
+        } elseif ($script:UploaderCheckForClick) { Start-Download -SkipUploaderUpdate }
+    }
+}
+
 function Start-Download {
+    param([switch]$SkipUploaderUpdate)
     if ($script:Busy) { return }
+    if (-not $SkipUploaderUpdate) {
+        Start-UploaderCheck -ForClick $true
+        return
+    }
     Set-Busy $true 'download' 'Downloading the latest robot code...'
     Add-LogText ('[' + (Get-Date).ToString('HH:mm:ss') + '] Checking GitHub for the latest robot code')
     $jobArgs = @{
@@ -1214,7 +1529,7 @@ function Start-Download {
     Start-BgJob $DownloadBody $jobArgs {
         param($r)
         Set-Busy $false
-        if ($r.Release) { $script:LatestTag = [string]$r.Release.Tag }
+        if ($r.Release) { $script:LatestTag = [string]$r.Release.Tag; $script:TesterBuildTag = [string]$r.Release.Tag }
         Update-BuildInfo
         switch ([string]$r.Status) {
             'downloaded' { Set-Status ('Downloaded build ' + $r.Release.Tag + '. Ready to upload.') 'success' }
@@ -1236,6 +1551,7 @@ function Start-Download {
 
 function Start-Upload {
     if ($script:Busy) { return }
+    if ($script:Recording) { Set-Status 'Stop recording before uploading. The brain USB port is busy.' 'error'; return }
     if (-not $script:ProsExe) {
         Set-Status 'The PROS uploader is missing. Run the install command again.' 'error'
         return
@@ -1285,6 +1601,84 @@ function Start-Upload {
     }
 }
 
+function Start-TesterUpload {
+    if ($script:Busy) { return }
+    if ($script:Recording) { Set-Status 'Stop recording before uploading. The brain USB port is busy.' 'error'; return }
+    if (-not $script:ProsExe) { Set-Status 'The PROS uploader is missing. Run the install command again.' 'error'; return }
+    if (-not (Test-HaveTester)) { Set-Status 'The Scourge Tester is not in the latest release yet. Click Get latest code.' 'error'; return }
+    Set-Busy $true 'upload' 'Uploading the Scourge Tester to slot 8. Keep the cable plugged in.'
+    Add-LogText ('[' + (Get-Date).ToString('HH:mm:ss') + '] Uploading tester to slot 8')
+    Start-BgJob $UploadBody @{ ProsExe = $script:ProsExe; ProjectDir = (Join-Path $script:ProjectDir 'tester'); Slot = 8; Name = 'Scourge Tester'; Timeout = $script:UploadTimeoutSec } {
+        param($r)
+        Set-Busy $false
+        $outcome = Get-UploadOutcome -Run $r -Slot 8
+        if ($outcome.Ok) { Set-Status 'Uploaded Scourge Tester to slot 8. Run it from the brain screen.' 'success' } else { Set-Status $outcome.Message 'error'; if ($outcome.Kind -eq 'Failed') { Set-DetailsVisible $true } }
+        Start-ConnectionCheck
+    }
+}
+
+function Start-Recording {
+    if ($script:Busy) { return }
+    if (-not $script:ProsExe) { Set-Status 'The PROS uploader is missing. Run the install command again.' 'error'; return }
+    $folder = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Scourge Robot Data'
+    New-Item -ItemType Directory -Path $folder -Force | Out-Null
+    $script:ResultsPath = Join-Path $folder ('results-' + (Get-Date).ToString('yyyyMMdd-HHmmss') + '.csv')
+    $script:Sync.RecordStop = $false
+    $script:Sync.RecordValues = 0
+    $script:Sync.RecordTests = New-Object 'System.Collections.Concurrent.ConcurrentDictionary[string,bool]'
+    $script:RecordValues = 0
+    $script:RecordTests = 0
+    $script:Recording = $true
+    $script:Ui.RecordButton.Text = 'Stop recording'
+    $script:Ui.SendButton.Enabled = $false
+    Set-Status 'Recording tester results. Keep the cable connected.' 'working'
+    Start-BgJob $RecordBody @{ ProsExe = $script:ProsExe; WorkDir = $InstallDir; FilePath = $script:ResultsPath } {
+        param($r)
+        $script:Recording = $false
+        $script:Ui.RecordButton.Text = 'Record results'
+        $script:Ui.SendButton.Enabled = ((Test-Path $script:ResultsPath) -and ((Get-Item $script:ResultsPath).Length -gt 8))
+        Update-RecordingStatus
+        if ($r.Status -eq 'error') {
+            Add-LogText ('Recording stderr: ' + [string]$r.Error)
+            Set-DetailsVisible $true
+            Set-Status ('Recording stopped: ' + [string]$r.Error) 'error'
+        } else {
+            Set-Status ('Results saved to ' + $script:ResultsPath) 'success'
+        }
+    }
+}
+
+function Stop-Recording {
+    $script:Sync.RecordStop = $true
+    Set-Status 'Stopping recording...' 'working'
+}
+
+function Open-ResultsFolder {
+    $folder = Split-Path $script:ResultsPath -Parent
+    if (-not $folder) { $folder = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Scourge Robot Data' }
+    if (Test-Path $folder) { Start-Process explorer.exe -ArgumentList ('"' + $folder + '"') }
+}
+
+function Send-Results {
+    if ($script:Recording) { Set-Status 'Stop recording before sending results.' 'error'; return }
+    if (-not $script:ResultsPath -or -not (Test-Path $script:ResultsPath)) { Set-Status 'No results yet.' 'error'; return }
+    $lines = Get-Content -Path $script:ResultsPath -ErrorAction SilentlyContinue
+    if ($lines.Count -le 1) { Set-Status 'No results yet.' 'error'; return }
+    $date = (Get-Date).ToString('yyyy-MM-dd')
+    $tag = if ($script:TesterBuildTag) { $script:TesterBuildTag } else { 'unknown' }
+    $body = 'Uploader ' + $script:UploaderVersion + ', tester build ' + $tag + ', UTC ' + [DateTime]::UtcNow.ToString('o') + "`r`n`r`n" + (($lines | Select-Object -Skip 1) -join "`r`n")
+    $title = 'Robot data ' + $date
+    $url = 'https://github.com/Whyater/40217S-Robot-Data/issues/new?title=' + [uri]::EscapeDataString($title) + '&body=' + [uri]::EscapeDataString($body)
+    if ($url.Length -gt 7000) {
+        Set-Clipboard -Value $body
+        Start-Process $url.Split('&')[0]
+        Set-Status ('Paste the results into the box (Ctrl+V), then click Submit new issue. Saved at ' + $script:ResultsPath) 'info'
+    } else {
+        Start-Process $url
+        Set-Status ('New issue page opened. Saved at ' + $script:ResultsPath) 'info'
+    }
+}
+
 # Runs once, right after the window appears.
 function Start-App {
     $script:ProsExe = Find-ProsExe
@@ -1297,13 +1691,15 @@ function Start-App {
     } else {
         Start-ConnectionCheck
     }
-    if (-not (Test-HaveCode)) {
+    if (-not (Test-HaveCode) -and (-not $AfterUpdate)) {
         # First launch: grab the code automatically.
-        Start-Download
-    } else {
+        Start-Download -SkipUploaderUpdate
+    } elseif (-not $AfterUpdate) {
         Set-Status 'Ready. Plug the USB cable into the brain, then click Upload to robot.' 'info'
         Start-ReleaseCheck
     }
+    Start-UploaderCheck -ForClick:$false
+    if ($AfterUpdate) { Start-Download -SkipUploaderUpdate }
 }
 
 # ---------------------------------------------------------------------------

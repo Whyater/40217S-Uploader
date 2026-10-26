@@ -1,9 +1,9 @@
 name: Publish release
 
 # The private robot-code repo force-pushes one commit (main plus the build) to `incoming`.
-# That commit adds the two program images, project.pros, and
-# release.json. This workflow turns it into a GitHub release, then checks the
-# real install path end to end on Windows.
+# That commit adds the two program images, project.pros, and release.json.
+# It may also add the three Scourge Tester files. This workflow turns it into
+# a GitHub release, then checks the real install path end to end on Windows.
 on:
   push:
     branches: [incoming]
@@ -42,7 +42,21 @@ jobs:
               exit 1
             fi
           done
-          ls -l hot.package.bin cold.package.bin project.pros release.json
+          tester_count=0
+          for f in tester-hot.package.bin tester-cold.package.bin tester-project.pros; do
+            if [ -e "$f" ]; then tester_count=$((tester_count + 1)); fi
+          done
+          if [ "$tester_count" -ne 0 ] && [ "$tester_count" -ne 3 ]; then
+            echo "::error::Tester assets must be provided as all three files"
+            exit 1
+          fi
+          for f in tester-hot.package.bin tester-cold.package.bin; do
+            if [ -e "$f" ] && [ ! -s "$f" ]; then
+              echo "::error::$f is empty"
+              exit 1
+            fi
+          done
+          ls -l hot.package.bin cold.package.bin project.pros release.json tester-*.package.bin tester-project.pros 2>/dev/null || true
 
       - name: Read release.json
         id: meta
@@ -54,6 +68,17 @@ jobs:
           if ! jq -e '(.title | type == "string" and length > 0) and (.notes | type == "string")' release.json > /dev/null; then
             echo "::error::release.json needs a non-empty title and a notes string"
             exit 1
+          fi
+          if [ -f tester-hot.package.bin ]; then
+            for f in tester-hot.package.bin tester-cold.package.bin tester-project.pros; do
+              if ! jq -e --arg f "$f" '.sha256[$f] | type == "string" and test("^[0-9A-Fa-f]{64}$")' release.json > /dev/null; then
+                echo "::error::release.json sha256 is missing or invalid for $f"
+                exit 1
+              fi
+              actual=$(sha256sum "$f" | awk '{print tolower($1)}')
+              expected=$(jq -r --arg f "$f" '.sha256[$f] | ascii_downcase' release.json)
+              if [ "$actual" != "$expected" ]; then echo "::error::SHA-256 mismatch for $f"; exit 1; fi
+            done
           fi
           if ! [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]]; then
             echo "::error::release.json tag has unexpected characters"
@@ -77,7 +102,9 @@ jobs:
             echo "Release $tag already exists, skipping."
             exit 0
           fi
-          gh release create "$tag" hot.package.bin cold.package.bin project.pros release.json \
+          assets=(hot.package.bin cold.package.bin project.pros release.json)
+          if [ -f tester-hot.package.bin ]; then assets+=(tester-hot.package.bin tester-cold.package.bin tester-project.pros); fi
+          gh release create "$tag" "${assets[@]}" \
             --target "$GITHUB_SHA" \
             --title "$title" \
             --notes "$notes" \

@@ -647,7 +647,14 @@ $UploadBody   = { Invoke-RobotUpload -ProsExe $A.ProsExe -ProjectDir $A.ProjectD
 $RecordBody  = { Invoke-ProsRecording -ProsExe $A.ProsExe -WorkDir $A.WorkDir -FilePath $A.FilePath -Sync $Sync }
 $LsusbBody    = { Invoke-Pros -ProsExe $A.ProsExe -Arguments 'lsusb --target v5 --no-analytics --no-sentry' -WorkDir $A.WorkDir -TimeoutSec 20 -Sync $Sync -Quiet }
 $CheckBody    = { Get-LatestRelease -ReleasesUrl $A.ReleasesUrl }
-$UploaderCheckBody = { Get-RemoteUploaderManifest -ManifestUrl $A.ManifestUrl }
+# The result carries ForClick so a startup check that finishes after a click
+# never acts on the click.
+$UploaderCheckBody = {
+    $m = $null
+    try { $m = Get-RemoteUploaderManifest -ManifestUrl $A.ManifestUrl } catch { $m = @{ Status = 'error'; Error = $_.Exception.Message } }
+    $m.ForClick = [bool]$A.ForClick
+    $m
+}
 $DownloadBody = { Save-LatestRelease -ReleasesUrl $A.ReleasesUrl -InstallDir $A.InstallDir -AssetNames $A.AssetNames -InstalledTag $A.InstalledTag -Sync $Sync }
 
 # ---------------------------------------------------------------------------
@@ -862,7 +869,6 @@ $script:NoticeShown = $false
 $script:NameErrorShown = $false
 $script:DetailsShown = $false
 $script:UploaderUpdateReady = $false
-$script:UploaderCheckForClick = $false
 $script:LatestUploaderVersion = ''
 $script:TesterBuildTag = ''
 $script:Recording = $false
@@ -1326,7 +1332,7 @@ function Set-Busy {
     if ($script:Recording) { $ui.RecordButton.Enabled = $true }
     if (-not $On) {
         $ui.TesterButton.Enabled = Test-HaveTester
-        $ui.SendButton.Enabled = (-not $script:Recording) -and $script:ResultsPath -and (Test-Path $script:ResultsPath)
+        $ui.SendButton.Enabled = (-not $script:Recording) -and (Test-HaveResults)
     }
     if ($On -and ($Kind -eq 'upload')) { $ui.UploadButton.Text = 'Uploading...' } else { $ui.UploadButton.Text = 'Upload to robot' }
     if ($On -and ($Kind -eq 'download')) { $ui.GetButton.Text = 'Downloading...' } else { $ui.GetButton.Text = 'Get latest code' }
@@ -1475,15 +1481,14 @@ function Start-ReleaseCheck {
 
 function Start-UploaderCheck {
     param([bool]$ForClick = $false)
-    $script:UploaderCheckForClick = [bool]$ForClick
-    Start-BgJob $UploaderCheckBody @{ ManifestUrl = $script:UploaderManifestUrl } {
+    Start-BgJob $UploaderCheckBody @{ ManifestUrl = $script:UploaderManifestUrl; ForClick = [bool]$ForClick } {
         param($r)
         if ($r.Status -eq 'ok') {
             try { $newer = ([version]$r.Version -gt [version]$script:UploaderVersion) } catch { $newer = $false }
             $script:LatestUploaderVersion = [string]$r.Version
             $script:UploaderUpdateReady = $newer
             Update-Notice
-            if ($script:UploaderCheckForClick -and $newer) {
+            if ($r.ForClick -and $newer) {
                 Set-Busy $true 'update' 'Updating the uploader...'
                 Start-BgJob { Save-UploaderUpdate -ScriptPath $A.ScriptPath -ExpectedVersion $A.Version -ExpectedSha256 $A.Sha256 } @{ ScriptPath = $script:UploaderScriptPath; Version = $r.Version; Sha256 = $r.Sha256 } {
                     param($u)
@@ -1506,8 +1511,8 @@ function Start-UploaderCheck {
                         Start-Download -SkipUploaderUpdate
                     }
                 }
-            } elseif ($script:UploaderCheckForClick) { Start-Download -SkipUploaderUpdate }
-        } elseif ($script:UploaderCheckForClick) { Start-Download -SkipUploaderUpdate }
+            } elseif ($r.ForClick) { Set-Busy $false; Start-Download -SkipUploaderUpdate }
+        } elseif ($r.ForClick) { Set-Busy $false; Start-Download -SkipUploaderUpdate }
     }
 }
 
@@ -1515,6 +1520,8 @@ function Start-Download {
     param([switch]$SkipUploaderUpdate)
     if ($script:Busy) { return }
     if (-not $SkipUploaderUpdate) {
+        # Busy right away so a second click can't start a second check.
+        Set-Busy $true 'download' 'Checking for updates...'
         Start-UploaderCheck -ForClick $true
         return
     }
@@ -1636,7 +1643,7 @@ function Start-Recording {
         param($r)
         $script:Recording = $false
         $script:Ui.RecordButton.Text = 'Record results'
-        $script:Ui.SendButton.Enabled = ((Test-Path $script:ResultsPath) -and ((Get-Item $script:ResultsPath).Length -gt 8))
+        $script:Ui.SendButton.Enabled = Test-HaveResults
         Update-RecordingStatus
         if ($r.Status -eq 'error') {
             Add-LogText ('Recording stderr: ' + [string]$r.Error)
@@ -1653,10 +1660,18 @@ function Stop-Recording {
     Set-Status 'Stopping recording...' 'working'
 }
 
+# True when the results file has at least one line after the CSV header.
+function Test-HaveResults {
+    if (-not $script:ResultsPath -or -not (Test-Path $script:ResultsPath)) { return $false }
+    $lines = @(Get-Content -Path $script:ResultsPath -TotalCount 2 -ErrorAction SilentlyContinue)
+    return $lines.Count -gt 1
+}
+
 function Open-ResultsFolder {
-    $folder = Split-Path $script:ResultsPath -Parent
-    if (-not $folder) { $folder = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Scourge Robot Data' }
-    if (Test-Path $folder) { Start-Process explorer.exe -ArgumentList ('"' + $folder + '"') }
+    $folder = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Scourge Robot Data'
+    if ($script:ResultsPath) { $folder = Split-Path $script:ResultsPath -Parent }
+    New-Item -ItemType Directory -Path $folder -Force | Out-Null
+    Start-Process explorer.exe -ArgumentList ('"' + $folder + '"')
 }
 
 function Send-Results {
@@ -1668,10 +1683,13 @@ function Send-Results {
     $tag = if ($script:TesterBuildTag) { $script:TesterBuildTag } else { 'unknown' }
     $body = 'Uploader ' + $script:UploaderVersion + ', tester build ' + $tag + ', UTC ' + [DateTime]::UtcNow.ToString('o') + "`r`n`r`n" + (($lines | Select-Object -Skip 1) -join "`r`n")
     $title = 'Robot data ' + $date
-    $url = 'https://github.com/Whyater/40217S-Robot-Data/issues/new?title=' + [uri]::EscapeDataString($title) + '&body=' + [uri]::EscapeDataString($body)
-    if ($url.Length -gt 7000) {
+    $newIssue = 'https://github.com/Whyater/40217S-Robot-Data/issues/new?title=' + [uri]::EscapeDataString($title)
+    # EscapeDataString throws on very long text, so check the raw length first.
+    $url = ''
+    if ($body.Length -le 5000) { $url = $newIssue + '&body=' + [uri]::EscapeDataString($body) }
+    if ((-not $url) -or ($url.Length -gt 7000)) {
         Set-Clipboard -Value $body
-        Start-Process $url.Split('&')[0]
+        Start-Process $newIssue
         Set-Status ('Paste the results into the box (Ctrl+V), then click Submit new issue. Saved at ' + $script:ResultsPath) 'info'
     } else {
         Start-Process $url

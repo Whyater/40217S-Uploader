@@ -957,7 +957,7 @@ function New-MainForm {
 
     # Robot tests section
     $ui.TestsLine = New-Line 0 0 10
-    $ui.TestsLabel = New-Label 'Robot tests' 0 0 10 10 $f.Section $c.Muted
+    $ui.TestsLabel = New-Label 'ROBOT TESTS' 0 0 10 10 $f.Section $c.Muted
     $ui.TestsHelper = New-Label 'Measure the robot with the Scourge Tester program, then send the results.' 0 0 10 10 $f.Small $c.Muted
     $ui.TesterButton = New-FlatButton 'Put tester on robot' 0 0 10 10 $false
     $ui.RecordButton = New-FlatButton 'Record results' 0 0 10 10 $false

@@ -57,19 +57,19 @@ Holding **D-pad Down** only starts a test when the robot is not plugged into a f
 | R1 (hold) | Intake in |
 | R2 (hold) | Intake out |
 | L1 (hold) | Roller |
-| L2 (hold) | Lift down |
+| L2 (hold) | Lift down, only while held |
+| D-pad Left (hold) | Lift up, only while held |
 | Y | Lift up one Pin level (alliance goals) |
 | D-pad Right | Lift up one Pin level (neutral goals) |
 | A | Lift down one level |
 | B | Reset: open the claw and lower the lift to the bottom |
 | D-pad Up | Tilt the claw down (only with the lift at the bottom). If the claw is closed and empty, it opens first |
 | D-pad Down | In a match: lift up to the "one Cup and one Pin" height. Off the field: a short press does the same, and holding it for 1 second starts the selected auton as a test (press it again to stop) |
-| D-pad Left | Open or close the claw (switches each press) |
-| X | Open the claw |
+| X | Open or close the claw (switches each press) |
 
 If the claw is tilted down when you press a lift up button, the robot closes the claw and lifts it off the floor. Then it tilts the claw up and goes to the first level.
 
-The claw also closes on its own when a Pin or Cup is right inside it. Press **X** or **D-pad Left** to open it again. D-pad Up does nothing while there's a Pin in the claw, so it can't drop one by accident.
+The claw also closes on its own when a Pin or Cup is right inside it, and opens on its own if the Pin or Cup it was holding is gone. Press **X** to open or close it yourself. D-pad Up does nothing while there's a Pin in the claw, so it can't drop one by accident.
 
 The robot also handles Toggles for you. When one of its side toggle sensors is right next to a wall Toggle and a color is picked, the roller turns the Toggle to our color by itself and stops. Holding **L1** still spins the roller by hand and overrides it. Line 1 of the brain screen shows a short toggle status. It can read `OURS`, `SPIN`, `THEIRS`, `OTHER`, `NO TGL`, `NO COLOR`, `SENS ERR`, `STALL`, or `TIMEOUT`.
 

@@ -37,6 +37,22 @@ jobs:
           if ($bad -gt 0) { exit 1 }
           exit 0
 
+      - name: Check uploader manifest
+        run: |
+          $manifest = Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'uploader.json') | ConvertFrom-Json
+          $scriptPath = Join-Path $env:GITHUB_WORKSPACE 'ScourgeUploader.ps1'
+          $scriptText = (Get-Content -Raw $scriptPath).Replace("`r`n", "`n")
+          $m = [regex]::Match($scriptText, '\$script:UploaderVersion\s*=\s*''([^'']+)''')
+          if (-not $m.Success) { Write-Error 'UploaderVersion constant was not found'; exit 1 }
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          try {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($scriptText)
+            $actualHash = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+          } finally { $sha.Dispose() }
+          if ([string]$manifest.version -ne $m.Groups[1].Value) { Write-Error ('uploader.json version does not match script: ' + $manifest.version + ' vs ' + $m.Groups[1].Value); exit 1 }
+          if ([string]$manifest.sha256 -ne $actualHash) { Write-Error ('uploader.json SHA-256 does not match script: expected ' + $manifest.sha256 + ' got ' + $actualHash); exit 1 }
+          Write-Host ('Uploader manifest OK: ' + $manifest.version)
+
       - name: Set up environment
         env:
           GH_TOKEN: ${{ github.token }}

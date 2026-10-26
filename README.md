@@ -57,21 +57,21 @@ Holding **D-pad Down** only starts a test when the robot is not plugged into a f
 | R1 (hold) | Intake in |
 | R2 (hold) | Intake out |
 | L1 (hold) | Roller |
-| L2 (hold) | Lift down, only while held |
-| B (hold) | Lift up, only while held |
+| L2 (hold) | Lift down, only while held, all the way to the bottom |
+| B (hold) | Lift up, only while held, all the way to the top |
 | Y | Next alliance goal position (1 = one Pin up, 2 = two Pins, ...) |
 | D-pad Right | Next neutral goal position (same idea, neutral goal heights) |
 | A | Back one position (from position 1, to the bottom) |
 | D-pad Left | Reset: open the claw and lower the lift to the bottom |
-| D-pad Up | Tilt the claw down (only with the lift at the bottom). If the claw is closed and empty, it opens first |
+| D-pad Up | Tilt the claw down (only with the lift at the bottom) or back up. Tilting down: if the claw is closed and empty, it opens first. Tilting up with the claw closed: the lift rises a little first |
 | D-pad Down | In a match: lift up to the "one Cup and one Pin" height. Off the field: a short press does the same, and holding it for 1 second starts the selected auton as a test (press it again to stop) |
 | X | Open or close the claw (switches each press) |
 
 If the claw is tilted down when you press a lift up button, the robot closes the claw and lifts it off the floor. Then it tilts the claw up and goes to position 1.
 
-The claw also closes on its own when a Pin or Cup is right inside it, and opens on its own if the Pin or Cup it was holding is gone. Press **X** to open or close it yourself. D-pad Up does nothing while there's a Pin in the claw, so it can't drop one by accident.
+The claw starts tilted down and open. With the claw tilted up, it closes on its own when a Pin or Cup comes within about 10 cm, and opens on its own if the Pin or Cup it was holding is gone. With the claw tilted down it never closes or opens on its own. Press **X** to open or close it yourself. D-pad Up won't tilt the claw down while there's a Pin in it, so it can't drop one by accident.
 
-The robot also handles Toggles for you. When one of its side toggle sensors is right next to a wall Toggle and a color is picked, the roller turns the Toggle to our color by itself and stops. Holding **L1** still spins the roller by hand and overrides it. Line 1 of the brain screen shows a short toggle status. It can read `OURS`, `SPIN`, `THEIRS`, `OTHER`, `NO TGL`, `NO COLOR`, `SENS ERR`, `STALL`, or `TIMEOUT`.
+The robot also handles Toggles for you. When one of its side toggle sensors is right next to a wall Toggle and a color is picked, the roller turns the Toggle until it sees our color, then stops. Holding **L1** still spins the roller by hand and overrides it. Line 1 of the brain screen shows a short toggle status. It can read `OURS`, `SPIN`, `THEIRS`, `OTHER`, `UNSURE`, `NO TGL`, `NO COLOR`, `SENS ERR`, `STALL`, or `RETRIES`.
 
 The lift heights are not set yet. Until the programmer measures them, the lift buttons only go a short way. Start the program with the lift all the way down.
 

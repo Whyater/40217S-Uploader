@@ -50,7 +50,16 @@ jobs:
             echo "::error::Tester assets must be provided as all three files"
             exit 1
           fi
-          for f in tester-hot.package.bin tester-cold.package.bin; do
+          # The Auton Test and Drive Test programs (same cold package, own hot package) come as a pair.
+          mode_count=0
+          for f in auton-test-hot.package.bin drive-test-hot.package.bin; do
+            if [ -e "$f" ]; then mode_count=$((mode_count + 1)); fi
+          done
+          if [ "$mode_count" -ne 0 ] && [ "$mode_count" -ne 2 ]; then
+            echo "::error::Test-mode assets must be provided as both files"
+            exit 1
+          fi
+          for f in tester-hot.package.bin tester-cold.package.bin auton-test-hot.package.bin drive-test-hot.package.bin; do
             if [ -e "$f" ] && [ ! -s "$f" ]; then
               echo "::error::$f is empty"
               exit 1
@@ -71,6 +80,17 @@ jobs:
           fi
           if [ -f tester-hot.package.bin ]; then
             for f in tester-hot.package.bin tester-cold.package.bin tester-project.pros; do
+              if ! jq -e --arg f "$f" '.sha256[$f] | type == "string" and test("^[0-9A-Fa-f]{64}$")' release.json > /dev/null; then
+                echo "::error::release.json sha256 is missing or invalid for $f"
+                exit 1
+              fi
+              actual=$(sha256sum "$f" | awk '{print tolower($1)}')
+              expected=$(jq -r --arg f "$f" '.sha256[$f] | ascii_downcase' release.json)
+              if [ "$actual" != "$expected" ]; then echo "::error::SHA-256 mismatch for $f"; exit 1; fi
+            done
+          fi
+          if [ -f auton-test-hot.package.bin ]; then
+            for f in auton-test-hot.package.bin drive-test-hot.package.bin; do
               if ! jq -e --arg f "$f" '.sha256[$f] | type == "string" and test("^[0-9A-Fa-f]{64}$")' release.json > /dev/null; then
                 echo "::error::release.json sha256 is missing or invalid for $f"
                 exit 1
@@ -104,6 +124,7 @@ jobs:
           fi
           assets=(hot.package.bin cold.package.bin project.pros release.json)
           if [ -f tester-hot.package.bin ]; then assets+=(tester-hot.package.bin tester-cold.package.bin tester-project.pros); fi
+          if [ -f auton-test-hot.package.bin ]; then assets+=(auton-test-hot.package.bin drive-test-hot.package.bin); fi
           gh release create "$tag" "${assets[@]}" \
             --target "$GITHUB_SHA" \
             --title "$title" \

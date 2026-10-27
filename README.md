@@ -38,11 +38,23 @@ After that, clicking **Get Latest** also updates the Mac app when a newer one is
 1. Plug a USB data cable into the **brain** (not the controller) and turn the brain on.
 2. Open **Scourge Uploader**.
 3. If it says newer code is available, click **Get latest code**. On the very first launch it downloads the code for you.
-4. Pick a slot (1 to 8).
-5. Check the **Program name** box. This is the name the brain shows for the program. It starts as `Scourge`. Names can use letters, numbers, spaces, `_`, `.`, and `-`, up to 20 characters, and must start with a letter or number.
+4. Pick a **Mode** (see [Modes](#modes)). Most of the time that is **Competition**. The slot and program name change to match the mode, and you can still change them.
+5. Check the **Program name** box. This is the name the brain shows for the program. In Competition it starts as `Scourge`. Names can use letters, numbers, spaces, `_`, `.`, and `-`, up to 20 characters, and must start with a letter or number.
 6. Click **Upload to robot** and keep the cable plugged in until it finishes.
 
 When it is done, the program shows on the brain. Run it from the brain screen.
+
+## Modes
+
+The same robot code is built three ways. The **Mode** box picks which one goes on the brain. Each mode has its own slot, so all three can be on the brain at once.
+
+| Mode | Slot | What it does |
+| --- | --- | --- |
+| Competition | 1 | The full match program. This is the one to use at events |
+| Auton Test | 2 | Pick the color, side, and routine on the brain, then press **A** on the controller to run the auton and **B** to stop it. No driving |
+| Drive Test | 3 | Driving only. Autonomous does nothing |
+
+If a mode says the build does not have it, the newest release is older than the test modes. Click **Get latest code**, or ask the programmer.
 
 ## Check the drive (first time, and after any rewiring)
 
@@ -141,7 +153,7 @@ The tests:
 
 ## How it works
 
-The robot source code is private. Each time the programmer pushes to the main branch of the private repository, GitHub Actions builds it and publishes the compiled program to this repository's [Releases](https://github.com/Whyater/40217S-Uploader/releases). A release has the robot program (`hot.package.bin`, `cold.package.bin`, `project.pros`), the Scourge Tester (`tester-hot.package.bin`, `tester-cold.package.bin`, `tester-project.pros`, in newer builds), and `release.json` (the build's tag, title, notes, and time, plus SHA-256 hashes of the other files).
+The robot source code is private. Each time the programmer pushes to the main branch of the private repository, GitHub Actions builds it and publishes the compiled program to this repository's [Releases](https://github.com/Whyater/40217S-Uploader/releases). A release has the robot program (`hot.package.bin`, `cold.package.bin`, `project.pros`, plus `auton-test-hot.package.bin` and `drive-test-hot.package.bin` for the test modes in newer builds), the Scourge Tester (`tester-hot.package.bin`, `tester-cold.package.bin`, `tester-project.pros`, in newer builds), and `release.json` (the build's tag, title, notes, and time, plus SHA-256 hashes of the other files).
 
 **Get latest code** first checks for a newer uploader (see [Update the uploader](#update-the-uploader)). Then it downloads the newest release and, when the release lists SHA-256 hashes, checks each file before using it. Nothing is built on your laptop. **Upload to robot** hands those files to the official PROS command line tool, pros-cli 3.5.6.
 

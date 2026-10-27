@@ -50,7 +50,15 @@ if (-not $InstallDir) {
 $script:ReleasesUrl = 'https://github.com/Whyater/40217S-Uploader/releases'
 $script:AssetNames = @('hot.package.bin', 'cold.package.bin', 'project.pros')
 $script:TesterAssetNames = @('tester-hot.package.bin', 'tester-cold.package.bin', 'tester-project.pros')
-$script:UploaderVersion = '2.1.0'
+# One robot source builds three programs that differ only in the hot file;
+# cold.package.bin and project.pros are shared. Each mode has its own default
+# slot and program name so the three can sit on the brain side by side.
+$script:Modes = @(
+    @{ Label = 'Competition'; Asset = 'hot.package.bin';            Slot = 1; Name = 'Scourge' },
+    @{ Label = 'Auton Test';  Asset = 'auton-test-hot.package.bin'; Slot = 2; Name = 'Scourge Auton Test' },
+    @{ Label = 'Drive Test';  Asset = 'drive-test-hot.package.bin'; Slot = 3; Name = 'Scourge Drive Test' }
+)
+$script:UploaderVersion = '2.2.0'
 $script:UploaderScriptPath = $PSCommandPath
 $script:UploaderManifestUrl = 'https://raw.githubusercontent.com/Whyater/40217S-Uploader/main/uploader.json'
 $script:ProjectDir = Join-Path $InstallDir 'project'
@@ -84,8 +92,24 @@ $SharedCode = {
             $assetRoot = Join-Path $Root 'tester'
             $fileName = $AssetName.Substring(7)
         }
+        # Test-mode hot files live outside bin so PROS never sees them when it
+        # uploads the Competition project folder.
+        if ($AssetName -like '*-test-hot.package.bin') { return Join-Path $Root ('modes\' + $AssetName) }
         if ($fileName -eq 'project.pros') { return Join-Path $assetRoot $fileName }
         return Join-Path $assetRoot ('bin\' + $fileName)
+    }
+
+    # Build a small project folder for a test mode: the shared files plus the
+    # mode's hot file under the name PROS expects (bin\hot.package.bin).
+    # Rebuilt from scratch each time so a stale file can never get uploaded.
+    function New-ModeProject {
+        param([string]$ProjectDir, [string]$ModeAsset, [string]$StageDir)
+        if (Test-Path $StageDir) { Remove-Item -Path $StageDir -Recurse -Force }
+        New-Item -ItemType Directory -Path (Join-Path $StageDir 'bin') -Force | Out-Null
+        Copy-Item -Path (Get-ReleaseAssetPath -Root $ProjectDir -AssetName 'project.pros') -Destination (Join-Path $StageDir 'project.pros') -Force
+        Copy-Item -Path (Get-ReleaseAssetPath -Root $ProjectDir -AssetName 'cold.package.bin') -Destination (Join-Path $StageDir 'bin\cold.package.bin') -Force
+        Copy-Item -Path (Get-ReleaseAssetPath -Root $ProjectDir -AssetName $ModeAsset) -Destination (Join-Path $StageDir 'bin\hot.package.bin') -Force
+        return $StageDir
     }
 
     # Run pros.exe and collect what it prints.
@@ -513,6 +537,12 @@ $SharedCode = {
             }
         }
 
+        # Test-mode hot files are optional the same way: older releases do not
+        # list them, and a bad one only turns that mode off.
+        $modeNames = @('auton-test-hot.package.bin', 'drive-test-hot.package.bin')
+        $listedModes = @()
+        if ($null -ne $rel.Sha256) { $listedModes = @($modeNames | Where-Object { $rel.Sha256.ContainsKey($_) }) }
+
         $projectDir = Join-Path $InstallDir 'project'
         $haveAll = $true
         foreach ($n in $AssetNames) {
@@ -522,6 +552,14 @@ $SharedCode = {
             foreach ($n in $testerNames) {
                 if (-not (Test-Path (Get-ReleaseAssetPath -Root $projectDir -AssetName $n))) { $haveAll = $false }
             }
+        }
+        foreach ($n in $listedModes) {
+            # A test-mode copy counts only if it still matches this release's
+            # fingerprint; otherwise the whole build downloads again and is checked.
+            $p = Get-ReleaseAssetPath -Root $projectDir -AssetName $n
+            if (-not (Test-Path $p)) { $haveAll = $false; continue }
+            $actual = (Get-FileHash -Path $p -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne ([string]$rel.Sha256[$n]).ToLowerInvariant()) { $haveAll = $false }
         }
         function Write-VersionMetadata {
             param($Release, [string]$DownloadedAt)
@@ -632,6 +670,20 @@ $SharedCode = {
             Add-SharedLog $Sync 'Tester download unavailable: the release tester fingerprints are incomplete.'
         }
 
+        foreach ($n in $listedModes) {
+            $dest = Get-ReleaseAssetPath -Root $stage -AssetName $n
+            try {
+                New-Item -ItemType Directory -Path (Split-Path $dest -Parent) -Force | Out-Null
+                Invoke-WebRequest -Uri ($ReleasesUrl + '/download/' + $rel.Tag + '/' + $n) -OutFile $dest -UseBasicParsing -TimeoutSec 120
+                if ((-not (Test-Path $dest)) -or ((Get-Item $dest).Length -eq 0)) { throw ('Downloaded file ' + $n + ' is empty.') }
+                $actual = (Get-FileHash -Path $dest -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($actual -ne $rel.Sha256[$n]) { throw ('Download was damaged (' + $n + ' failed its SHA-256 check).') }
+            } catch {
+                Remove-Item -Path $dest -Force -ErrorAction SilentlyContinue
+                Add-SharedLog $Sync ('Test mode download unavailable (' + $n + '): ' + $_.Exception.Message)
+            }
+        }
+
         # Swap the new folder in without ever deleting the working one first:
         #   project -> project.old, new -> project, then delete project.old.
         # If the middle step fails, project.old goes back to being project.
@@ -728,6 +780,24 @@ function Test-HaveCode {
     return (Test-Path (Join-Path $script:ProjectDir 'project.pros')) -and
            (Test-Path (Join-Path $script:BinDir 'hot.package.bin')) -and
            (Test-Path (Join-Path $script:BinDir 'cold.package.bin'))
+}
+
+# True when the downloaded build can be uploaded in this mode. Older releases
+# have no test-mode hot files, so those modes are simply unavailable.
+function Test-HaveMode {
+    param($Mode)
+    if (-not (Test-HaveCode)) { return $false }
+    return (Test-Path (Get-ReleaseAssetPath -Root $script:ProjectDir -AssetName $Mode.Asset))
+}
+
+# The name to show after a mode change: a default name follows the mode, a
+# name someone typed themselves is left alone.
+function Get-NameForMode {
+    param([string]$CurrentName, $Mode)
+    $isDefault = (-not $CurrentName.Trim())
+    foreach ($m in $script:Modes) { if ($CurrentName.Trim() -ceq $m.Name) { $isDefault = $true } }
+    if ($isDefault) { return $Mode.Name }
+    return $CurrentName
 }
 
 function Test-HaveTester {
@@ -1004,8 +1074,13 @@ function New-MainForm {
 
     # Upload section
     $ui.UploadLabel = New-Label 'UPLOAD' 0 0 10 10 $f.Section $c.Muted
+    $ui.ModeLabel = New-Label 'Mode' 0 0 10 10 $f.Base $c.Muted
     $ui.SlotLabel = New-Label 'Slot' 0 0 10 10 $f.Base $c.Muted
     $ui.NameLabel = New-Label 'Program name' 0 0 10 10 $f.Base $c.Muted
+    $ui.ModeBox = New-Object System.Windows.Forms.ComboBox
+    $ui.ModeBox.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    foreach ($m in $script:Modes) { [void]$ui.ModeBox.Items.Add($m.Label) }
+    $ui.ModeBox.SelectedIndex = 0
     $ui.SlotBox = New-Object System.Windows.Forms.ComboBox
     $ui.SlotBox.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
     foreach ($n in 1..8) { [void]$ui.SlotBox.Items.Add([string]$n) }
@@ -1020,7 +1095,7 @@ function New-MainForm {
     $ui.NameError.AutoEllipsis = $false
     $ui.NameError.Visible = $false
     $ui.UploadButton = New-FlatButton 'Upload to robot' 0 0 10 10 $true
-    $form.Controls.AddRange(@($ui.UploadLabel, $ui.SlotLabel, $ui.NameLabel, $ui.SlotBox, $ui.NameBox, $ui.NameError, $ui.UploadButton))
+    $form.Controls.AddRange(@($ui.UploadLabel, $ui.ModeLabel, $ui.SlotLabel, $ui.NameLabel, $ui.ModeBox, $ui.SlotBox, $ui.NameBox, $ui.NameError, $ui.UploadButton))
 
     # Robot tests section
     $ui.TestsLine = New-Line 0 0 10
@@ -1095,6 +1170,7 @@ function New-MainForm {
     $ui.SendButton.Add_Click({ Invoke-Safe { Send-Results } })
     $ui.OpenFolderLink.Add_LinkClicked({ Invoke-Safe { Open-ResultsFolder } })
     $ui.NameBox.Add_TextChanged({ Invoke-Safe { Update-NameError } })
+    $ui.ModeBox.Add_SelectedIndexChanged({ Invoke-Safe { Set-ModeDefaults } })
     $ui.DetailsLink.Add_LinkClicked({ Invoke-Safe { Set-DetailsVisible (-not $script:DetailsShown) } })
     # Shown: the controls now have their real sizes, so lay out again. In
     # -SelfTest the window may be shown for a screenshot; do not start the app.
@@ -1170,14 +1246,18 @@ function Update-Layout {
     # Upload section
     $ui.UploadLabel.SetBounds($M, $y, $inner, (Px 16))
     $y += Px 24
-    $slotW = Px 96
-    $nameX = $M + $slotW + (Px 16)
+    $modeW = Px 132
+    $slotW = Px 72
+    $slotX = $M + $modeW + (Px 16)
+    $nameX = $slotX + $slotW + (Px 16)
     $nameW = $M + $inner - $nameX
-    $ui.SlotLabel.SetBounds($M, $y, $slotW, (Px 18))
+    $ui.ModeLabel.SetBounds($M, $y, $modeW, (Px 18))
+    $ui.SlotLabel.SetBounds($slotX, $y, $slotW, (Px 18))
     $ui.NameLabel.SetBounds($nameX, $y, $nameW, (Px 18))
     $y += Px 22
     # A drop-down list sets its own height from the font; match the text box to it.
-    $ui.SlotBox.SetBounds($M, $y, $slotW, $ui.SlotBox.Height)
+    $ui.ModeBox.SetBounds($M, $y, $modeW, $ui.ModeBox.Height)
+    $ui.SlotBox.SetBounds($slotX, $y, $slotW, $ui.SlotBox.Height)
     $inputH = $ui.SlotBox.Height
     $ui.NameBox.SetBounds($nameX, $y, $nameW, $inputH)
     $y += $inputH
@@ -1256,6 +1336,7 @@ $script:LsusbRunning = $false
 $script:InstalledTag = ''
 $script:LatestTag = ''
 $script:UploadSlot = 1
+$script:UploadMode = 'Competition'
 $script:ProsExe = $null
 $script:Jobs = New-Object System.Collections.ArrayList
 $script:Pool = $null
@@ -1348,6 +1429,22 @@ function Update-NameError {
     Update-Layout
 }
 
+# Picking a mode sets that mode's slot and name, and says so if this build
+# does not have the mode.
+function Set-ModeDefaults {
+    $ui = $script:Ui
+    $mode = $script:Modes[$ui.ModeBox.SelectedIndex]
+    $ui.SlotBox.SelectedIndex = $mode.Slot - 1
+    $ui.NameBox.Text = Get-NameForMode $ui.NameBox.Text $mode
+    if (-not (Test-HaveMode $mode)) {
+        if (Test-HaveCode) {
+            Set-Status ('The downloaded build has no ' + $mode.Label + ' version. Click Get latest code, or ask the programmer.') 'error'
+        } else {
+            Set-Status 'No robot code downloaded yet. Click Get latest code first.' 'error'
+        }
+    }
+}
+
 # Closing time: kill every pros.exe we started, stop background jobs, and close
 # the runspace pool. Each wait is capped so closing never hangs.
 function Stop-Background {
@@ -1389,7 +1486,7 @@ function Set-Busy {
     $script:BusyMessage = $Message
     $script:BusyStarted = Get-Date
     $script:LastElapsed = -1
-    foreach ($ctl in @($ui.GetButton, $ui.UploadButton, $ui.TesterButton, $ui.RecordButton, $ui.SendButton, $ui.SlotBox, $ui.NameBox)) { $ctl.Enabled = -not $On }
+    foreach ($ctl in @($ui.GetButton, $ui.UploadButton, $ui.TesterButton, $ui.RecordButton, $ui.SendButton, $ui.ModeBox, $ui.SlotBox, $ui.NameBox)) { $ctl.Enabled = -not $On }
     if ($script:Recording) { $ui.RecordButton.Enabled = $true }
     if (-not $On) {
         $ui.TesterButton.Enabled = Test-HaveTester
@@ -1642,6 +1739,11 @@ function Start-Upload {
         Set-Status 'No robot code downloaded yet. Click Get latest code first.' 'error'
         return
     }
+    $mode = $script:Modes[$script:Ui.ModeBox.SelectedIndex]
+    if (-not (Test-HaveMode $mode)) {
+        Set-Status ('The downloaded build has no ' + $mode.Label + ' version. Click Get latest code, or ask the programmer.') 'error'
+        return
+    }
     # Check the program name first and explain any problem next to the box.
     $name = $script:Ui.NameBox.Text.Trim()
     if (-not (Test-ProgramName $name)) {
@@ -1651,12 +1753,25 @@ function Start-Upload {
         return
     }
     $script:UploadSlot = [int]$script:Ui.SlotBox.SelectedItem
+    $script:UploadMode = $mode.Label
 
-    Set-Busy $true 'upload' ('Uploading to slot ' + $script:UploadSlot + '. Keep the cable plugged in.')
-    Add-LogText ('[' + (Get-Date).ToString('HH:mm:ss') + '] Uploading ' + $script:InstalledTag + ' to slot ' + $script:UploadSlot)
+    # Competition uploads the downloaded folder as is. A test mode uploads a
+    # staging copy with its own hot file swapped in.
+    $uploadDir = $script:ProjectDir
+    if ($mode.Asset -ne 'hot.package.bin') {
+        try {
+            $uploadDir = New-ModeProject -ProjectDir $script:ProjectDir -ModeAsset $mode.Asset -StageDir (Join-Path $InstallDir 'project.mode')
+        } catch {
+            Set-Status ('Could not prepare the ' + $mode.Label + ' files. ' + $_.Exception.Message) 'error'
+            return
+        }
+    }
+
+    Set-Busy $true 'upload' ('Uploading ' + $mode.Label + ' to slot ' + $script:UploadSlot + '. Keep the cable plugged in.')
+    Add-LogText ('[' + (Get-Date).ToString('HH:mm:ss') + '] Uploading ' + $script:InstalledTag + ' (' + $mode.Label + ') to slot ' + $script:UploadSlot)
     $jobArgs = @{
         ProsExe    = $script:ProsExe
-        ProjectDir = $script:ProjectDir
+        ProjectDir = $uploadDir
         Slot       = $script:UploadSlot
         Name       = $name
         Timeout    = $script:UploadTimeoutSec
@@ -1665,7 +1780,7 @@ function Start-Upload {
         param($r)
         Set-Busy $false
         $outcome = Get-UploadOutcome -Run $r -Slot $script:UploadSlot
-        $message = $outcome.Message
+        $message = $outcome.Message -replace '^Uploaded to slot', ('Uploaded ' + $script:UploadMode + ' to slot')
         # PROS asked to clean up old libraries (we answered yes): say so plainly.
         if ([string]$r.Output -match 'There are too many files on the V5') {
             $evictNote = 'PROS removed old libraries (and programs that used them) to make room.'

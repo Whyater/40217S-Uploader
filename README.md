@@ -51,7 +51,7 @@ The same robot code is built three ways. The **Mode** box picks which one goes o
 | Mode | Slot | What it does |
 | --- | --- | --- |
 | Competition | 1 | The full match program. This is the one to use at events |
-| Auton Test | 2 | Pick the color, side, and routine on the brain, then press **A** on the controller to run the auton and **B** to stop it. No driving |
+| Auton Test | 2 | Pick the color, side, and routine on the controller (see [Before every match](#before-every-match-set-up-the-robot-on-the-controller)), then press **A** to run the auton and **B** to stop it. No driving |
 | Drive Test | 3 | Driving only. Autonomous does nothing |
 
 If a mode says the build does not have it, the newest release is older than the test modes. Click **Get latest code**, or ask the programmer.
@@ -62,7 +62,7 @@ Do this before driving, so a wrongly wired motor shows up on a screen instead of
 
 1. Put the robot flat on the floor, not on a stand, with about 2 feet of open space on every side.
 2. Turn on the controller and run the program from the brain. Do not touch the robot for 3 seconds while its sensors calibrate.
-3. Answer the first two questions on the brain screen (see [Before every match](#before-every-match-set-up-the-robot-on-the-brain)), then tap the left or right button until the selected auton reads **Check: drive + sensors**.
+3. Pick Color and Side on the controller (see [Before every match](#before-every-match-set-up-the-robot-on-the-controller)), set Auto to **Check: drive + sensors**, and press **A**.
 4. **Hold D-pad Down** on the controller for 1 second to start. The robot turns a little one way, then the other, rolls forward a few inches, and backs up. Press **D-pad Down** again (or hold it) at any time to stop it.
 5. Take a photo of the brain screen and the controller screen and send it to the programmer.
 
@@ -84,7 +84,7 @@ Holding **D-pad Down** only starts a test when the robot is not plugged into a f
 | Y | Up to the next alliance goal height. Each press goes one Pin higher, up to a goal holding 5 |
 | D-pad Right | Up to the next neutral goal height. From the bottom, the first press is the empty neutral goal, and each press after that goes one Pin higher |
 | A | Down to the next goal height, and from the lowest one to the bottom |
-| D-pad Left | Reset: open the claw and lower the lift to the bottom |
+| D-pad Left | Reset: open the claw and lower the lift to the bottom. The claw can't close until the lift gets there. Hold it for one second and the lift goes limp; let go once it has settled to the very bottom, and that becomes the new bottom |
 | D-pad Up | Tilt the claw down (only with the lift at the bottom) or back up. Tilting down: if the claw is closed and empty, it opens first. Tilting up with the claw closed: the lift rises a little first |
 | D-pad Down | In a match: lift up to the "one Cup and one Pin" height. Off the field: a short press does the same, and holding it for 1 second starts the selected auton as a test (press it again to stop) |
 | X | Open or close the claw (switches each press) |
@@ -93,19 +93,23 @@ If the claw is tilted down when you press a lift up button, the robot closes the
 
 The claw starts tilted down and open. With the claw tilted up, it closes on its own when a Pin or Cup comes within about 10 cm, and opens on its own if the Pin or Cup it was holding is gone. With the claw tilted down it never closes or opens on its own. Press **X** to open or close it yourself. D-pad Up won't tilt the claw down while there's a Pin in it, so it can't drop one by accident.
 
-The robot also handles Toggles for you. When one of its side toggle sensors is right next to a wall Toggle and a color is picked, the roller turns the Toggle until it sees our color, then stops. Holding **L1** still spins the roller by hand and overrides it. Line 1 of the brain screen shows a short toggle status. It can read `OURS`, `SPIN`, `THEIRS`, `OTHER`, `UNSURE`, `NO TGL`, `NO COLOR`, `SENS ERR`, `STALL`, or `RETRIES`.
+The robot also handles Toggles for you. When one of its side toggle sensors is right next to a wall Toggle and a color is picked, the roller turns the Toggle until it sees our color, then stops. Holding **L1** still spins the roller by hand and overrides it. Line 1 of the brain screen shows a short toggle status. It can read `OURS`, `SPIN`, `THEIRS`, `OTHER`, `UNSURE`, `NO TGL`, `NO COLOR`, `SENS ERR`, `STALL`, `RETRIES`, or `MISSED` (it spun for three seconds without finding our color, so it gave up until the robot leaves that Toggle).
 
 Start the program with the lift all the way down.
 
-## Before every match: set up the robot on the brain
+## Before every match: set up the robot on the controller
 
-After the program starts, the brain asks three things in order. You answer with the three buttons at the bottom of the brain screen.
+When the program starts, the controller shows three rows (**Color**, **Side**, and **Auto**), and **the robot does not drive until you finish this setup**.
 
-1. **1/3 Alliance color?** Left button is RED, right button is BLUE.
-2. **2/3 (your color) start side?** Left button is LEFT, right button is RIGHT. Left and right are as seen by the drive team, standing at your own alliance station and looking at the field.
-3. **The routine.** Left and right step through the autons. The middle button starts over at step 1, and the routine you chose is kept.
+1. **Up / Down** picks a row. The `>` marks the row you are on.
+2. **Left / Right** changes the row. Color is RED or BLUE and Side is LEFT or RIGHT. On the Auto row, Left and Right step through the routines.
+3. **A** confirms. It only works once Color and Side are both picked. The controller then shows your choice, such as "RED LEFT Match".
 
-The controller screen also shows your choice, such as "RED LEFT Match".
+Left and right are as seen by the drive team, standing at your own alliance station and looking at the field.
+
+To change it later, hold **L1 + R1** for one second. The setup opens again and the robot stops until you press **A**. The roller and intake run for that second.
+
+The brain buttons still work as a backup. The left button picks RED, then LEFT, and the right button picks BLUE, then RIGHT. After that, the two buttons step through the routines, and the middle one starts over. Picking the side on the brain also finishes the setup.
 
 - **Color** sets which color the Toggle roller spins to. With no color picked, the toggles never spin on their own.
 - **Side** picks which version of the match route runs. A match route will not run if no side is picked, and the brain says "NO SIDE PICKED".

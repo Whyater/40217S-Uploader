@@ -67,11 +67,11 @@ Holding **D-pad Down** only starts a test when the robot is not plugged into a f
 | R1 (hold) | Intake in |
 | R2 (hold) | Intake out |
 | L1 (hold) | Roller |
-| L2 (hold) | Lift down, only while held, all the way to the bottom |
+| L2 (hold) | Lift down, only while held. It slows down and stops at the bottom, so holding it longer does nothing. Turn the robot on with the lift all the way down |
 | B (hold) | Lift up, only while held, all the way to the top |
-| Y | Next alliance goal position. Each press goes one Pin higher, up to a goal holding 5 |
-| D-pad Right | Next neutral goal position. The first press is the empty neutral goal height, and each press after that goes one Pin higher |
-| A | Back one position (from position 1, to the bottom) |
+| Y | Up to the next alliance goal height. Each press goes one Pin higher, up to a goal holding 5 |
+| D-pad Right | Up to the next neutral goal height. From the bottom, the first press is the empty neutral goal, and each press after that goes one Pin higher |
+| A | Down to the next goal height, and from the lowest one to the bottom |
 | D-pad Left | Reset: open the claw and lower the lift to the bottom |
 | D-pad Up | Tilt the claw down (only with the lift at the bottom) or back up. Tilting down: if the claw is closed and empty, it opens first. Tilting up with the claw closed: the lift rises a little first |
 | D-pad Down | In a match: lift up to the "one Cup and one Pin" height. Off the field: a short press does the same, and holding it for 1 second starts the selected auton as a test (press it again to stop) |

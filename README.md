@@ -81,8 +81,8 @@ Holding **D-pad Down** only starts a test when the robot is not plugged into a f
 | L1 (hold) | Roller |
 | L2 (hold) | Lift down, only while held. It slows down and stops at the bottom, so holding it longer does nothing. Turn the robot on with the lift all the way down |
 | B (hold) | Lift up, only while held, all the way to the top |
-| Y | Up to the next alliance goal height. Each press goes one Pin higher, up to a goal holding 5 |
-| D-pad Right | Up to the next neutral goal height. From the bottom, the first press is the empty neutral goal, and each press after that goes one Pin higher |
+| Y | Up to the next alliance goal height. From the bottom, the first press clears an empty alliance goal, and each press after that goes one Pin higher, up to a goal holding 5 |
+| D-pad Right | Up to the next neutral goal height. Neutral goals start with a Pin in them, so the first press from the bottom clears that Pin, and each press after that goes one Pin higher, up to 3 of ours on top of it |
 | A | Down to the next goal height, and from the lowest one to the bottom |
 | D-pad Left | Reset: open the claw and lower the lift to the bottom. The claw can't close until the lift gets there. Hold it for one second and the lift goes limp; let go once it has settled to the very bottom, and that becomes the new bottom |
 | D-pad Up | Tilt the claw down (only with the lift at the bottom) or back up. Tilting down: if the claw is closed and empty, it opens first. Tilting up with the claw closed: the lift rises a little first |

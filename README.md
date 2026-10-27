@@ -69,8 +69,8 @@ Holding **D-pad Down** only starts a test when the robot is not plugged into a f
 | L1 (hold) | Roller |
 | L2 (hold) | Lift down, only while held, all the way to the bottom |
 | B (hold) | Lift up, only while held, all the way to the top |
-| Y | Next alliance goal position (1 = one Pin up, 2 = two Pins, ...) |
-| D-pad Right | Next neutral goal position (same idea, neutral goal heights) |
+| Y | Next alliance goal position. Each press goes one Pin higher, up to a goal holding 5 |
+| D-pad Right | Next neutral goal position. The first press is the empty neutral goal height, and each press after that goes one Pin higher |
 | A | Back one position (from position 1, to the bottom) |
 | D-pad Left | Reset: open the claw and lower the lift to the bottom |
 | D-pad Up | Tilt the claw down (only with the lift at the bottom) or back up. Tilting down: if the claw is closed and empty, it opens first. Tilting up with the claw closed: the lift rises a little first |
@@ -83,7 +83,7 @@ The claw starts tilted down and open. With the claw tilted up, it closes on its 
 
 The robot also handles Toggles for you. When one of its side toggle sensors is right next to a wall Toggle and a color is picked, the roller turns the Toggle until it sees our color, then stops. Holding **L1** still spins the roller by hand and overrides it. Line 1 of the brain screen shows a short toggle status. It can read `OURS`, `SPIN`, `THEIRS`, `OTHER`, `UNSURE`, `NO TGL`, `NO COLOR`, `SENS ERR`, `STALL`, or `RETRIES`.
 
-The lift heights are not set yet. Until the programmer measures them, the lift buttons only go a short way. Start the program with the lift all the way down.
+Start the program with the lift all the way down.
 
 ## Before every match: set up the robot on the brain
 
@@ -104,10 +104,12 @@ The controller screen also shows your choice, such as "RED LEFT Match".
 The uploader has a **Robot tests** section. It puts a separate program on the brain that measures the robot, so the programmer can set real numbers instead of guesses.
 
 1. Click **Put tester on robot**. This puts a program called "Scourge Tester" on slot 8. It does not replace the match program.
-2. Turn on the controller and run "Scourge Tester" from the brain. Brain left and right buttons pick a test. The middle button (or **A**) runs it. Every test that moves the robot waits for you to press **A** and says how much space it needs. **B stops a test at once.**
-3. When a test needs a number, D-pad Up and Down change it by 0.25, D-pad Left and Right change it by 1.0, and **A** saves it.
-4. Plug the USB cable into the brain (or the controller) and click **Record results** before you run tests. The button becomes **Stop recording**, and the app shows how many values it recorded. You can't upload while it is recording.
-5. When you are done, click **Send results**. The results go straight to the programmer as an issue in the team's private data repository. You don't need a GitHub account, and the status line shows the issue number. If that can't reach the server, your browser opens a new issue with the results filled in instead (or copied, if they are too long: paste them with Ctrl+V). Then you need to be signed in to GitHub with an account the programmer added to that repository.
+2. Plug the USB cable into the brain (or the controller) and click **Record results**. The button becomes **Stop recording**, and the app shows how many values it recorded. You can't upload while it is recording.
+3. Turn on the controller and run "Scourge Tester" from the brain. It opens on **Start full test**. Put the lift all the way down, empty the intake, and give the robot room (8 ft in front, 3 ft all around). Then press **A** (or the brain's middle button) once. The 10 tests run one after another. The run pauses whenever a step needs your hands (a Pin or Cup in the claw, a Toggle face to show, a measurement to type, or aiming the robot before it drives). Press **A** to go on. **B stops the whole run at once.**
+4. When a test needs a number, D-pad Up and Down change it by 0.25, D-pad Left and Right change it by 1.0, and **A** saves it.
+5. When it finishes, click **Stop recording**, then **Send results**. The results go straight to the programmer as an issue in the team's private data repository. You don't need a GitHub account, and the status line shows the issue number. If that can't reach the server, your browser opens a new issue with the results filled in instead (or copied, if they are too long: paste them with Ctrl+V). Then you need to be signed in to GitHub with an account the programmer added to that repository.
+
+To run one test by itself, use the brain's left and right buttons (or D-pad Left and Right) to pick it, then press **A**.
 
 The results are also saved on the laptop in `Documents\Scourge Robot Data`. The **Open folder** link opens it.
 

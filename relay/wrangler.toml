@@ -1,0 +1,14 @@
+name = "scourge-results"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# Add the GitHub token with: npx wrangler secret put GITHUB_TOKEN
+
+# About 10 sends per minute per address (Workers rate limiting binding; Cloudflare counts per location, so it is approximate).
+[[ratelimits]]
+name = "LIMITER"
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 10
+  period = 60

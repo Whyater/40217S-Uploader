@@ -50,7 +50,7 @@ if (-not $InstallDir) {
 $script:ReleasesUrl = 'https://github.com/Whyater/40217S-Uploader/releases'
 $script:AssetNames = @('hot.package.bin', 'cold.package.bin', 'project.pros')
 $script:TesterAssetNames = @('tester-hot.package.bin', 'tester-cold.package.bin', 'tester-project.pros')
-$script:UploaderVersion = '2.0.0'
+$script:UploaderVersion = '2.1.0'
 $script:UploaderScriptPath = $PSCommandPath
 $script:UploaderManifestUrl = 'https://raw.githubusercontent.com/Whyater/40217S-Uploader/main/uploader.json'
 $script:ProjectDir = Join-Path $InstallDir 'project'
@@ -59,6 +59,7 @@ $script:VersionFile = Join-Path $InstallDir 'version.json'
 $script:ProsDir    = Join-Path $InstallDir 'pros-cli'
 $script:PollSeconds = 5        # how often to check for a plugged-in brain while idle
 $script:UploadTimeoutSec = 600 # wireless uploads through a controller can take minutes
+$script:ResultsUrl = ''
 
 # ---------------------------------------------------------------------------
 # Shared code. These functions are used in two places:
@@ -465,9 +466,14 @@ $SharedCode = {
         }
         $version = [string]$m.version
         $hash = ([string]$m.sha256).ToLowerInvariant()
+        $resultsUrl = ''
+        if ($null -ne $m.PSObject.Properties['results_url']) {
+            $candidateUrl = [string]$m.results_url
+            if ($candidateUrl -match '^https://[A-Za-z0-9.-]+(/[A-Za-z0-9._~/-]*)?$') { $resultsUrl = $candidateUrl }
+        }
         if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') { return @{ Status = 'error'; Error = 'The uploader manifest has an invalid version.' } }
         if ($hash -notmatch '^[0-9a-f]{64}$') { return @{ Status = 'error'; Error = 'The uploader manifest has an invalid SHA-256 fingerprint.' } }
-        return @{ Status = 'ok'; Version = $version; Sha256 = $hash }
+        return @{ Status = 'ok'; Version = $version; Sha256 = $hash; ResultsUrl = $resultsUrl }
     }
 
     function Save-UploaderUpdate {
@@ -517,7 +523,31 @@ $SharedCode = {
                 if (-not (Test-Path (Get-ReleaseAssetPath -Root $projectDir -AssetName $n))) { $haveAll = $false }
             }
         }
+        function Write-VersionMetadata {
+            param($Release, [string]$DownloadedAt)
+            $ver = @{
+                tag           = $Release.Tag
+                name          = $Release.Name
+                notes         = $Release.Notes
+                built_at      = $Release.BuiltAt
+                downloaded_at = $DownloadedAt
+            }
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText((Join-Path $InstallDir 'version.json'), ($ver | ConvertTo-Json), $utf8NoBom)
+        }
         if ($haveAll -and ($rel.Tag -eq $InstalledTag)) {
+            $downloadedAt = (Get-Date).ToUniversalTime().ToString('o')
+            $existingVersionPath = Join-Path $InstallDir 'version.json'
+            if (Test-Path $existingVersionPath) {
+                try {
+                    $existingVersion = [System.IO.File]::ReadAllText($existingVersionPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+                    if ($null -ne $existingVersion.PSObject.Properties['downloaded_at']) {
+                        $existingDownloadedAt = [string]$existingVersion.downloaded_at
+                        if ($existingDownloadedAt) { $downloadedAt = $existingDownloadedAt }
+                    }
+                } catch { }
+            }
+            Write-VersionMetadata -Release $rel -DownloadedAt $downloadedAt
             return @{ Status = 'current'; Release = $rel; TesterAvailable = $testerCandidate }
         }
 
@@ -624,15 +654,7 @@ $SharedCode = {
         }
         if ($hadOld) { Remove-Item -Path $old -Recurse -Force -ErrorAction SilentlyContinue }
 
-        $ver = @{
-            tag           = $rel.Tag
-            name          = $rel.Name
-            notes         = $rel.Notes
-            built_at      = $rel.BuiltAt
-            downloaded_at = (Get-Date).ToUniversalTime().ToString('o')
-        }
-        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-        [System.IO.File]::WriteAllText((Join-Path $InstallDir 'version.json'), ($ver | ConvertTo-Json), $utf8NoBom)
+        Write-VersionMetadata -Release $rel -DownloadedAt ((Get-Date).ToUniversalTime().ToString('o'))
         return @{ Status = 'downloaded'; Release = $rel; TesterAvailable = $testerReady }
     }
 }
@@ -647,6 +669,40 @@ $UploadBody   = { Invoke-RobotUpload -ProsExe $A.ProsExe -ProjectDir $A.ProjectD
 $RecordBody  = { Invoke-ProsRecording -ProsExe $A.ProsExe -WorkDir $A.WorkDir -FilePath $A.FilePath -Sync $Sync }
 $LsusbBody    = { Invoke-Pros -ProsExe $A.ProsExe -Arguments 'lsusb --target v5 --no-analytics --no-sentry' -WorkDir $A.WorkDir -TimeoutSec 20 -Sync $Sync -Quiet }
 $CheckBody    = { Get-LatestRelease -ReleasesUrl $A.ReleasesUrl }
+$SendBody = {
+    $result = @{ Status = 'error'; Error = '' }
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $json = @{ title = [string]$A.Title; body = [string]$A.Body } | ConvertTo-Json -Compress
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+        # Content-Type goes through -ContentType: PowerShell 5.1 refuses it inside -Headers.
+        $headers = @{ 'X-Scourge-Client' = 'windows-uploader ' + [string]$A.Version }
+        try {
+            $response = Invoke-WebRequest -Uri $A.ResultsUrl -UseBasicParsing -TimeoutSec 30 -Method Post -Body $bytes -Headers $headers -ContentType 'application/json; charset=utf-8'
+            $statusCode = [int]$response.StatusCode
+            $responseText = [string]$response.Content
+        } catch {
+            $response = $_.Exception.Response
+            $statusCode = 0
+            if ($null -ne $response) { try { $statusCode = [int]$response.StatusCode } catch { } }
+            if ($statusCode -eq 0) { $result.Error = $_.Exception.Message } else { $result.Error = 'Relay returned HTTP ' + $statusCode + '.' }
+            return $result
+        }
+        if ($statusCode -ne 201) { $result.Error = 'Relay returned HTTP ' + $statusCode + '.'; return $result }
+        try { $payload = $responseText | ConvertFrom-Json } catch { $result.Error = 'Relay returned invalid JSON.'; return $result }
+        if (($null -eq $payload.PSObject.Properties['ok']) -or ($payload.ok -ne $true)) { $result.Error = 'Relay response was not successful.'; return $result }
+        if ($null -eq $payload.PSObject.Properties['issues']) { $result.Error = 'Relay response had no issues.'; return $result }
+        $numbers = New-Object System.Collections.Generic.List[string]
+        foreach ($n in @($payload.issues)) {
+            if (-not (([string]$n) -match '^\d+$')) { $result.Error = 'Relay response had an invalid issue number.'; return $result }
+            [void]$numbers.Add([string]$n)
+        }
+        if ($numbers.Count -eq 0) { $result.Error = 'Relay response had no issue numbers.'; return $result }
+        $result.Status = 'success'
+        $result.Issues = @($numbers.ToArray())
+        return $result
+    } catch { $result.Error = $_.Exception.Message; return $result }
+}
 # The result carries ForClick so a startup check that finishes after a click
 # never acts on the click.
 $UploaderCheckBody = {
@@ -702,7 +758,12 @@ function Split-ReleaseNotes {
         if ($sha.Length -gt 7) { $sha = $sha.Substring(0, 7) }
         return @{ Sha = $sha; Subject = $Matches[2] }
     }
-    return @{ Sha = ''; Subject = $first }
+    if ($first -match '^Built from robot code commit ([0-9a-fA-F]{7,40})$') {
+        $sha = $Matches[1]
+        if ($sha.Length -gt 7) { $sha = $sha.Substring(0, 7) }
+        return @{ Sha = $sha; Subject = '' }
+    }
+    return @{ Sha = ''; Subject = '' }
 }
 
 function Format-BuildDate {
@@ -1369,12 +1430,25 @@ function Update-BuildInfo {
         $script:InstalledTag = [string]$b.tag
         $script:TesterBuildTag = if (Test-HaveTester) { $script:InstalledTag } else { '' }
         $parts = Split-ReleaseNotes ([string]$b.notes)
-        $title = $parts.Subject
+        $tag = [string]$b.tag
+        $isCiBuildTag = $tag -match '^build-(\d+)-[0-9a-fA-F]+$'
+        $title = ''
+        if ($isCiBuildTag) { $title = 'Build ' + $Matches[1] }
+        if (-not $title) { $title = $parts.Subject }
         if (-not $title) { $title = [string]$b.name }
-        if (-not $title) { $title = 'Build ' + $b.tag }
+        if (-not $title) { $title = 'Build ' + $tag }
         $ui.BuildTitle.Text = $title
-        $meta = 'Build ' + $b.tag
-        if ($parts.Sha) { $meta += ', commit ' + $parts.Sha }
+        $sha = [string]$parts.Sha
+        if (-not $sha -and ($tag -match '^build-\d+-([0-9a-fA-F]+)$')) {
+            $sha = $Matches[1]
+            if ($sha.Length -gt 7) { $sha = $sha.Substring(0, 7) }
+        }
+        $meta = ''
+        if ($sha) { $meta = 'Commit ' + $sha }
+        if (-not $isCiBuildTag) {
+            if ($meta) { $meta += "`n" }
+            $meta += 'Build ' + $tag
+        }
         # built_at comes from release.json. Older version.json files have published_at.
         $stamp = [string]$b.built_at
         if (-not $stamp) { $stamp = [string]$b.published_at }
@@ -1484,6 +1558,7 @@ function Start-UploaderCheck {
     Start-BgJob $UploaderCheckBody @{ ManifestUrl = $script:UploaderManifestUrl; ForClick = [bool]$ForClick } {
         param($r)
         if ($r.Status -eq 'ok') {
+            $script:ResultsUrl = [string]$r.ResultsUrl
             try { $newer = ([version]$r.Version -gt [version]$script:UploaderVersion) } catch { $newer = $false }
             $script:LatestUploaderVersion = [string]$r.Version
             $script:UploaderUpdateReady = $newer
@@ -1674,7 +1749,27 @@ function Open-ResultsFolder {
     Start-Process explorer.exe -ArgumentList ('"' + $folder + '"')
 }
 
+# The old way: open a new-issue page in the browser (needs a GitHub login with access to the repo).
+function Open-ResultsIssuePage {
+    param([string]$Title, [string]$Body, [string]$Prefix)
+    $newIssue = 'https://github.com/Whyater/40217S-Robot-Data/issues/new?title=' + [uri]::EscapeDataString($Title)
+    # EscapeDataString throws on very long text, so check the raw length first.
+    $url = ''
+    if ($Body.Length -le 5000) { $url = $newIssue + '&body=' + [uri]::EscapeDataString($Body) }
+    if ((-not $url) -or ($url.Length -gt 7000)) {
+        Set-Clipboard -Value $Body
+        Start-Process $newIssue
+        Set-Status ($Prefix + 'Paste the results into the box (Ctrl+V), then click Submit new issue. Saved at ' + $script:ResultsPath) 'info'
+    } else {
+        Start-Process $url
+        Set-Status ($Prefix + 'New issue page opened. Saved at ' + $script:ResultsPath) 'info'
+    }
+}
+
+# Sends the results through the relay (results_url in uploader.json), which files them as an issue
+# with no GitHub login. Falls back to the browser page if there is no relay or it fails.
 function Send-Results {
+    if ($script:Busy) { return }
     if ($script:Recording) { Set-Status 'Stop recording before sending results.' 'error'; return }
     if (-not $script:ResultsPath -or -not (Test-Path $script:ResultsPath)) { Set-Status 'No results yet.' 'error'; return }
     $lines = Get-Content -Path $script:ResultsPath -ErrorAction SilentlyContinue
@@ -1683,17 +1778,26 @@ function Send-Results {
     $tag = if ($script:TesterBuildTag) { $script:TesterBuildTag } else { 'unknown' }
     $body = 'Uploader ' + $script:UploaderVersion + ', tester build ' + $tag + ', UTC ' + [DateTime]::UtcNow.ToString('o') + "`r`n`r`n" + (($lines | Select-Object -Skip 1) -join "`r`n")
     $title = 'Robot data ' + $date
-    $newIssue = 'https://github.com/Whyater/40217S-Robot-Data/issues/new?title=' + [uri]::EscapeDataString($title)
-    # EscapeDataString throws on very long text, so check the raw length first.
-    $url = ''
-    if ($body.Length -le 5000) { $url = $newIssue + '&body=' + [uri]::EscapeDataString($body) }
-    if ((-not $url) -or ($url.Length -gt 7000)) {
-        Set-Clipboard -Value $body
-        Start-Process $newIssue
-        Set-Status ('Paste the results into the box (Ctrl+V), then click Submit new issue. Saved at ' + $script:ResultsPath) 'info'
-    } else {
-        Start-Process $url
-        Set-Status ('New issue page opened. Saved at ' + $script:ResultsPath) 'info'
+    if (-not $script:ResultsUrl) {
+        Open-ResultsIssuePage -Title $title -Body $body -Prefix ''
+        return
+    }
+    # The job finishes later on the UI timer, outside this function, so keep what the fallback needs.
+    $script:PendingResults = @{ Title = $title; Body = $body }
+    Set-Busy $true 'send' 'Sending results...'
+    Start-BgJob $SendBody @{ ResultsUrl = $script:ResultsUrl; Title = $title; Body = $body; Version = $script:UploaderVersion } {
+        param($r)
+        Set-Busy $false
+        $pending = $script:PendingResults
+        $script:PendingResults = $null
+        if ($r.Status -eq 'success') {
+            $issues = '#' + (@($r.Issues) -join ', #')
+            Add-LogText ('Results sent as issue ' + $issues + '.')
+            Set-Status ('Results sent to the programmer (issue ' + $issues + ').') 'success'
+        } else {
+            Add-LogText ('Could not send results directly: ' + [string]$r.Error)
+            Open-ResultsIssuePage -Title $pending.Title -Body $pending.Body -Prefix 'Could not send directly, so the issue page opened instead. '
+        }
     }
 }
 

@@ -107,7 +107,7 @@ The uploader has a **Robot tests** section. It puts a separate program on the br
 2. Turn on the controller and run "Scourge Tester" from the brain. Brain left and right buttons pick a test. The middle button (or **A**) runs it. Every test that moves the robot waits for you to press **A** and says how much space it needs. **B stops a test at once.**
 3. When a test needs a number, D-pad Up and Down change it by 0.25, D-pad Left and Right change it by 1.0, and **A** saves it.
 4. Plug the USB cable into the brain (or the controller) and click **Record results** before you run tests. The button becomes **Stop recording**, and the app shows how many values it recorded. You can't upload while it is recording.
-5. When you are done, click **Send results**. Your browser opens a new issue in the team's private data repository with the results filled in. Check it and click Submit. If the results are too long for that, they are copied instead: paste them (Ctrl+V) into the box, then click Submit. You need to be signed in to GitHub with an account the programmer added to that repository.
+5. When you are done, click **Send results**. The results go straight to the programmer as an issue in the team's private data repository. You don't need a GitHub account, and the status line shows the issue number. If that can't reach the server, your browser opens a new issue with the results filled in instead (or copied, if they are too long: paste them with Ctrl+V). Then you need to be signed in to GitHub with an account the programmer added to that repository.
 
 The results are also saved on the laptop in `Documents\Scourge Robot Data`. The **Open folder** link opens it.
 

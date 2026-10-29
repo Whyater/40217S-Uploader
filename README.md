@@ -126,7 +126,7 @@ The brain buttons still work as a backup. The left button picks RED, then LEFT, 
 
 - **Color** sets which color the Toggle roller spins to. With no color picked, the toggles never spin on their own.
 - **Side** picks which version of the match route runs. A match route will not run if no side is picked, and the brain says "NO SIDE PICKED".
-- **Routines** are "Do nothing" (the default), "Match: left/right (side)", "Match: solo AWP", "Skills (60 s)", and the check, tune, and demo routines. Use "Match: solo AWP" only when our partner has no auton. It needs the RIGHT side.
+- **Routines** are "Match: AWP (mirror)" (the default, since Build 48), "Do nothing", "Match: solo AWP", "Skills (60 s)", and the check, tune, and demo routines. Check the summary line after A: it shows the routine that will run. Use "Match: solo AWP" only when our partner has no auton. It needs the RIGHT side.
 
 ## Measure the robot
 

@@ -151,3 +151,12 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 - License: Mozilla Public License 2.0 (MPL-2.0)
 - Source: <https://github.com/purduesigbots/pros-cli>
 - Full license text: <https://github.com/purduesigbots/pros-cli/blob/master/LICENSE>
+
+## Web uploader (`web/`)
+
+The web version of the uploader includes two third-party libraries, each kept with its license header in the file.
+
+- **web-serial-polyfill** 1.0.15, `web/vendor/serial-polyfill.js`. Copyright 2019 Google LLC. Apache License 2.0. Source: [github.com/google/web-serial-polyfill](https://github.com/google/web-serial-polyfill).
+- **pako** 3.0.3, `web/protocol/vendor/pako.mjs`. Copyright (C) 2014-2017 by Vitaly Puzrin and Andrei Tuputcyn. MIT License. Source: [github.com/nodeca/pako](https://github.com/nodeca/pako).
+
+The upload code in `web/protocol/` is a JavaScript port of parts of the PROS CLI. The ported files (`connection.js`, `crc.js`, `device.js`, `framing.js`, `program.js`, `upload.js`) stay under the Mozilla Public License 2.0, as marked at the top of each file. The LICENSE file does not apply to them.

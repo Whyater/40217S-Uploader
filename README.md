@@ -33,6 +33,19 @@ There is a Mac version with the same features (uploading, Robot tests, and self-
 
 After that, clicking **Get Latest** also updates the Mac app when a newer one is published. On a Mac, buttons use title case (**Get Latest**, **Upload to Robot**, **Put Tester on Robot**), and **Robot Tests** is a section you open below the status line.
 
+## On an Android phone (no laptop needed)
+
+There is also a web version for when the laptop has no internet. It runs in Chrome on an Android phone and talks to the brain over USB. It also works in Chrome or Edge on a computer. iPhones and iPads can't do it, because their browsers can't use USB devices.
+
+You need a USB-C OTG adapter (or a USB-C to micro-USB data cable) between the phone and the brain.
+
+1. While you have internet, open [whyater.github.io/40217S-Uploader](https://whyater.github.io/40217S-Uploader/) in Chrome. It downloads the latest code and checks every file's SHA-256 hash.
+2. Open Chrome's menu and tap **Add to Home screen** (or **Install app**). The uploader then opens like an app and works offline.
+3. At the robot, plug the phone into the brain (not the controller) and turn the brain on.
+4. Open the uploader, pick a mode, and tap **Upload to robot**. The first time, Chrome and Android ask you to allow the brain. Keep the cable in until it says it's done.
+
+The web version uploads the same files the same way PROS does, including the same compressed library, so switching between the phone and a laptop doesn't make the brain erase the other modes. It doesn't do Robot tests yet.
+
 ## Upload (every time)
 
 1. Plug a USB data cable into the **brain** (not the controller) and turn the brain on.
@@ -161,15 +174,19 @@ The robot source code is private. Each time the programmer pushes to the main br
 
 **Get latest code** first checks for a newer uploader (see [Update the uploader](#update-the-uploader)). Then it downloads the newest release and, when the release lists SHA-256 hashes, checks each file before using it. Nothing is built on your laptop. **Upload to robot** hands those files to the official PROS command line tool, pros-cli 3.5.6.
 
+The web version is in `web/` and is published with GitHub Pages. Browsers can't download release files from GitHub directly, so `scripts/publish-web.sh` copies the latest release's files onto the site (the `gh-pages` branch) and checks their hashes. It runs on the programmer's computer after each new build. Until it runs, the web version keeps the previous build. The web app sends them to the brain with its own port of the pros-cli 3.5.6 upload code. Its tests replay real pros-cli uploads and check every byte matches.
+
 The installer downloads pros-cli from [github.com/purduesigbots/pros-cli](https://github.com/purduesigbots/pros-cli) and checks its SHA-256 hash before using it. The app and its files go into `%LOCALAPPDATA%\ScourgeUploader`. pros-cli also writes a small settings folder at `%APPDATA%\PROS`. Apart from those two folders and the two shortcuts, nothing else on your system changes.
 
 ## Status
 
 The installer and app are tested on Windows in CI up to the USB step. A first real upload to a brain has not happened yet.
 
+The web version is tested against a simulated brain only. A first upload from a phone to a real brain has not happened yet.
+
 ## Limitations
 
-- Windows only.
+- The Windows app is Windows only. The Mac app needs an Apple silicon Mac, and the web version needs Chrome on Android or Chrome or Edge on a computer.
 - Each upload needs a data USB cable straight to the brain.
 - The program in the releases has not been run on the robot yet.
 

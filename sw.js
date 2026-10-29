@@ -1,6 +1,6 @@
 // App shell cache. scripts/publish-web.sh replaces VERSION when it publishes,
 // so every deploy gets a fresh cache and phones pick up the new app.
-const VERSION = '0e4aa65-build-54-18efda0';
+const VERSION = '0e4aa65-build-55-13c27b6';
 const CACHE_PREFIX = 'scourge-shell-';
 const CACHE = CACHE_PREFIX + VERSION;
 const SHELL = [

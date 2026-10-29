@@ -47,7 +47,7 @@ jobs:
           node-version: '24'
 
       - name: Run the web tests
-        run: node --test web/test/
+        run: node --test 'web/test/**/*.test.*'
 
       - name: Copy web/ into the site folder
         run: |

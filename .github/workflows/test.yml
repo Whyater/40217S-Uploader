@@ -148,4 +148,4 @@ jobs:
           node-version: '24'
 
       - name: Run the web uploader tests
-        run: node --test web/test/
+        run: node --test 'web/test/**/*.test.*'

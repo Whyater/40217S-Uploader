@@ -1,0 +1,16 @@
+{
+  "tag": "build-45-d44e5db",
+  "title": "Build 45 (d44e5db)",
+  "notes": "Built from d44e5db: Build 45",
+  "built_at": "2026-10-28T21:41:54Z",
+  "sha256": {
+    "hot.package.bin": "4f0b7cf40153ad793c97f01a5f81d18d3cd668351b181da165ccf5d2413939f3",
+    "cold.package.bin": "35644e49173874d33b94a3e830abd8057c5dd0b2cdcd8f4ad59c65b280e8c614",
+    "project.pros": "3334ee11d05552c44076bd6a7b41db6058a44761af0fd01a6d67eedcc6868294",
+    "tester-hot.package.bin": "b29aa5084cc7ccfeadf869db65a4b8d28922f5017f05a940aa2c430cfadf755f",
+    "tester-cold.package.bin": "35644e49173874d33b94a3e830abd8057c5dd0b2cdcd8f4ad59c65b280e8c614",
+    "tester-project.pros": "b3895679e64c30a5e99ed0787b4d8808ed263a8d706730221e6f7f5f9cc904da",
+    "auton-test-hot.package.bin": "3e497c570a2c6663c5ccc0778cbb37a0769e432255205c16ce1a3a9596f833c8",
+    "drive-test-hot.package.bin": "1164a80775b787bc48fa5b6b921efb156bb2924fdd5d249801b811870d7197fd"
+  }
+}

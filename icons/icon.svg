@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Scourge Uploader">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4A70E8"/>
+      <stop offset="1" stop-color="#2848BE"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#g)"/>
+  <path d="M342 188C322 160 280 150 248 154C204 160 178 192 198 222C220 255 296 262 322 296C346 328 326 372 276 380C232 386 190 372 166 342" fill="none" stroke="#fff" stroke-width="54" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

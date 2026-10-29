@@ -181,8 +181,11 @@ export async function downloadLatest(onProgress) {
     await caches.delete(LEGACY_CACHE);
   } catch (e) { /* ignore */ }
 
+  // Ask the browser not to clear the build when space runs low. Don't wait
+  // for the answer: some browsers show a prompt and never settle until it's
+  // answered, which would leave the download looking stuck.
   try {
-    if (navigator.storage && navigator.storage.persist) await navigator.storage.persist();
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   } catch (e) { /* ignore */ }
   return { release, files };
 }

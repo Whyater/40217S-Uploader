@@ -6,12 +6,15 @@ const $ = (id) => document.getElementById(id);
 const el = {
   net: $('net'), netText: $('net-text'),
   unsupported: $('unsupported'),
-  buildTitle: $('build-title'), buildMeta: $('build-meta'), codeNote: $('code-note'),
-  getLatest: $('get-latest'), dlProgress: $('dl-progress'),
-  modeSeg: $('mode-seg'), modeHint: $('mode-hint'),
+  buildTitle: $('build-title'), buildDetail: $('build-detail'),
+  newer: $('newer'), newerText: $('newer-text'),
+  getLatest: $('get-latest'),
+  mode: $('mode'), modeHint: $('mode-hint'),
   slot: $('slot'), name: $('name'), nameError: $('name-error'),
-  status: $('status'), statusText: $('status-text'),
-  upProgress: $('up-progress'), upload: $('upload'),
+  conn: $('conn'), connText: $('conn-text'),
+  status: $('status'), statusText: $('status-text'), statusIcon: document.querySelector('#status use'),
+  upload: $('upload'), uploadLabel: $('upload-label'),
+  tests: $('tests'), putTester: $('put-tester'), testerNote: $('tester-note'),
   details: $('details'), log: $('log'), copyLog: $('copy-log'),
 };
 
@@ -21,9 +24,11 @@ const S = {
   busy: false,
   downloading: false,
   offline: !navigator.onLine,
-  codeNote: null,   // { kind, text }
+  newerTag: null,   // tag of a published build newer than the stored one
   result: null,     // { kind, text } shown until the user changes something
   nameTouched: false,
+  pct: null,        // upload percent while busy
+  conn: 'idle',     // idle | checking | connected
   sup: { serial: false, usb: false },
 };
 
@@ -31,6 +36,43 @@ const defaultNames = new Set(MODES.map((m) => m.name));
 const curMode = () => MODES.find((m) => m.id === S.modeId) || MODES[0];
 const modeOk = (m) => !!S.build && modeAvailable(S.build, m.id);
 const supported = () => S.sup.serial || S.sup.usb;
+// The Mac app says "click"; a touch screen taps.
+const tap = () => (window.matchMedia && matchMedia('(pointer: coarse)').matches ? 'tap' : 'click');
+const TESTER = { slot: 8, name: 'Scourge Tester', files: ['tester-hot.package.bin', 'tester-cold.package.bin', 'tester-project.pros'] };
+const testerOk = () => !!S.build && TESTER.files.every((f) => S.build.files[f] && S.build.files[f].length);
+
+/* ---------- build text (same wording as the Mac app) ---------- */
+
+function shortTag(tag) {
+  const m = /^build-(\d+)(?=-|$)/.exec(tag || '');
+  return m ? `Build ${m[1]}` : String(tag || '');
+}
+
+function buildSummary(rel) {
+  const tag = String(rel.tag || '');
+  const first = String(rel.notes || '').split('\n')[0].trim();
+  let sha = '';
+  let subject = '';
+  let m = /^Built from robot code commit ([0-9a-fA-F]{7,40})$/.exec(first);
+  if (m) sha = m[1].slice(0, 7);
+  else if ((m = /^Built from ([0-9a-fA-F]+):\s*(.*)$/.exec(first))) { sha = m[1].slice(0, 7); subject = m[2]; }
+  if (!sha) {
+    const t = /^build-\d{1,9}-([0-9a-fA-F]{7,40})$/.exec(tag);
+    if (t) sha = t[1].slice(0, 7);
+  }
+  const short = shortTag(tag);
+  const isCI = short !== tag;
+  let title = isCI ? short : subject;
+  const parts = [];
+  if (!title) title = String(rel.title || '').trim() || `Build ${tag}`;
+  else if (!isCI) parts.push(`Build ${tag}`);
+  if (sha) parts.push(`commit ${sha}`);
+  let detail = parts.join(', ');
+  detail = detail.charAt(0).toUpperCase() + detail.slice(1);
+  const when = fmtTime(rel.built_at);
+  if (when) detail += (detail ? '\n' : '') + `Built ${when}`;
+  return { title, detail };
+}
 
 /* ---------- log ---------- */
 
@@ -58,99 +100,131 @@ el.copyLog.addEventListener('click', async () => {
     try { ok = document.execCommand('copy'); } catch { ok = false; }
   }
   el.copyLog.textContent = ok ? 'Copied' : 'Select the log and copy it';
-  setTimeout(() => { el.copyLog.textContent = 'Copy log'; }, 1800);
+  setTimeout(() => { el.copyLog.textContent = 'Copy Log'; }, 1800);
 });
 
 /* ---------- small renderers ---------- */
 
+let workTimer = null;
+let workBase = '';
+let workStart = 0;
+function paintWork() {
+  const s = Math.max(0, Math.floor((Date.now() - workStart) / 1000));
+  el.statusText.textContent = `${workBase} (${s} s)`;
+}
+
+const KIND_ICON = { idle: 'i-info', work: 'i-clock', good: 'i-check', bad: 'i-warn', warn: 'i-warn' };
+
 function setStatus(kind, text) {
-  if (el.status.dataset.kind === kind && el.statusText.textContent === text) return;
+  if (kind === 'work') {
+    if (el.status.dataset.kind === 'work' && workBase === text) return;
+    if (el.status.dataset.kind !== 'work') workStart = Date.now();
+    workBase = text;
+    if (!workTimer) workTimer = setInterval(paintWork, 1000);
+  } else {
+    if (workTimer) { clearInterval(workTimer); workTimer = null; }
+    if (el.status.dataset.kind === kind && el.statusText.textContent === text) return;
+  }
   el.status.dataset.kind = kind;
-  el.statusText.textContent = text;
+  el.statusIcon.setAttribute('href', '#' + (KIND_ICON[kind] || 'i-info'));
+  if (kind === 'work') paintWork(); else el.statusText.textContent = text;
   el.status.classList.remove('enter');
   void el.status.offsetWidth;
   el.status.classList.add('enter');
 }
 
-function setProgress(box, pct, caption) {
-  const bar = box.querySelector('.bar');
-  const fill = bar.firstElementChild;
-  if (pct == null) {
-    bar.dataset.indeterminate = 'true';
-    bar.removeAttribute('aria-valuenow');
-    fill.style.width = '';
-  } else {
-    const p = Math.max(0, Math.min(100, Math.round(pct)));
-    delete bar.dataset.indeterminate;
-    bar.setAttribute('aria-valuenow', String(p));
-    fill.style.width = p + '%';
-  }
-  box.querySelector('.caption').textContent = caption || '';
+function setConn(state) {
+  S.conn = state;
+  const map = {
+    idle: ['idle', 'Brain connects when you upload'],
+    checking: ['idle', 'Checking for a brain…'],
+    connected: ['good', 'Brain connected'],
+    unavailable: ['idle', 'Connection status unavailable'],
+  };
+  const [kind, text] = map[state] || map.idle;
+  el.conn.dataset.kind = kind;
+  el.connText.textContent = text;
 }
 
+// "Oct 24, 2026 6:58 PM", local time, like the Mac app.
 function fmtTime(s) {
   if (!s) return '';
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) return String(s);
-  return d.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+  const date = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  const time = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  return `${date} ${time}`;
+}
+
+const missingModeText = (m) => `This build has no ${m.label} version. Switch to Competition or get a newer build.`;
+const modeSuffix = (m) => (m.id === MODES[0].id ? '' : ` as ${m.label}`);
+
+function nameMessage(v) {
+  if (v.ok) return '';
+  return v.value === '' ? 'Enter a program name.' : 'Use letters, numbers, spaces, - _ or . (20 max), starting with a letter or number.';
 }
 
 function idleStatus() {
   const m = curMode();
-  if (!supported()) return ['warn', "This browser can't connect to the brain. Open this page in Chrome on Android, or Chrome or Edge on a computer."];
-  if (S.downloading) return ['work', 'Downloading robot code. Keep this page open.'];
-  if (!S.build) return ['idle', 'Get the robot code first, then plug in the brain and tap Upload to robot.'];
-  if (!modeOk(m)) return ['warn', 'Pick another mode or get the latest code, then tap Upload to robot.'];
-  if (!validateName(el.name.value).ok) return ['warn', 'Fix the program name, then tap Upload to robot.'];
-  return ['idle', 'Ready. Plug the USB cable into the brain, then tap Upload to robot.'];
+  if (!supported()) return ['bad', "This browser can't connect to the brain. Open this page in Chrome on Android, or Chrome or Edge on a computer."];
+  if (S.downloading) return ['work', 'Downloading the latest robot code…'];
+  if (!S.build) return ['idle', `${tap() === 'tap' ? 'Tap' : 'Click'} Get Latest to download a build first.`];
+  if (!modeOk(m)) return ['warn', missingModeText(m)];
+  if (!validateName(el.name.value).ok) return ['warn', `Fix the program name, then ${tap()} Upload to Robot.`];
+  return ['idle', `Ready to upload ${shortTag(S.build.release.tag)}${modeSuffix(m)} to slot ${el.slot.value}. Plug the USB cable into the brain first.`];
 }
 
 function render() {
   const m = curMode();
   const busy = S.busy || S.downloading;
 
-  // Code panel
+  // Build panel
   if (S.build) {
-    el.buildTitle.textContent = S.build.release.title || S.build.release.tag;
-    el.buildTitle.classList.remove('empty');
-    const when = fmtTime(S.build.release.built_at);
-    el.buildMeta.textContent = when ? `Built ${when}` : '';
-    el.buildMeta.hidden = !when;
+    const sum = buildSummary(S.build.release);
+    el.buildTitle.textContent = sum.title;
+    el.buildDetail.textContent = sum.detail;
+    el.buildDetail.hidden = !sum.detail;
   } else {
-    el.buildTitle.textContent = 'No robot code downloaded yet.';
-    el.buildTitle.classList.add('empty');
-    el.buildMeta.hidden = true;
+    el.buildTitle.textContent = 'No build downloaded yet';
+    el.buildDetail.textContent = `${tap() === 'tap' ? 'Tap' : 'Click'} Get Latest to download it.`;
+    el.buildDetail.hidden = false;
   }
-  const n = S.codeNote;
-  el.codeNote.textContent = n ? n.text : '';
-  el.codeNote.dataset.kind = n ? n.kind : 'idle';
+  el.newer.hidden = !S.newerTag;
+  if (S.newerTag) el.newerText.textContent = `${shortTag(S.newerTag)} is available. ${tap() === 'tap' ? 'Tap' : 'Click'} Get Latest to download it.`;
   el.getLatest.disabled = busy;
-  el.getLatest.textContent = S.downloading ? 'Downloading…' : 'Get latest code';
+  el.getLatest.textContent = S.downloading ? 'Downloading…' : 'Get Latest';
 
-  // Mode segments
-  for (const inp of el.modeSeg.querySelectorAll('input')) {
-    const mode = MODES.find((x) => x.id === inp.value);
-    inp.checked = inp.value === S.modeId;
-    inp.disabled = busy || (!!S.build && !modeAvailable(S.build, mode.id));
+  // Mode picker: a mode the build lacks is greyed out, not hidden.
+  for (const opt of el.mode.options) {
+    opt.disabled = !!S.build && !modeAvailable(S.build, opt.value);
   }
+  el.mode.value = S.modeId;
   if (S.build && !modeOk(m)) {
-    el.modeHint.textContent = `The downloaded build has no ${m.label} version. Get latest code, or ask the programmer.`;
+    el.modeHint.textContent = missingModeText(m);
     el.modeHint.hidden = false;
   } else {
     el.modeHint.hidden = true;
   }
+  el.mode.disabled = busy;
   el.slot.disabled = busy;
   el.name.disabled = busy;
 
   // Name validation
   const v = validateName(el.name.value);
   const showErr = !v.ok && (S.nameTouched || el.name.value !== '');
-  el.nameError.textContent = showErr ? v.message : '';
+  el.nameError.textContent = showErr ? nameMessage(v) : '';
   el.nameError.hidden = !showErr;
   el.name.setAttribute('aria-invalid', showErr ? 'true' : 'false');
 
-  // Unsupported panel
   el.unsupported.hidden = supported();
+  if (!supported() && S.conn === 'idle') setConn('unavailable');
+
+  // Robot Tests
+  const canTester = supported() && testerOk() && !busy;
+  el.putTester.disabled = !canTester;
+  const noTester = !testerOk();
+  el.testerNote.hidden = !noTester;
+  el.testerNote.textContent = `The Scourge Tester is not in the latest release yet. ${tap() === 'tap' ? 'Tap' : 'Click'} Get Latest.`;
 
   // Status + button
   if (!S.busy) {
@@ -158,13 +232,14 @@ function render() {
     setStatus(k, t);
   }
   el.upload.dataset.working = S.busy ? 'true' : 'false';
-  el.upload.textContent = S.busy ? 'Uploading…' : 'Upload to robot';
+  el.uploadLabel.textContent = S.busy ? `Uploading…${S.pct == null ? '' : ' ' + Math.round(S.pct) + '%'}` : 'Upload to Robot';
   el.upload.disabled = S.busy || S.downloading || !supported() || !S.build || !modeOk(m);
 }
 
 function renderNet() {
   el.net.dataset.state = S.offline ? 'offline' : 'online';
-  el.netText.textContent = S.offline ? 'Offline' : 'Online';
+  el.net.hidden = !S.offline;
+  el.netText.textContent = 'You are offline.';
 }
 
 /* ---------- controls ---------- */
@@ -176,31 +251,20 @@ for (let i = 1; i <= 8; i++) {
 }
 
 for (const m of MODES) {
-  const lab = document.createElement('label');
-  const inp = document.createElement('input');
-  inp.type = 'radio';
-  inp.name = 'mode';
-  inp.value = m.id;
-  const face = document.createElement('span');
-  face.className = 'seg-face';
-  face.textContent = m.label;
-  const sub = document.createElement('small');
-  sub.textContent = `Slot ${m.slot}`;
-  face.appendChild(sub);
-  lab.append(inp, face);
-  el.modeSeg.appendChild(lab);
-  inp.addEventListener('change', () => {
-    if (!inp.checked) return;
-    S.modeId = m.id;
-    el.slot.value = String(m.slot);
-    const cur = el.name.value;
-    if (cur.trim() === '' || defaultNames.has(cur)) el.name.value = m.name;
-    S.result = null;
-    render();
-  });
+  const o = document.createElement('option');
+  o.value = m.id;
+  o.textContent = m.label;
+  el.mode.appendChild(o);
 }
-el.modeSeg.setAttribute('role', 'radiogroup');
-el.modeSeg.setAttribute('aria-label', 'Mode');
+el.mode.addEventListener('change', () => {
+  const m = MODES.find((x) => x.id === el.mode.value) || MODES[0];
+  S.modeId = m.id;
+  el.slot.value = String(m.slot);
+  const cur = el.name.value;
+  if (cur.trim() === '' || defaultNames.has(cur.trim())) el.name.value = m.name;
+  S.result = null;
+  render();
+});
 
 el.slot.addEventListener('change', () => { S.result = null; render(); });
 el.name.addEventListener('input', () => { S.result = null; render(); });
@@ -215,26 +279,24 @@ async function getLatest() {
   if (S.busy || S.downloading) return;
   S.downloading = true;
   S.result = null;
-  setProgress(el.dlProgress, null, 'Starting download');
-  el.dlProgress.hidden = false;
   render();
   log('Downloading latest robot code');
   try {
     const b = await downloadLatest(({ file, done, total }) => {
-      const pct = total ? (done / total) * 100 : null;
-      setProgress(el.dlProgress, pct, `${file}${pct == null ? '' : '  ' + Math.round(pct) + '%'}`);
+      log(`Downloaded ${file} (${done} of ${total})`);
     });
     S.build = b || (await loadBuild());
     S.offline = false;
-    S.codeNote = { kind: 'good', text: 'You already have the latest code.' };
+    renderNet();
+    S.newerTag = null;
+    S.result = { kind: 'good', text: `Downloaded ${shortTag(S.build.release.tag)}. Ready to upload.` };
     log(`Downloaded ${S.build ? S.build.release.title : 'build'}`);
   } catch (e) {
     const msg = (e && e.message) || 'The download failed.';
-    S.codeNote = { kind: 'bad', text: msg };
+    S.result = { kind: 'bad', text: `Could not download the code. ${msg}` };
     log(`Download failed: ${msg}`, 'error');
   } finally {
     S.downloading = false;
-    el.dlProgress.hidden = true;
     render();
   }
 }
@@ -245,17 +307,14 @@ async function checkForNew() {
     const r = await checkLatest();
     if (r.offline && r.error) {
       // Online but something (often public Wi-Fi sign-in) answered instead of GitHub.
-      S.codeNote = { kind: 'warn', text: S.build ? `${r.error} You can still upload the code you already have.` : r.error };
+      S.result = { kind: 'warn', text: S.build ? `${r.error} You can still upload the build you already have.` : r.error };
       log(`Update check failed: ${r.error}`, 'error');
     } else if (r.offline) {
       S.offline = true;
       renderNet();
-      S.codeNote = {
-        kind: 'warn',
-        text: S.build
-          ? 'No internet connection. You can still upload the code you already have.'
-          : 'No internet connection. Connect once to download the robot code.',
-      };
+      S.result = S.build
+        ? { kind: 'idle', text: 'No internet connection. You can still upload the build you already have.' }
+        : { kind: 'bad', text: `No internet connection. Connect to Wi-Fi, then ${tap()} Get Latest.` };
       log('Offline, skipped update check');
     } else if (!S.build) {
       log('No build stored, downloading');
@@ -263,16 +322,15 @@ async function checkForNew() {
       await getLatest();
       return;
     } else if (r.isNew) {
-      const t = (r.release && (r.release.title || r.release.tag)) || 'A newer build';
-      S.codeNote = { kind: 'accent', text: `${t} is available. Tap Get latest code to download it.` };
-      log(`Newer build available: ${t}`);
+      S.newerTag = (r.release && r.release.tag) || null;
+      log(`Newer build available: ${(r.release && (r.release.title || r.release.tag)) || 'a newer build'}`);
     } else {
-      S.codeNote = { kind: 'good', text: 'You already have the latest code.' };
+      S.newerTag = null;
       log('Build is current');
     }
   } catch (e) {
     const msg = (e && e.message) || 'Could not check for new code.';
-    S.codeNote = { kind: 'warn', text: S.build ? `${msg} You can still upload the code you already have.` : msg };
+    S.result = { kind: 'warn', text: S.build ? `${msg} You can still upload the build you already have.` : msg };
     log(`Update check failed: ${msg}`, 'error');
   }
   render();
@@ -308,12 +366,12 @@ function projectInfo(bytes) {
 // One place to adapt if the protocol module's options change.
 // Matches the desktop apps: `pros upload --after screen`, and say yes when
 // PROS wants to clear out old libraries to make room.
-function doUpload(port, mode, slot, name, onProgress, onErased) {
+function doUpload(port, job, slot, name, onProgress, onErased) {
   const f = S.build.files;
-  const project = projectInfo(f['project.pros']);
+  const project = projectInfo(f[job.pros]);
   return uploadProgram(port, {
-    bin: f[mode.hot],
-    coldBin: f['cold.package.bin'],
+    bin: f[job.hot],
+    coldBin: f[job.cold],
     coldTemplates: project.templates,
     hotAddr: project.hotAddr,
     coldAddr: project.coldAddr,
@@ -371,28 +429,17 @@ function lostText(lost) {
   return `The new code replaced the PROS library, so the brain deleted ${many ? `the programs in slots ${lost.join(' and ')}` : `the program in slot ${lost[0]}`}. Upload ${many ? 'those modes' : 'that mode'} again if you need ${many ? 'them' : 'it'}.`;
 }
 
-async function onUpload() {
-  if (S.busy || S.downloading) return;
-  const mode = curMode();
-  const v = validateName(el.name.value);
-  if (!v.ok) {
-    S.nameTouched = true;
-    S.result = null;
-    render();
-    el.name.focus();
-    return;
-  }
-  if (!modeOk(mode)) return;
-
-  const slot = Number(el.slot.value);
-  const name = v.value;
+// One upload path for the competition modes and the tester.
+// job: { hot, cold, pros, slot, name, working, done, tail, label }
+async function runJob(job) {
+  const { slot, name } = job;
   S.busy = true;
   S.result = null;
+  S.pct = null;
   render();
-  setStatus('work', `Uploading ${mode.label} to slot ${slot}. Keep the cable plugged in.`);
-  setProgress(el.upProgress, null, 'Connecting to the brain');
-  el.upProgress.hidden = false;
-  log(`Upload start: ${mode.label}, slot ${slot}, name "${name}"`);
+  setStatus('work', job.working);
+  setConn('checking');
+  log(`Upload start: ${job.label}, slot ${slot}, name "${name}"`);
 
   let port = null;
   let contacted = false;
@@ -409,10 +456,12 @@ async function onUpload() {
     log('Port open');
     const info = await queryBrain(port);
     contacted = true;
+    setConn('connected');
     log(`Brain answered: ${typeof info === 'string' ? info : JSON.stringify(info)}`);
-    await doUpload(port, mode, slot, name, ({ stage, sent, total }) => {
+    await doUpload(port, job, slot, name, ({ stage, sent, total }) => {
       const pct = total ? (sent / total) * 100 : null;
-      setProgress(el.upProgress, pct, `${stage}${pct == null ? '' : '  ' + Math.round(pct) + '%'}`);
+      S.pct = pct;
+      el.uploadLabel.textContent = `Uploading…${pct == null ? '' : ' ' + Math.round(pct) + '%'}`;
       if (stage !== doUpload.lastStage) { doUpload.lastStage = stage; log(`Stage: ${stage}`); }
     }, (programs) => {
       log(`PROS removed: ${programs.join(', ')}`);
@@ -421,8 +470,8 @@ async function onUpload() {
     log('Upload finished');
     const lost = lostSlots(erased, slot);
     S.result = lost.length
-      ? { kind: 'warn', text: `Uploaded ${mode.label} to slot ${slot}. ${lostText(lost)}` }
-      : { kind: 'good', text: `Uploaded ${mode.label} to slot ${slot}. Run it from the brain screen.` };
+      ? { kind: 'warn', text: `${job.done} ${lostText(lost)}` }
+      : { kind: 'good', text: `${job.done} Run it from the brain screen.` };
   } catch (e) {
     const msg = (e && e.message) || 'The upload failed. Check the cable and try again.';
     log(`Upload failed: ${msg}`, 'error');
@@ -443,11 +492,46 @@ async function onUpload() {
     if (port) { await closeBrain(port); log('Port closed'); }
     await releaseAwake();
     S.busy = false;
-    el.upProgress.hidden = true;
+    S.pct = null;
+    setConn(supported() ? 'idle' : 'unavailable');
     render();
   }
 }
+
+async function onUpload() {
+  if (S.busy || S.downloading) return;
+  const mode = curMode();
+  const v = validateName(el.name.value);
+  if (!v.ok) {
+    S.nameTouched = true;
+    S.result = null;
+    render();
+    el.name.focus();
+    return;
+  }
+  if (!modeOk(mode)) return;
+  const slot = Number(el.slot.value);
+  const name = v.value;
+  await runJob({
+    hot: mode.hot, cold: 'cold.package.bin', pros: 'project.pros', slot, name,
+    label: mode.label,
+    working: `Uploading to slot ${slot}. Keep the cable plugged in.`,
+    done: mode.id === MODES[0].id ? `Uploaded to slot ${slot}.` : `Uploaded ${name} (${mode.label}) to slot ${slot}.`,
+  });
+}
 el.upload.addEventListener('click', onUpload);
+
+async function onTester() {
+  if (S.busy || S.downloading || !testerOk()) return;
+  el.tests.open = true;
+  await runJob({
+    hot: TESTER.files[0], cold: TESTER.files[1], pros: TESTER.files[2], slot: TESTER.slot, name: TESTER.name,
+    label: 'Scourge Tester',
+    working: `Uploading the Scourge Tester to slot ${TESTER.slot}. Keep the cable plugged in.`,
+    done: `Uploaded Scourge Tester to slot ${TESTER.slot}.`,
+  });
+}
+el.putTester.addEventListener('click', onTester);
 
 /* ---------- start ---------- */
 
@@ -460,12 +544,9 @@ window.addEventListener('offline', () => {
   S.offline = true;
   renderNet();
   if (!S.busy && !S.downloading) {
-    S.codeNote = {
-      kind: 'warn',
-      text: S.build
-        ? 'No internet connection. You can still upload the code you already have.'
-        : 'No internet connection. Connect once to download the robot code.',
-    };
+    S.result = S.build
+      ? { kind: 'idle', text: 'No internet connection. You can still upload the build you already have.' }
+      : { kind: 'bad', text: `No internet connection. Connect to Wi-Fi, then ${tap()} Get Latest.` };
     render();
   }
 });
@@ -480,6 +561,7 @@ async function start() {
   const m = curMode();
   el.slot.value = String(m.slot);
   el.name.value = m.name;
+  setConn(supported() ? 'idle' : 'unavailable');
   renderNet();
   try { S.build = await loadBuild(); } catch (e) { log(`Could not read the stored build: ${e.message || e}`, 'error'); }
   if (S.build) log(`Stored build: ${S.build.release.title || S.build.release.tag}`);

@@ -174,7 +174,7 @@ The robot source code is private. Each time the programmer pushes to the main br
 
 **Get latest code** first checks for a newer uploader (see [Update the uploader](#update-the-uploader)). Then it downloads the newest release and, when the release lists SHA-256 hashes, checks each file before using it. Nothing is built on your laptop. **Upload to robot** hands those files to the official PROS command line tool, pros-cli 3.5.6.
 
-The web version is in `web/` and is published with GitHub Pages. Browsers can't download release files from GitHub directly, so each time a release is published, a workflow copies its files onto the site and checks their hashes. The web app sends them to the brain with its own port of the pros-cli 3.5.6 upload code. Its tests replay real pros-cli uploads and check every byte matches.
+The web version is in `web/` and is published with GitHub Pages. Browsers can't download release files from GitHub directly, so `scripts/publish-web.sh` copies the latest release's files onto the site (the `gh-pages` branch) and checks their hashes. It runs on the programmer's computer after each new build. Until it runs, the web version keeps the previous build. The web app sends them to the brain with its own port of the pros-cli 3.5.6 upload code. Its tests replay real pros-cli uploads and check every byte matches.
 
 The installer downloads pros-cli from [github.com/purduesigbots/pros-cli](https://github.com/purduesigbots/pros-cli) and checks its SHA-256 hash before using it. The app and its files go into `%LOCALAPPDATA%\ScourgeUploader`. pros-cli also writes a small settings folder at `%APPDATA%\PROS`. Apart from those two folders and the two shortcuts, nothing else on your system changes.
 

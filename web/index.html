@@ -6,94 +6,104 @@
   <title>Scourge Uploader</title>
   <meta name="description" content="Put the latest 40217S robot code on a V5 brain.">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#F1F2F4" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#ECECEC" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#1E1E1E" media="(prefers-color-scheme: dark)">
   <link rel="manifest" href="manifest.webmanifest">
-  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="icon" href="icons/icon-192.png" type="image/png">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+    <symbol id="i-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8 7.2v3.9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" fill="none"/><circle cx="8" cy="4.9" r=".85" fill="currentColor"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8 4.4V8l2.4 1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></symbol>
+    <symbol id="i-check" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="currentColor"/><path d="M4.9 8.2l2.2 2.2 4-4.6" stroke="var(--knock)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 1.6c.5 0 .9.3 1.2.7l5.2 9.3c.5.9-.1 2-1.2 2H2.8c-1.1 0-1.7-1.1-1.2-2l5.2-9.3c.3-.4.7-.7 1.2-.7z" fill="currentColor"/><path d="M8 6v3.4" stroke="var(--knock)" stroke-width="1.4" stroke-linecap="round" fill="none"/><circle cx="8" cy="11.4" r=".8" fill="var(--knock)"/></symbol>
+    <symbol id="i-down" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="currentColor"/><path d="M8 4.3v6.2M5.4 8.1L8 10.7l2.6-2.6" stroke="var(--knock)" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/></symbol>
+    <symbol id="i-offline" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M3.6 12.4l8.8-8.8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" fill="none"/></symbol>
+  </svg>
+
   <div class="page">
-    <header class="top">
-      <img class="mark" src="icons/icon.svg" alt="" width="40" height="40">
-      <div class="titles">
-        <h1>Scourge Uploader</h1>
-        <p class="team">Team 40217S</p>
+    <p class="notice" id="net" data-kind="warn" data-state="online" hidden>
+      <svg class="ico" aria-hidden="true"><use href="#i-offline"/></svg>
+      <span id="net-text">You are offline.</span>
+    </p>
+
+    <p class="notice" id="unsupported" data-kind="bad" hidden>
+      <svg class="ico" aria-hidden="true"><use href="#i-warn"/></svg>
+      <span>This browser can't reach the brain. Uploading needs Chrome on an Android phone, or Chrome or Edge on a computer. iPhones and iPads can't do it.</span>
+    </p>
+
+    <section class="panel" aria-label="Robot code">
+      <div class="build">
+        <div class="build-text">
+          <p class="headline" id="build-title">No build downloaded yet</p>
+          <p class="callout secondary" id="build-detail">Tap Get Latest to download it.</p>
+        </div>
+        <button type="button" class="btn bordered accent-text" id="get-latest">Get Latest</button>
       </div>
-      <p class="net" id="net" data-state="online"><span class="dot" aria-hidden="true"></span><span id="net-text">Online</span></p>
-    </header>
+      <p class="line" id="newer" data-kind="accent" hidden>
+        <svg class="ico" aria-hidden="true"><use href="#i-down"/></svg>
+        <span id="newer-text"></span>
+      </p>
+    </section>
 
-    <main>
-      <section class="panel unsupported" id="unsupported" hidden aria-labelledby="unsupported-h">
-        <h2 id="unsupported-h">This browser can't reach the brain</h2>
-        <p>Uploading needs Chrome on an Android phone, or Chrome or Edge on a computer. iPhones and iPads can't do it. You can still see which build is downloaded below.</p>
-      </section>
+    <section class="panel" aria-label="Upload settings">
+      <div class="form">
+        <label for="mode">Mode</label>
+        <select id="mode" name="mode"></select>
 
-      <section class="panel" aria-labelledby="code-h">
-        <h2 id="code-h" class="label">Robot code</h2>
-        <p class="build-title" id="build-title">No robot code downloaded yet.</p>
-        <p class="meta" id="build-meta" hidden></p>
-        <p class="note" id="code-note" data-kind="idle" aria-live="polite"></p>
-        <div class="progress" id="dl-progress" hidden>
-          <div class="bar" role="progressbar" aria-label="Download progress" aria-valuemin="0" aria-valuemax="100"><span></span></div>
-          <p class="caption"></p>
-        </div>
-        <button type="button" class="btn secondary" id="get-latest">Get latest code</button>
-      </section>
+        <p class="hint" id="mode-hint" data-kind="warn" hidden></p>
 
-      <section class="panel" aria-labelledby="up-h">
-        <h2 id="up-h" class="label">Upload settings</h2>
+        <label for="slot">Slot</label>
+        <select id="slot" name="slot"></select>
 
-        <fieldset class="field" id="mode-field">
-          <legend>Mode</legend>
-          <div class="seg" id="mode-seg"></div>
-          <p class="hint" id="mode-hint" data-kind="warn" hidden></p>
-        </fieldset>
+        <label for="name">Program name</label>
+        <input id="name" name="name" type="text" placeholder="Scourge" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="done" aria-describedby="name-error">
 
-        <div class="row">
-          <div class="field slot">
-            <label for="slot">Slot</label>
-            <select id="slot" name="slot"></select>
-          </div>
-          <div class="field grow">
-            <label for="name">Program name</label>
-            <input id="name" name="name" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="done" aria-describedby="name-error">
-          </div>
-        </div>
         <p class="hint" id="name-error" data-kind="bad" hidden></p>
-      </section>
+      </div>
+    </section>
 
-    </main>
+    <button type="button" class="btn prominent" id="upload"><span class="spin" aria-hidden="true"></span><span id="upload-label">Upload to Robot</span></button>
 
-    <div class="dock">
+    <div class="status-block">
+      <p class="conn" id="conn" data-kind="idle"><span class="dot" aria-hidden="true"></span><span id="conn-text">Brain connects when you upload</span></p>
       <div class="status" id="status" role="status" aria-live="polite" data-kind="idle">
-        <span class="dot" aria-hidden="true"></span>
+        <svg class="ico" aria-hidden="true"><use href="#i-info"/></svg>
         <p id="status-text"></p>
       </div>
-      <div class="progress" id="up-progress" hidden>
-        <div class="bar" role="progressbar" aria-label="Upload progress" aria-valuemin="0" aria-valuemax="100"><span></span></div>
-        <p class="caption"></p>
+    </div>
+
+    <details class="disc" id="tests">
+      <summary>Robot Tests</summary>
+      <div class="disc-body">
+        <div class="btn-row">
+          <button type="button" class="btn bordered" id="put-tester">Put Tester on Robot</button>
+        </div>
+        <p class="caption secondary" id="tester-note" hidden></p>
+        <p class="caption secondary">Recording results needs the laptop app.</p>
       </div>
-      <button type="button" class="btn primary" id="upload">Upload to robot</button>
-    </div>
+    </details>
 
-    <div class="extras">
-      <details class="disc" id="phone">
-        <summary>Phone setup</summary>
-        <ol>
-          <li>Connect the phone to the brain's USB port, not the controller. Use a USB-C OTG adapter with the brain's cable, or a USB-C to micro-USB data cable. Charge-only cables won't work.</li>
-          <li>Open this page in Chrome. When Chrome asks to allow the device, pick the VEX brain and tap Connect.</li>
-          <li>For offline use, open Chrome's menu and tap Add to Home screen (or Install app). Open it once online so it can download the robot code.</li>
-        </ol>
-      </details>
-
-      <details class="disc" id="details">
-        <summary>Details</summary>
+    <details class="disc" id="details">
+      <summary>Details</summary>
+      <div class="disc-body">
         <pre class="log" id="log" tabindex="0" aria-label="Activity log">Nothing has run yet.</pre>
-        <button type="button" class="btn secondary small" id="copy-log">Copy log</button>
-      </details>
-    </div>
+        <button type="button" class="link" id="copy-log">Copy Log</button>
+      </div>
+    </details>
+
+    <details class="disc" id="phone">
+      <summary>Phone Setup</summary>
+      <div class="disc-body">
+        <ol class="caption secondary">
+          <li>Plug the phone into the brain's USB port (not the controller) with a USB-C OTG adapter or a data cable.</li>
+          <li>Open this page in Chrome and, when asked, allow the VEX brain.</li>
+          <li>To use it offline, add it to the Home screen and open it once online.</li>
+        </ol>
+      </div>
+    </details>
   </div>
   <script type="module" src="app.js"></script>
 </body>

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Scourge Uploader</title>
+  <meta name="description" content="Put the latest 40217S robot code on a V5 brain.">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#F1F2F4" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1E1E1E" media="(prefers-color-scheme: dark)">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="page">
+    <header class="top">
+      <img class="mark" src="icons/icon.svg" alt="" width="40" height="40">
+      <div class="titles">
+        <h1>Scourge Uploader</h1>
+        <p class="team">Team 40217S</p>
+      </div>
+      <p class="net" id="net" data-state="online"><span class="dot" aria-hidden="true"></span><span id="net-text">Online</span></p>
+    </header>
+
+    <main>
+      <section class="panel unsupported" id="unsupported" hidden aria-labelledby="unsupported-h">
+        <h2 id="unsupported-h">This browser can't reach the brain</h2>
+        <p>Uploading needs Chrome on an Android phone, or Chrome or Edge on a computer. iPhones and iPads can't do it. You can still see which build is downloaded below.</p>
+      </section>
+
+      <section class="panel" aria-labelledby="code-h">
+        <h2 id="code-h" class="label">Robot code</h2>
+        <p class="build-title" id="build-title">No robot code downloaded yet.</p>
+        <p class="meta" id="build-meta" hidden></p>
+        <p class="note" id="code-note" data-kind="idle" aria-live="polite"></p>
+        <div class="progress" id="dl-progress" hidden>
+          <div class="bar" role="progressbar" aria-label="Download progress" aria-valuemin="0" aria-valuemax="100"><span></span></div>
+          <p class="caption"></p>
+        </div>
+        <button type="button" class="btn secondary" id="get-latest">Get latest code</button>
+      </section>
+
+      <section class="panel" aria-labelledby="up-h">
+        <h2 id="up-h" class="label">Upload settings</h2>
+
+        <fieldset class="field" id="mode-field">
+          <legend>Mode</legend>
+          <div class="seg" id="mode-seg"></div>
+          <p class="hint" id="mode-hint" data-kind="warn" hidden></p>
+        </fieldset>
+
+        <div class="row">
+          <div class="field slot">
+            <label for="slot">Slot</label>
+            <select id="slot" name="slot"></select>
+          </div>
+          <div class="field grow">
+            <label for="name">Program name</label>
+            <input id="name" name="name" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="done" aria-describedby="name-error">
+          </div>
+        </div>
+        <p class="hint" id="name-error" data-kind="bad" hidden></p>
+      </section>
+
+    </main>
+
+    <div class="dock">
+      <div class="status" id="status" role="status" aria-live="polite" data-kind="idle">
+        <span class="dot" aria-hidden="true"></span>
+        <p id="status-text"></p>
+      </div>
+      <div class="progress" id="up-progress" hidden>
+        <div class="bar" role="progressbar" aria-label="Upload progress" aria-valuemin="0" aria-valuemax="100"><span></span></div>
+        <p class="caption"></p>
+      </div>
+      <button type="button" class="btn primary" id="upload">Upload to robot</button>
+    </div>
+
+    <div class="extras">
+      <details class="disc" id="phone">
+        <summary>Phone setup</summary>
+        <ol>
+          <li>Connect the phone to the brain's USB port, not the controller. Use a USB-C OTG adapter with the brain's cable, or a USB-C to micro-USB data cable. Charge-only cables won't work.</li>
+          <li>Open this page in Chrome. When Chrome asks to allow the device, pick the VEX brain and tap Connect.</li>
+          <li>For offline use, open Chrome's menu and tap Add to Home screen (or Install app). Open it once online so it can download the robot code.</li>
+        </ol>
+      </details>
+
+      <details class="disc" id="details">
+        <summary>Details</summary>
+        <pre class="log" id="log" tabindex="0" aria-label="Activity log">Nothing has run yet.</pre>
+        <button type="button" class="btn secondary small" id="copy-log">Copy log</button>
+      </details>
+    </div>
+  </div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

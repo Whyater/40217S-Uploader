@@ -29,7 +29,7 @@ else
   git worktree add -q --detach "$site"
   git -C "$site" checkout -q --orphan gh-pages
 fi
-git -C "$site" rm -rq --ignore-unmatch . > /dev/null
+git -C "$site" rm -rqf --ignore-unmatch . > /dev/null
 
 cp -R web/. "$site/"
 rm -rf "$site/test" "$site/package.json"

@@ -87,7 +87,12 @@ test('modeAvailable depends on the mode hot file', () => {
   assert.equal(modeAvailable(null, 'competition'), false);
   build.files['drive-test-hot.package.bin'] = new Uint8Array(1);
   assert.equal(modeAvailable(build, 'drive'), true);
-  assert.equal(MODES.length, 3);
+  assert.equal(modeAvailable(build, 'autopath'), false);
+  build.files['autopath-hot.package.bin'] = new Uint8Array(1);
+  assert.equal(modeAvailable(build, 'autopath'), true);
+  assert.equal(MODES.length, 4);
+  assert.deepEqual(MODES.map((m) => m.slot), [1, 2, 3, 4]);
+  assert.deepEqual(MODES.map((m) => m.name), ['Scourge', 'Scourge Auton Test', 'Scourge Drive Test', 'Scourge Auto Pathing']);
 });
 
 test('checkLatest offline returns offline without throwing', async () => {

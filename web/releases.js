@@ -6,6 +6,7 @@ export const MODES = [
   { id: 'competition', label: 'Competition', slot: 1, name: 'Scourge', hot: 'hot.package.bin' },
   { id: 'auton', label: 'Auton Test', slot: 2, name: 'Scourge Auton Test', hot: 'auton-test-hot.package.bin' },
   { id: 'drive', label: 'Drive Test', slot: 3, name: 'Scourge Drive Test', hot: 'drive-test-hot.package.bin' },
+  { id: 'autopath', label: 'Auto Pathing', slot: 4, name: 'Scourge Auto Pathing', hot: 'autopath-hot.package.bin' },
 ];
 
 export const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 _.\-]{0,19}$/;

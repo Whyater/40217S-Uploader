@@ -50,15 +50,16 @@ if (-not $InstallDir) {
 $script:ReleasesUrl = 'https://github.com/Whyater/40217S-Uploader/releases'
 $script:AssetNames = @('hot.package.bin', 'cold.package.bin', 'project.pros')
 $script:TesterAssetNames = @('tester-hot.package.bin', 'tester-cold.package.bin', 'tester-project.pros')
-# One robot source builds three programs that differ only in the hot file;
+# One robot source builds four programs that differ only in the hot file;
 # cold.package.bin and project.pros are shared. Each mode has its own default
-# slot and program name so the three can sit on the brain side by side.
+# slot and program name so the four can sit on the brain side by side.
 $script:Modes = @(
-    @{ Label = 'Competition'; Asset = 'hot.package.bin';            Slot = 1; Name = 'Scourge' },
-    @{ Label = 'Auton Test';  Asset = 'auton-test-hot.package.bin'; Slot = 2; Name = 'Scourge Auton Test' },
-    @{ Label = 'Drive Test';  Asset = 'drive-test-hot.package.bin'; Slot = 3; Name = 'Scourge Drive Test' }
+    @{ Label = 'Competition';  Asset = 'hot.package.bin';            Slot = 1; Name = 'Scourge' },
+    @{ Label = 'Auton Test';   Asset = 'auton-test-hot.package.bin'; Slot = 2; Name = 'Scourge Auton Test' },
+    @{ Label = 'Drive Test';   Asset = 'drive-test-hot.package.bin'; Slot = 3; Name = 'Scourge Drive Test' },
+    @{ Label = 'Auto Pathing'; Asset = 'autopath-hot.package.bin';   Slot = 4; Name = 'Scourge Auto Pathing' }
 )
-$script:UploaderVersion = '2.2.0'
+$script:UploaderVersion = '2.3.0'
 $script:UploaderScriptPath = $PSCommandPath
 $script:UploaderManifestUrl = 'https://raw.githubusercontent.com/Whyater/40217S-Uploader/main/uploader.json'
 $script:ProjectDir = Join-Path $InstallDir 'project'
@@ -539,7 +540,7 @@ $SharedCode = {
 
         # Test-mode hot files are optional the same way: older releases do not
         # list them, and a bad one only turns that mode off.
-        $modeNames = @('auton-test-hot.package.bin', 'drive-test-hot.package.bin')
+        $modeNames = @('auton-test-hot.package.bin', 'drive-test-hot.package.bin', 'autopath-hot.package.bin')
         $listedModes = @()
         if ($null -ne $rel.Sha256) { $listedModes = @($modeNames | Where-Object { $rel.Sha256.ContainsKey($_) }) }
 

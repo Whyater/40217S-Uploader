@@ -1811,6 +1811,8 @@ function Update-Layout {
     $y += Px 16
 
     $size = New-Object System.Drawing.Size($W, $y)
+    # What this layout wants, before Windows trims a window that is taller than the screen.
+    $script:UploadLayoutSize = $size
     if ($form.ClientSize -ne $size) { $form.ClientSize = $size }
     $form.ResumeLayout($false)
 }
@@ -2301,6 +2303,7 @@ function Show-RouteMapCanvas {
         $pal.TextBrush = New-Object System.Drawing.SolidBrush($c.Text)
         $pal.MutedBrush = New-Object System.Drawing.SolidBrush($c.Muted)
         $pal.IdleBrush = New-Object System.Drawing.SolidBrush($c.Idle)
+        $pal.ObjBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(110, $c.Idle))
         $pal.BadTint = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(40, $c.Bad))
         $pal.GoodBrush = New-Object System.Drawing.SolidBrush($c.Good)
         $pal.WarnBrush = New-Object System.Drawing.SolidBrush($c.Warn)
@@ -2377,9 +2380,9 @@ function Show-RouteMapCanvas {
             }
         }
         # Loose Cups and Pins on our side, as small dots.
-        $dot = [math]::Max((Px 2), 1.6 * $sc)
+        $dot = [math]::Max((Px 2), 0.9 * $sc)
         foreach ($o in $field.Objects) {
-            $G.FillEllipse($pal.IdleBrush, [single]($ox + $o[0] * $sc - $dot), [single]($oy - $o[1] * $sc - $dot), [single](2.0 * $dot), [single](2.0 * $dot))
+            $G.FillEllipse($pal.ObjBrush, [single]($ox + $o[0] * $sc - $dot), [single]($oy - $o[1] * $sc - $dot), [single](2.0 * $dot), [single](2.0 * $dot))
         }
         # Goals: alliance filled circle, neutral open circle, opponent square.
         $goalR = [math]::Max((Px 5), 2.4 * $sc)
@@ -3365,7 +3368,10 @@ if ($SelfTest) {
             $testForm.Hide()
         }
         # Route Map tab: sample recordings go through the same file reader the app uses.
-        $uploadSize = $testForm.ClientSize
+        # Compare the size the layout asks for. The window itself is cut to the screen by Windows
+        # (the CI screen is shorter than the Upload view with Details open), and only while shown.
+        $uploadSize = $script:UploadLayoutSize
+        $uploadActual = $testForm.ClientSize
         $mapDir = Join-Path ([System.IO.Path]::GetTempPath()) ('scourge-map-shot-' + [Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $mapDir -Force | Out-Null
         try {
@@ -3406,7 +3412,8 @@ if ($SelfTest) {
                 $testForm.Hide()
             }
             Set-View 'upload'
-            if ($testForm.ClientSize -ne $uploadSize) { $failures.Add('Upload view size changed after visiting Route Map') }
+            Write-Host ('  Upload view size: layout ' + $uploadSize + ' before and ' + $script:UploadLayoutSize + ' after, window ' + $uploadActual + ' before and ' + $testForm.ClientSize + ' after')
+            if ($script:UploadLayoutSize -ne $uploadSize) { $failures.Add('Upload view size changed after visiting Route Map: ' + $uploadSize + ' became ' + $script:UploadLayoutSize) }
             Write-Host '  Route Map tab: OK'
         } finally {
             Remove-Item -Path $mapDir -Recurse -Force -ErrorAction SilentlyContinue

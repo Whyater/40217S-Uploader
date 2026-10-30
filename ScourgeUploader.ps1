@@ -59,7 +59,7 @@ $script:Modes = @(
     @{ Label = 'Drive Test';   Asset = 'drive-test-hot.package.bin'; Slot = 3; Name = 'Scourge Drive Test' },
     @{ Label = 'Auto Pathing'; Asset = 'autopath-hot.package.bin';   Slot = 4; Name = 'Scourge Auto Pathing' }
 )
-$script:UploaderVersion = '2.3.0'
+$script:UploaderVersion = '2.4.0'
 $script:UploaderScriptPath = $PSCommandPath
 $script:UploaderManifestUrl = 'https://raw.githubusercontent.com/Whyater/40217S-Uploader/main/uploader.json'
 $script:ProjectDir = Join-Path $InstallDir 'project'
@@ -710,6 +710,460 @@ $SharedCode = {
         Write-VersionMetadata -Release $rel -DownloadedAt ((Get-Date).ToUniversalTime().ToString('o'))
         return @{ Status = 'downloaded'; Release = $rel; TesterAvailable = $testerReady }
     }
+
+    # ------------------------------------------------------------------
+    # Route Map: reading recordings and measuring misses. Plain data in,
+    # plain data out, so the window, a background thread, and -SelfTest can
+    # all use it. Field frame: origin at the field center, inches, +Y away
+    # from our station, +X to our right, heading 0 = +Y, clockwise positive.
+    # ------------------------------------------------------------------
+
+    # Reads a text file that another program may still be writing to. A plain
+    # ReadAllText would fail while Record results has the file open.
+    function Read-SharedText {
+        param([string]$Path)
+        $fs = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
+            try { return $sr.ReadToEnd() } finally { $sr.Dispose() }
+        } finally { $fs.Dispose() }
+    }
+
+    # Parses the payload of one AP, AM, or AS row. Returns $null when it is not a
+    # valid row of that kind. V holds the numbers (the type word's slot stays 0).
+    function ConvertFrom-WireRow {
+        param([string]$Tag, [string]$Payload)
+        $count = 0
+        $wordAt = -1
+        if ($Tag -eq 'AP') { $count = 9 }
+        elseif ($Tag -eq 'AM') { $count = 8; $wordAt = 1 }
+        elseif ($Tag -eq 'AS') { $count = 10; $wordAt = 2 }
+        else { return $null }
+        $p = $Payload.Split(';')
+        if ($p.Length -ne $count) { return $null }
+        $inv = [System.Globalization.CultureInfo]::InvariantCulture
+        $ns = [System.Globalization.NumberStyles]::AllowLeadingSign
+        $v = New-Object 'int[]' $count
+        $word = ''
+        for ($i = 0; $i -lt $count; $i++) {
+            if ($i -eq $wordAt) {
+                if ($p[$i].Length -eq 0) { return $null }
+                $word = $p[$i]
+                continue
+            }
+            $n = 0
+            if (-not [int]::TryParse($p[$i], $ns, $inv, [ref]$n)) { return $null }
+            $v[$i] = $n
+        }
+        return @{ V = $v; Word = $word }
+    }
+
+    # BEGIN payload: v=1;kind;side;rows;build
+    function ConvertFrom-WireBegin {
+        param([string]$Payload)
+        $p = $Payload.Split(';')
+        if ($p.Length -lt 5) { return $null }
+        $inv = [System.Globalization.CultureInfo]::InvariantCulture
+        $ns = [System.Globalization.NumberStyles]::AllowLeadingSign
+        $ver = $p[0].Trim()
+        if ($ver.StartsWith('v=', [System.StringComparison]::Ordinal)) { $ver = $ver.Substring(2) }
+        $version = 0
+        $rows = 0
+        if (-not [int]::TryParse($ver, $ns, $inv, [ref]$version)) { return $null }
+        if (-not [int]::TryParse($p[3], $ns, $inv, [ref]$rows)) { return $null }
+        $side = $p[2].Trim()
+        if (($side -cne 'L') -and ($side -cne 'R')) { return $null }
+        return @{ Version = $version; Kind = $p[1].Trim(); Side = $side; Expected = $rows; Build = ($p[4..($p.Length - 1)] -join ';') }
+    }
+
+    # Closes one open recording: it becomes a session, or a rejection that says why.
+    function Complete-WireSession {
+        param($Op, $EndRows, $Sessions, $Rejected)
+        $got = $Op.Rows.Count
+        $expected = [int]$Op.Expected
+        $top = $expected
+        foreach ($k in $Op.Rows.Keys) { if (($k + 1) -gt $top) { $top = $k + 1 } }
+        $missing = New-Object System.Collections.Generic.List[int]
+        for ($i = 0; ($i -lt $top) -and ($missing.Count -lt 8); $i++) {
+            if (-not $Op.Rows.ContainsKey($i)) { [void]$missing.Add($i) }
+        }
+        $missingCount = $top - $got
+        $fail = ''
+        if ($Op.Conflict) { $fail = [string]$Op.Conflict }
+        elseif ($Op.Version -ne 1) { $fail = 'unknown wire version ' + $Op.Version + ' (this reader knows version 1).' }
+        elseif ($null -eq $EndRows) { $fail = 'no END line (the send was cut off) after ' + $got + ' of ' + $expected + ' rows.' }
+        elseif ($EndRows -ne $expected) { $fail = 'BEGIN says ' + $expected + ' rows but END says ' + $EndRows + ' (received ' + $got + ').' }
+        elseif ($missingCount -gt 0) { $fail = 'received ' + $got + ' of ' + $expected + ' rows with gaps.' }
+        elseif ($got -ne $expected) { $fail = 'received ' + $got + ' rows but BEGIN says ' + $expected + '.' }
+        if ($fail) {
+            $text = 'Rejected ' + $Op.Kind + ' recording: ' + $fail
+            if ($missing.Count -gt 0) {
+                $text += ' Missing row numbers: ' + ($missing.ToArray() -join ', ')
+                if ($missingCount -gt $missing.Count) { $text += ' and ' + ($missingCount - $missing.Count) + ' more' }
+                $text += '.'
+            }
+            [void]$Rejected.Add(@{ Kind = $Op.Kind; Reason = $fail; Got = $got; Expected = $expected; MissingCount = $missingCount; Missing = $missing.ToArray(); Text = $text; Source = '' })
+            return
+        }
+        $t = New-Object 'System.Collections.Generic.List[double]'
+        $xs = New-Object 'System.Collections.Generic.List[double]'
+        $ys = New-Object 'System.Collections.Generic.List[double]'
+        $hs = New-Object 'System.Collections.Generic.List[double]'
+        $marks = New-Object System.Collections.ArrayList
+        $events = New-Object System.Collections.ArrayList
+        $sb = New-Object System.Text.StringBuilder
+        for ($i = 0; $i -lt $expected; $i++) {
+            $r = $Op.Rows[$i]
+            $v = $r.Row.V
+            [void]$sb.Append($r.Tag).Append('|').Append($r.Payload).Append("`n")
+            # Values on the wire are hundredths (x, y, heading) and milliseconds.
+            if ($r.Tag -eq 'AP') {
+                $t.Add($v[0] / 1000.0); $xs.Add($v[1] / 100.0); $ys.Add($v[2] / 100.0); $hs.Add($v[3] / 100.0)
+            } elseif ($r.Tag -eq 'AM') {
+                [void]$marks.Add(@{ T = $v[0] / 1000.0; Type = $r.Row.Word; X = $v[2] / 100.0; Y = $v[3] / 100.0; H = $v[4] / 100.0; Lift = $v[5]; Tilt = $v[6]; Claw = $v[7] })
+            } else {
+                [void]$events.Add(@{ T = $v[0] / 1000.0; Step = $v[1]; Type = $r.Row.Word; Tx = $v[3] / 100.0; Ty = $v[4] / 100.0; Th = $v[5] / 100.0; X = $v[6] / 100.0; Y = $v[7] / 100.0; H = $v[8] / 100.0; Ok = $v[9] })
+            }
+        }
+        $tArr = $t.ToArray(); $xArr = $xs.ToArray(); $yArr = $ys.ToArray(); $hArr = $hs.ToArray()
+        # Samples are drawn as a line, so they must be in time order. They nearly always are.
+        $n = $tArr.Length
+        $inOrder = $true
+        for ($i = 1; $i -lt $n; $i++) { if ($tArr[$i] -lt $tArr[$i - 1]) { $inOrder = $false; break } }
+        if (-not $inOrder) {
+            $keys = [double[]]$tArr.Clone()
+            $idx = New-Object 'int[]' $n
+            for ($i = 0; $i -lt $n; $i++) { $idx[$i] = $i }
+            [Array]::Sort([Array]$keys, [Array]$idx)
+            $nx = New-Object 'double[]' $n; $ny = New-Object 'double[]' $n; $nh = New-Object 'double[]' $n
+            for ($i = 0; $i -lt $n; $i++) { $nx[$i] = $xArr[$idx[$i]]; $ny[$i] = $yArr[$idx[$i]]; $nh[$i] = $hArr[$idx[$i]] }
+            $tArr = $keys; $xArr = $nx; $yArr = $ny; $hArr = $nh
+        }
+        $markArr = @($marks.ToArray())
+        $eventArr = @($events.ToArray())
+        $markSorted = $true
+        for ($i = 1; $i -lt $markArr.Count; $i++) { if ($markArr[$i].T -lt $markArr[$i - 1].T) { $markSorted = $false } }
+        if (-not $markSorted) { $markArr = @($markArr | Sort-Object -Property T) }
+        $eventSorted = $true
+        for ($i = 1; $i -lt $eventArr.Count; $i++) { if ($eventArr[$i].T -lt $eventArr[$i - 1].T) { $eventSorted = $false } }
+        if (-not $eventSorted) { $eventArr = @($eventArr | Sort-Object -Property T) }
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hash = ([BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Op.Kind + '|' + $Op.Side + '|' + $sb.ToString())))).Replace('-', '')
+        } finally { $sha.Dispose() }
+        [void]$Sessions.Add(@{
+            Kind = $Op.Kind; Side = $Op.Side; WasSide = $Op.Side; Rows = $expected; Build = $Op.Build
+            Fingerprint = $hash; T = $tArr; X = $xArr; Y = $yArr; H = $hArr
+            Marks = $markArr; Events = $eventArr; Source = ''; When = ''; Order = ''
+        })
+    }
+
+    # Reads recording text (a results file, or anything with SCOURGE lines in it).
+    # Text before "SCOURGE," on a line is dropped. A recording counts only when it
+    # has BEGIN, every row number from 0 with no gap, and a matching END. A repeat
+    # of a whole recording is kept once (the last copy). Returns
+    # @{ Sessions = complete recordings as sent; Rejected = why the others failed }.
+    function ConvertFrom-ScourgeWire {
+        param([string]$Text)
+        $inv = [System.Globalization.CultureInfo]::InvariantCulture
+        $ns = [System.Globalization.NumberStyles]::AllowLeadingSign
+        $sessions = New-Object System.Collections.ArrayList
+        $rejected = New-Object System.Collections.ArrayList
+        $orphans = 0
+        $op = $null
+        foreach ($raw in ($Text -split '[\r\n]+')) {
+            $line = $raw
+            if ($line.IndexOf([char]27) -ge 0) { $line = [regex]::Replace($line, '\x1b\[[0-9;?]*[ -/]*[@-~]', '') }
+            $at = $line.IndexOf('SCOURGE,', [System.StringComparison]::Ordinal)
+            if ($at -lt 0) { continue }
+            if ($at -gt 0) { $line = $line.Substring($at) }
+            $pieces = @($line)
+            if ($line.IndexOf('SCOURGE,', 1, [System.StringComparison]::Ordinal) -ge 0) { $pieces = [regex]::Split($line, '(?=SCOURGE,)') }
+            foreach ($rawPiece in $pieces) {
+                $piece = $rawPiece.Trim()
+                if (-not $piece.StartsWith('SCOURGE,', [System.StringComparison]::Ordinal)) { continue }
+                $f = $piece.Split(',')
+                # A real record ends with a comma, so its last field is empty. A line
+                # that got cut short loses that comma, which is how it is caught.
+                if (($f.Length -ne 5) -or ($f[4].Length -ne 0)) { continue }
+                $tag = $f[1]
+                if (($tag -eq 'BEGIN') -and ($f[2] -eq 'autopath')) {
+                    $b = ConvertFrom-WireBegin $f[3]
+                    if ($null -eq $b) { continue }
+                    if ($null -ne $op) { Complete-WireSession $op $null $sessions $rejected }
+                    $op = @{
+                        Expected = $b.Expected; Kind = $b.Kind; Side = $b.Side; Build = $b.Build; Version = $b.Version
+                        Rows = (New-Object 'System.Collections.Generic.Dictionary[int,object]'); Conflict = $null
+                    }
+                } elseif (($tag -eq 'END') -and ($f[2] -eq 'autopath')) {
+                    $endRows = 0
+                    if (-not [int]::TryParse($f[3], $ns, $inv, [ref]$endRows)) { continue }
+                    if ($null -eq $op) { $orphans++; continue }
+                    Complete-WireSession $op $endRows $sessions $rejected
+                    $op = $null
+                } elseif (($tag -eq 'AP') -or ($tag -eq 'AM') -or ($tag -eq 'AS')) {
+                    $seq = 0
+                    if (-not [int]::TryParse($f[2], $ns, $inv, [ref]$seq)) { continue }
+                    if ($seq -lt 0) { continue }
+                    $row = ConvertFrom-WireRow $tag $f[3]
+                    if ($null -eq $row) { continue }
+                    if ($null -eq $op) { $orphans++; continue }
+                    if ($op.Rows.ContainsKey($seq)) {
+                        $old = $op.Rows[$seq]
+                        if (($old.Tag -ne $tag) -or ($old.Payload -ne $f[3])) { $op.Conflict = 'row ' + $seq + ' arrived twice with different contents.' }
+                        continue
+                    }
+                    $op.Rows[$seq] = @{ Tag = $tag; Payload = $f[3]; Row = $row }
+                }
+            }
+        }
+        if ($null -ne $op) { Complete-WireSession $op $null $sessions $rejected }
+        if ($orphans -gt 0) {
+            [void]$rejected.Add(@{ Kind = '?'; Reason = 'rows with no BEGIN before them'; Got = $orphans; Expected = 0; MissingCount = 0; Missing = @(); Text = 'Some rows had no BEGIN line before them (the capture started in the middle of a send).'; Source = '' })
+        }
+        $unique = New-Object System.Collections.Specialized.OrderedDictionary
+        foreach ($s in $sessions) {
+            if ($unique.Contains($s.Fingerprint)) { $unique.Remove($s.Fingerprint) }
+            $unique.Add($s.Fingerprint, $s)
+        }
+        $kept = New-Object System.Collections.ArrayList
+        foreach ($s in $unique.Values) { [void]$kept.Add($s) }
+        return @{ Sessions = @($kept.ToArray()); Rejected = @($rejected.ToArray()) }
+    }
+
+    # A recording made on the RIGHT side is shown in the LEFT frame (the field is
+    # symmetric about the line y = -x): (x, y) -> (-y, -x), heading -> 270 - heading.
+    # "0.0 - y" instead of "-y" so zero stays zero and never prints as -0.
+    function ConvertTo-LeftFrame {
+        param($S)
+        if ($S.Side -ne 'R') { return $S }
+        $n = $S.X.Length
+        $nx = New-Object 'double[]' $n; $ny = New-Object 'double[]' $n; $nh = New-Object 'double[]' $n
+        for ($i = 0; $i -lt $n; $i++) {
+            $nx[$i] = 0.0 - $S.Y[$i]
+            $ny[$i] = 0.0 - $S.X[$i]
+            $nh[$i] = 270.0 - $S.H[$i]
+        }
+        $out = @{}
+        foreach ($k in $S.Keys) { $out[$k] = $S[$k] }
+        $out.X = $nx; $out.Y = $ny; $out.H = $nh
+        $marks = New-Object System.Collections.ArrayList
+        foreach ($m in $S.Marks) {
+            $c = @{}
+            foreach ($k in $m.Keys) { $c[$k] = $m[$k] }
+            $c.X = 0.0 - $m.Y; $c.Y = 0.0 - $m.X; $c.H = 270.0 - $m.H
+            [void]$marks.Add($c)
+        }
+        $events = New-Object System.Collections.ArrayList
+        foreach ($e in $S.Events) {
+            $c = @{}
+            foreach ($k in $e.Keys) { $c[$k] = $e[$k] }
+            $c.Tx = 0.0 - $e.Ty; $c.Ty = 0.0 - $e.Tx; $c.Th = 270.0 - $e.Th
+            $c.X = 0.0 - $e.Y; $c.Y = 0.0 - $e.X; $c.H = 270.0 - $e.H
+            [void]$events.Add($c)
+        }
+        $out.Marks = @($marks.ToArray())
+        $out.Events = @($events.ToArray())
+        $out.Side = 'L'
+        $out.WasSide = 'R'
+        return $out
+    }
+
+    # Which numbers a step's AS row can be judged on. Same rule as the desktop
+    # report tool: drives and grabs and drops have a target spot, turns and grabs
+    # and drops have a target heading, the opening and toggles have neither.
+    function Get-StepTargets {
+        param([string]$Type)
+        if (($Type -eq 'drive') -or ($Type -eq 'grab_stack') -or ($Type -eq 'grab_pin') -or ($Type -eq 'drop')) {
+            return @{ Pos = $true; Head = ($Type -ne 'drive') }
+        }
+        if ($Type -eq 'turn') { return @{ Pos = $false; Head = $true } }
+        return @{ Pos = $false; Head = $false }
+    }
+
+    # Under 1 in is good, under 3 in is close, anything more is a miss.
+    function Get-MissBand {
+        param($Miss)
+        if ($null -eq $Miss) { return 'none' }
+        if ($Miss -lt 1.0) { return 'good' }
+        if ($Miss -lt 3.0) { return 'warn' }
+        return 'bad'
+    }
+
+    # One row per AS step event: how far the robot ended from where the step aimed.
+    # Miss = straight-line inches between target spot and final spot (null when the
+    # step has no target spot). HMiss = heading error in degrees, 0 to 180.
+    function Get-MissRows {
+        param($S)
+        $rows = New-Object System.Collections.ArrayList
+        foreach ($e in $S.Events) {
+            $want = Get-StepTargets ([string]$e.Type)
+            $miss = $null
+            $hmiss = $null
+            if ($want.Pos) {
+                $dx = $e.X - $e.Tx
+                $dy = $e.Y - $e.Ty
+                $miss = [math]::Sqrt($dx * $dx + $dy * $dy)
+            }
+            if ($want.Head) {
+                $d = ($e.H - $e.Th) % 360.0
+                if ($d -gt 180.0) { $d -= 360.0 } elseif ($d -le -180.0) { $d += 360.0 }
+                $hmiss = [math]::Abs($d)
+            }
+            [void]$rows.Add(@{ Step = $e.Step; Type = [string]$e.Type; Ok = $e.Ok; Miss = $miss; HMiss = $hmiss; Band = (Get-MissBand $miss) })
+        }
+        return $rows.ToArray()
+    }
+
+    function Get-KindLabel {
+        param([string]$Kind, [string]$Side = 'L')
+        $label = $Kind
+        if ($Kind -eq 'teach_open') { $label = 'Teach after open' }
+        elseif ($Kind -eq 'teach_start') { $label = 'Teach from start' }
+        elseif ($Kind -eq 'push') { $label = 'Push test' }
+        elseif ($Kind -eq 'run') { $label = 'Run' }
+        if ($Side -eq 'R') { $label += ' (R)' }
+        return $label
+    }
+
+    # "2026-10-30 10:15" to "Oct 30, 10:15 AM".
+    function Format-MapWhen {
+        param([string]$When)
+        $inv = [System.Globalization.CultureInfo]::InvariantCulture
+        try { return [datetime]::ParseExact($When, 'yyyy-MM-dd HH:mm', $inv).ToString('MMM d, h:mm tt', $inv) } catch { return $When }
+    }
+
+    function Get-FileWhen {
+        param($File)
+        $inv = [System.Globalization.CultureInfo]::InvariantCulture
+        $m = [regex]::Match($File.Name, '^results-(\d{8})-(\d{6})')
+        if ($m.Success) {
+            try { return [datetime]::ParseExact($m.Groups[1].Value + $m.Groups[2].Value, 'yyyyMMddHHmmss', $inv).ToString('yyyy-MM-dd HH:mm', $inv) } catch { }
+        }
+        return $File.LastWriteTime.ToString('yyyy-MM-dd HH:mm', $inv)
+    }
+
+    # The box around everything a recording touched, or $null if it has no points.
+    function Get-SessionBounds {
+        param($S)
+        $minX = [double]::MaxValue; $minY = [double]::MaxValue
+        $maxX = [double]::MinValue; $maxY = [double]::MinValue
+        $any = $false
+        $n = $S.X.Length
+        for ($i = 0; $i -lt $n; $i++) {
+            $any = $true
+            if ($S.X[$i] -lt $minX) { $minX = $S.X[$i] }
+            if ($S.X[$i] -gt $maxX) { $maxX = $S.X[$i] }
+            if ($S.Y[$i] -lt $minY) { $minY = $S.Y[$i] }
+            if ($S.Y[$i] -gt $maxY) { $maxY = $S.Y[$i] }
+        }
+        $pts = New-Object System.Collections.ArrayList
+        foreach ($m in $S.Marks) { [void]$pts.Add(@($m.X, $m.Y)) }
+        foreach ($e in $S.Events) {
+            [void]$pts.Add(@($e.X, $e.Y))
+            if ((Get-StepTargets ([string]$e.Type)).Pos) { [void]$pts.Add(@($e.Tx, $e.Ty)) }
+        }
+        foreach ($p in $pts) {
+            $any = $true
+            if ($p[0] -lt $minX) { $minX = $p[0] }
+            if ($p[0] -gt $maxX) { $maxX = $p[0] }
+            if ($p[1] -lt $minY) { $minY = $p[1] }
+            if ($p[1] -gt $maxY) { $maxY = $p[1] }
+        }
+        if (-not $any) { return $null }
+        return @{ MinX = $minX; MaxX = $maxX; MinY = $minY; MaxY = $maxY }
+    }
+
+    # Picks how many screen pixels one inch gets, and which field point sits in
+    # the middle of the drawing area. Whole field: the full wall-to-wall square.
+    # Fit to path: the path's box, at least MinSpan inches across (so a short path
+    # does not zoom in absurdly) plus Margin inches on every side.
+    function Get-MapViewport {
+        param([double]$Width, [double]$Height, [double]$Pad, [bool]$Whole, $Bounds, [double]$Wall = 70.1, [double]$MinSpan = 36.0, [double]$Margin = 12.0)
+        $cx = 0.0; $cy = 0.0
+        $spanW = 2.0 * $Wall; $spanH = 2.0 * $Wall
+        if ((-not $Whole) -and ($null -ne $Bounds)) {
+            $spanW = [math]::Max($Bounds.MaxX - $Bounds.MinX, $MinSpan) + 2.0 * $Margin
+            $spanH = [math]::Max($Bounds.MaxY - $Bounds.MinY, $MinSpan) + 2.0 * $Margin
+            $cx = ($Bounds.MinX + $Bounds.MaxX) / 2.0
+            $cy = ($Bounds.MinY + $Bounds.MaxY) / 2.0
+        }
+        $scale = [math]::Min(($Width - 2.0 * $Pad) / $spanW, ($Height - 2.0 * $Pad) / $spanH)
+        if ($scale -lt 0.01) { $scale = 0.01 }
+        return @{ Scale = $scale; Cx = $cx; Cy = $cy }
+    }
+
+    # Reads every results-*.csv in a folder. Sessions come back in file-name order
+    # (the names carry the date), already in the LEFT frame. A recording sent twice,
+    # even in two files, appears once. Skip = files to leave alone (the one being
+    # recorded right now). Cache (optional hashtable) remembers files that did not
+    # change, so reopening the tab does not read them again.
+    function Read-ScourgeResults {
+        param([string]$Folder, [string[]]$Skip = @(), $Cache = $null)
+        $result = @{ Status = 'ok'; Sessions = @(); Rejected = @(); Files = 0; Unreadable = 0; Error = '' }
+        if ((-not $Folder) -or (-not (Test-Path -LiteralPath $Folder))) { return $result }
+        $files = @()
+        try {
+            $files = @(Get-ChildItem -LiteralPath $Folder -Filter 'results-*.csv' -File -ErrorAction Stop | Sort-Object -Property Name)
+        } catch {
+            $result.Status = 'error'
+            $result.Error = 'Could not read the results folder: ' + $_.Exception.Message
+            return $result
+        }
+        $unique = New-Object System.Collections.Specialized.OrderedDictionary
+        $allRejected = New-Object System.Collections.ArrayList
+        foreach ($file in $files) {
+            $skipThis = $false
+            foreach ($s in $Skip) { if ($s -and ($s -ieq $file.FullName)) { $skipThis = $true } }
+            if ($skipThis) { continue }
+            $result.Files++
+            $stamp = [string]$file.Length + '|' + [string]$file.LastWriteTimeUtc.Ticks
+            $entry = $null
+            if (($null -ne $Cache) -and $Cache.ContainsKey($file.FullName) -and ($Cache[$file.FullName].Stamp -eq $stamp)) { $entry = $Cache[$file.FullName] }
+            if ($null -eq $entry) {
+                $text = ''
+                try { $text = Read-SharedText $file.FullName } catch { $result.Unreadable++; continue }
+                $parsed = ConvertFrom-ScourgeWire $text
+                $when = Get-FileWhen $file
+                $mine = New-Object System.Collections.ArrayList
+                $k = 0
+                foreach ($s in $parsed.Sessions) {
+                    $left = ConvertTo-LeftFrame $s
+                    $left.Source = $file.Name
+                    $left.When = $when
+                    $left.Order = $file.Name + '#' + $k.ToString('000')
+                    $k++
+                    [void]$mine.Add($left)
+                }
+                foreach ($r in $parsed.Rejected) {
+                    $r.Source = $file.Name
+                    $r.Text = $file.Name + ': ' + $r.Text
+                }
+                $entry = @{ Stamp = $stamp; Sessions = @($mine.ToArray()); Rejected = @($parsed.Rejected) }
+                if ($null -ne $Cache) { $Cache[$file.FullName] = $entry }
+            }
+            foreach ($s in $entry.Sessions) {
+                if ($unique.Contains($s.Fingerprint)) { $unique.Remove($s.Fingerprint) }
+                $unique.Add($s.Fingerprint, $s)
+            }
+            foreach ($r in $entry.Rejected) { [void]$allRejected.Add($r) }
+        }
+        $kept = New-Object System.Collections.ArrayList
+        foreach ($s in $unique.Values) { [void]$kept.Add($s) }
+        # A rejected copy is not worth a warning once the same recording arrived
+        # complete in that file or a later one.
+        $shown = New-Object System.Collections.ArrayList
+        foreach ($r in $allRejected) {
+            $replaced = $false
+            foreach ($s in $kept) {
+                if (($s.Kind -eq $r.Kind) -and ($s.Rows -eq $r.Expected) -and ([string]::CompareOrdinal([string]$s.Source, [string]$r.Source) -ge 0)) { $replaced = $true }
+            }
+            if (-not $replaced) { [void]$shown.Add($r) }
+        }
+        $result.Sessions = @($kept.ToArray())
+        $result.Rejected = @($shown.ToArray())
+        return $result
+    }
 }
 
 # Make the shared functions available on this (main) thread too.
@@ -765,6 +1219,7 @@ $UploaderCheckBody = {
     $m
 }
 $DownloadBody = { Save-LatestRelease -ReleasesUrl $A.ReleasesUrl -InstallDir $A.InstallDir -AssetNames $A.AssetNames -InstalledTag $A.InstalledTag -Sync $Sync }
+$MapBody = { Read-ScourgeResults -Folder $A.Folder -Skip $A.Skip -Cache $A.Cache }
 
 # ---------------------------------------------------------------------------
 # Small helpers used by the window and by -SelfTest
@@ -1007,6 +1462,19 @@ $script:Recording = $false
 $script:ResultsPath = ''
 $script:RecordValues = 0
 $script:RecordTests = 0
+# Which view is showing: 'upload' (the original window) or 'map' (Route Map).
+$script:View = 'upload'
+# Route Map data and view state. Sessions come from Read-ScourgeResults.
+$script:Map = @{
+    Sessions = @(); Rejected = @(); Selected = -1; SelectedFp = ''
+    Whole = $false; Loaded = $false; Loading = $false; Error = ''
+}
+$script:MapCache = [hashtable]::Synchronized(@{})
+$script:MapLoading = $false
+$script:MapReload = $false
+$script:MapFilling = $false
+$script:MapPaintError = $false
+$script:MapField = $null
 
 # Converts a size picked at 100% scaling into real pixels for this screen.
 function Px {
@@ -1059,6 +1527,12 @@ function New-MainForm {
     $ui.HeaderSub = New-Label '40217S robot code' 0 0 10 10 $f.Sub $c.Muted
     $ui.Header.Controls.AddRange(@($ui.HeaderTitle, $ui.HeaderSub))
     $ui.HeaderLine = New-Line 0 0 10
+    # View switch, right side of the header: Upload and Route Map.
+    $ui.SegUpload = New-FlatButton 'Upload' 0 0 10 10 $false
+    $ui.SegMap = New-FlatButton 'Route Map' 0 0 10 10 $false
+    $ui.SegUpload.Tag = 'segment'
+    $ui.SegMap.Tag = 'segment'
+    $ui.Header.Controls.AddRange(@($ui.SegUpload, $ui.SegMap))
     $form.Controls.AddRange(@($ui.Header, $ui.HeaderLine))
 
     # Robot code section
@@ -1152,6 +1626,15 @@ function New-MainForm {
     $ui.Log.Visible = $false
     $form.Controls.AddRange(@($ui.DetailsLink, $ui.Log))
 
+    # Everything above except the header belongs to the Upload view. The Route Map
+    # view has its own controls and hides these.
+    $ui.UploadControls = @($ui.CodeLabel, $ui.BuildTitle, $ui.BuildMeta, $ui.GetButton, $ui.Notice, $ui.MidLine,
+        $ui.UploadLabel, $ui.ModeLabel, $ui.SlotLabel, $ui.NameLabel, $ui.ModeBox, $ui.SlotBox, $ui.NameBox, $ui.NameError, $ui.UploadButton,
+        $ui.TestsLine, $ui.TestsLabel, $ui.TestsHelper, $ui.TesterButton, $ui.RecordButton, $ui.ResultsStatus, $ui.SendButton, $ui.OpenFolderLink,
+        $ui.Dot, $ui.ConnLabel, $ui.Status, $ui.DetailsLink, $ui.Log)
+    New-RouteMapControls $form
+    Update-ViewButtons
+
     Update-Layout
     $form.ResumeLayout($false)
 
@@ -1173,6 +1656,11 @@ function New-MainForm {
     $ui.NameBox.Add_TextChanged({ Invoke-Safe { Update-NameError } })
     $ui.ModeBox.Add_SelectedIndexChanged({ Invoke-Safe { Set-ModeDefaults } })
     $ui.DetailsLink.Add_LinkClicked({ Invoke-Safe { Set-DetailsVisible (-not $script:DetailsShown) } })
+    $ui.SegUpload.Add_Click({ Invoke-Safe { Set-View 'upload' } })
+    $ui.SegMap.Add_Click({ Invoke-Safe { Set-View 'map' } })
+    $ui.MapWholeButton.Add_Click({ Invoke-Safe { Switch-MapWhole } })
+    $ui.MapRefresh.Add_LinkClicked({ Invoke-Safe { Start-MapLoad } })
+    $ui.MapList.Add_SelectedIndexChanged({ Invoke-Safe { Select-MapSession } })
     # Shown: the controls now have their real sizes, so lay out again. In
     # -SelfTest the window may be shown for a screenshot; do not start the app.
     $form.Add_Shown({
@@ -1209,6 +1697,7 @@ function Update-Layout {
     $ui = $script:Ui
     $form = $ui.Form
     if ($null -eq $form) { return }
+    if ($script:View -eq 'map') { Update-MapLayout; return }
     $W = Px 480
     $M = Px 24
     $inner = $W - 2 * $M
@@ -1220,6 +1709,7 @@ function Update-Layout {
     $ui.HeaderTitle.SetBounds($M, (Px 12), $inner, (Px 30))
     $ui.HeaderSub.SetBounds($M, (Px 42), $inner, (Px 20))
     $ui.HeaderLine.SetBounds(0, (Px 72), $W, 1)
+    Set-ViewButtonBounds $W $M
 
     # Robot code section
     $y = Px 88
@@ -1323,6 +1813,705 @@ function Update-Layout {
     $size = New-Object System.Drawing.Size($W, $y)
     if ($form.ClientSize -ne $size) { $form.ClientSize = $size }
     $form.ResumeLayout($false)
+}
+
+# ---------------------------------------------------------------------------
+# Route Map view. Two views share one window: Upload (the original layout) and
+# Route Map (a field drawing on the left, session list and last-run misses on
+# the right). The drawing is plain System.Drawing, no web view and no extra files.
+# ---------------------------------------------------------------------------
+
+# Panels and list views flicker when they repaint unless double buffering is on.
+# WinForms keeps that switch protected, so it is reached through reflection.
+function Set-DoubleBuffered {
+    param($Control)
+    $prop = $Control.GetType().GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance,NonPublic')
+    if ($null -ne $prop) { $prop.SetValue($Control, $true, $null) }
+}
+
+function New-MapListView {
+    param([string[]]$Columns, [int[]]$Widths)
+    $c = $script:Colors
+    $lv = New-Object System.Windows.Forms.ListView
+    $lv.View = [System.Windows.Forms.View]::Details
+    $lv.FullRowSelect = $true
+    $lv.MultiSelect = $false
+    $lv.HideSelection = $false
+    $lv.HeaderStyle = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
+    $lv.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $lv.Font = $script:Fonts.Base
+    $lv.BackColor = $c.Back
+    $lv.ForeColor = $c.Text
+    for ($i = 0; $i -lt $Columns.Length; $i++) { [void]$lv.Columns.Add($Columns[$i], $Widths[$i]) }
+    Set-DoubleBuffered $lv
+    return $lv
+}
+
+function New-RouteMapControls {
+    param($Form)
+    $c = $script:Colors
+    $f = $script:Fonts
+    $ui = $script:Ui
+
+    $ui.MapCanvas = New-Object System.Windows.Forms.Panel
+    $ui.MapCanvas.BackColor = $c.HeaderBack
+    Set-DoubleBuffered $ui.MapCanvas
+    $ui.MapCanvas.Add_Paint({
+        param($s, $e)
+        try {
+            Show-RouteMapCanvas $e.Graphics $s.ClientSize
+        } catch {
+            # Say it once in Details instead of on every repaint.
+            if (-not $script:MapPaintError) {
+                $script:MapPaintError = $true
+                try { Add-LogText ('Route Map drawing: ' + ($_ | Out-String)) } catch { }
+            }
+        }
+    })
+
+    $ui.MapWholeButton = New-FlatButton 'Whole field' 0 0 10 10 $false
+    $ui.MapWholeButton.Tag = 'segment'
+    $ui.MapSessionsLabel = New-Label 'SESSIONS' 0 0 10 10 $f.Section $c.Muted
+    $ui.MapRefresh = New-Object System.Windows.Forms.LinkLabel
+    $ui.MapRefresh.Text = 'Refresh'
+    $ui.MapRefresh.AutoSize = $true
+    $ui.MapRefresh.LinkColor = $c.Accent
+    $ui.MapRefresh.ActiveLinkColor = $c.AccentDown
+    $ui.MapRefresh.LinkBehavior = [System.Windows.Forms.LinkBehavior]::HoverUnderline
+    $ui.MapList = New-MapListView @('Kind', 'When', 'Rows') @((Px 124), (Px 136), (Px 48))
+    $ui.MapList.Columns[2].TextAlign = [System.Windows.Forms.HorizontalAlignment]::Right
+    $ui.MapRejected = New-Label '' 0 0 10 10 $f.Small $c.Bad
+    $ui.MapRejected.AutoEllipsis = $false
+    $ui.MapLine = New-Line 0 0 10
+    $ui.MapRunLabel = New-Label 'LAST RUN' 0 0 10 10 $f.Section $c.Muted
+    $ui.MapRunSummary = New-Label '' 0 0 10 10 $f.Small $c.Muted
+    $ui.MapRunSummary.AutoEllipsis = $false
+    $ui.MapTable = New-MapListView @('Step', 'Miss (in)', 'Turn (deg)') @((Px 136), (Px 86), (Px 86))
+    $ui.MapTable.Columns[1].TextAlign = [System.Windows.Forms.HorizontalAlignment]::Right
+    $ui.MapTable.Columns[2].TextAlign = [System.Windows.Forms.HorizontalAlignment]::Right
+    $ui.MapKeyGood = New-Label 'Under 1 in' 0 0 10 10 $f.Small $c.Good
+    $ui.MapKeyWarn = New-Label 'Under 3 in' 0 0 10 10 $f.Small $c.Warn
+    $ui.MapKeyBad = New-Label '3 in or more' 0 0 10 10 $f.Small $c.Bad
+
+    $ui.MapControls = @($ui.MapCanvas, $ui.MapWholeButton, $ui.MapSessionsLabel, $ui.MapRefresh, $ui.MapList, $ui.MapRejected,
+        $ui.MapLine, $ui.MapRunLabel, $ui.MapRunSummary, $ui.MapTable, $ui.MapKeyGood, $ui.MapKeyWarn, $ui.MapKeyBad)
+    foreach ($ctl in $ui.MapControls) { $ctl.Visible = $false }
+    $Form.Controls.AddRange($ui.MapControls)
+}
+
+# A segment looks selected (accent fill) or plain (white with a border), the
+# same flat style as the other buttons.
+function Set-SegmentStyle {
+    param($Button, [bool]$On)
+    $c = $script:Colors
+    if ($On) {
+        $Button.BackColor = $c.Accent
+        $Button.ForeColor = [System.Drawing.Color]::White
+        $Button.Font = $script:Fonts.Strong
+        $Button.FlatAppearance.BorderColor = $c.Accent
+        $Button.FlatAppearance.MouseOverBackColor = $c.AccentHover
+        $Button.FlatAppearance.MouseDownBackColor = $c.AccentDown
+    } else {
+        $Button.BackColor = $c.Back
+        $Button.ForeColor = $c.Text
+        $Button.Font = $script:Fonts.Base
+        $Button.FlatAppearance.BorderColor = $c.Border
+        $Button.FlatAppearance.MouseOverBackColor = $c.SecHover
+        $Button.FlatAppearance.MouseDownBackColor = $c.SecDown
+    }
+}
+
+function Update-ViewButtons {
+    $ui = $script:Ui
+    Set-SegmentStyle $ui.SegUpload ($script:View -eq 'upload')
+    Set-SegmentStyle $ui.SegMap ($script:View -eq 'map')
+    Set-SegmentStyle $ui.MapWholeButton ([bool]$script:Map.Whole)
+}
+
+# The two view buttons sit at the right end of the header, joined edge to edge.
+function Set-ViewButtonBounds {
+    param([int]$W, [int]$M)
+    $ui = $script:Ui
+    $segW = Px 88
+    $segH = Px 30
+    $segY = Px 21
+    $ui.SegMap.SetBounds(($W - $M - $segW), $segY, $segW, $segH)
+    $ui.SegUpload.SetBounds(($W - $M - 2 * $segW + 1), $segY, $segW, $segH)
+}
+
+# Lays out the Route Map view and sizes the window to about 880 x 640. On a
+# short screen the height shrinks so the window still fits.
+function Update-MapLayout {
+    $ui = $script:Ui
+    $form = $ui.Form
+    $W = Px 880
+    $H = Px 640
+    try {
+        $wa = [System.Windows.Forms.Screen]::FromControl($form).WorkingArea
+        $maxH = $wa.Height - (Px 48)
+        if (($H -gt $maxH) -and ($maxH -gt (Px 440))) { $H = $maxH }
+    } catch { }
+    $M = Px 24
+    $form.SuspendLayout()
+
+    $ui.Header.SetBounds(0, 0, $W, (Px 72))
+    $ui.HeaderTitle.SetBounds($M, (Px 12), ($W - 2 * $M), (Px 30))
+    $ui.HeaderSub.SetBounds($M, (Px 42), ($W - 2 * $M), (Px 20))
+    $ui.HeaderLine.SetBounds(0, (Px 72), $W, 1)
+    Set-ViewButtonBounds $W $M
+
+    $top = Px 88
+    $canvasW = Px 480
+    $ui.MapCanvas.SetBounds($M, $top, $canvasW, ($H - $top - $M))
+
+    $x = $M + $canvasW + (Px 16)
+    $colW = $W - $M - $x
+    $y = $top
+    $ui.MapWholeButton.SetBounds($x, $y, $colW, (Px 30))
+    $y += (Px 30) + (Px 16)
+    $ui.MapSessionsLabel.SetBounds($x, $y, ($colW - (Px 72)), (Px 16))
+    $ui.MapRefresh.Location = New-Object System.Drawing.Point(($x + $colW - $ui.MapRefresh.PreferredSize.Width), ($y - (Px 1)))
+    $y += Px 24
+    $listH = Px 152
+    $ui.MapList.SetBounds($x, $y, $colW, $listH)
+    $y += $listH
+    $hasRejected = [bool]$ui.MapRejected.Text
+    $ui.MapRejected.Visible = $hasRejected
+    if ($hasRejected) {
+        $y += Px 8
+        Set-WrappedLabel $ui.MapRejected $x $y $colW
+        $y += $ui.MapRejected.Height
+    }
+    $y += Px 16
+    $ui.MapLine.SetBounds($x, $y, $colW, 1)
+    $y += Px 16
+    $ui.MapRunLabel.SetBounds($x, $y, $colW, (Px 16))
+    $y += Px 24
+    Set-WrappedLabel $ui.MapRunSummary $x $y $colW
+    $y += $ui.MapRunSummary.Height + (Px 8)
+    $keyH = Px 18
+    $keyY = $H - $M - $keyH
+    $tableH = [math]::Max(($keyY - (Px 8) - $y), (Px 60))
+    $ui.MapTable.SetBounds($x, $y, $colW, $tableH)
+    $third = [int]($colW / 3)
+    $ui.MapKeyGood.SetBounds($x, $keyY, $third, $keyH)
+    $ui.MapKeyWarn.SetBounds(($x + $third), $keyY, $third, $keyH)
+    $ui.MapKeyBad.SetBounds(($x + 2 * $third), $keyY, ($colW - 2 * $third), $keyH)
+
+    $size = New-Object System.Drawing.Size($W, $H)
+    if ($form.ClientSize -ne $size) { $form.ClientSize = $size }
+    $form.ResumeLayout($false)
+}
+
+# Switches between the Upload and Route Map views. NoLoad is for -SelfTest, which
+# fills the data itself.
+function Set-View {
+    param([string]$View, [switch]$NoLoad)
+    $ui = $script:Ui
+    if ($script:View -eq $View) { return }
+    $script:View = $View
+    $isMap = ($View -eq 'map')
+    foreach ($ctl in $ui.UploadControls) { $ctl.Visible = (-not $isMap) }
+    foreach ($ctl in $ui.MapControls) { $ctl.Visible = $isMap }
+    Update-ViewButtons
+    Update-Layout
+    if ($isMap) {
+        # The window just got wider, so keep it on the screen.
+        try {
+            $form = $ui.Form
+            $wa = [System.Windows.Forms.Screen]::FromControl($form).WorkingArea
+            $left = [math]::Max($wa.Left, [math]::Min($form.Left, ($wa.Right - $form.Width)))
+            $topPos = [math]::Max($wa.Top, [math]::Min($form.Top, ($wa.Bottom - $form.Height)))
+            if (($left -ne $form.Left) -or ($topPos -ne $form.Top)) { $form.Location = New-Object System.Drawing.Point($left, $topPos) }
+        } catch { }
+        if (-not $NoLoad) { Start-MapLoad }
+    }
+}
+
+function Switch-MapWhole {
+    $script:Map.Whole = -not $script:Map.Whole
+    Update-ViewButtons
+    $script:Ui.MapCanvas.Invalidate()
+}
+
+function Select-MapSession {
+    if ($script:MapFilling) { return }
+    $lv = $script:Ui.MapList
+    if ($lv.SelectedItems.Count -eq 0) { return }
+    $i = [int]$lv.SelectedItems[0].Tag
+    $script:Map.Selected = $i
+    $script:Map.SelectedFp = [string]$script:Map.Sessions[$i].Fingerprint
+    $script:Ui.MapCanvas.Invalidate()
+}
+
+# The same folder Record results saves into.
+function Get-ResultsFolder {
+    return (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Scourge Robot Data')
+}
+
+# Reads the results folder on a background thread, so a big folder never freezes
+# the window. The file being recorded right now is left out until it is finished.
+function Start-MapLoad {
+    if ($script:MapLoading) { $script:MapReload = $true; return }
+    $script:MapLoading = $true
+    $script:MapReload = $false
+    $script:Map.Loading = $true
+    $script:Ui.MapCanvas.Invalidate()
+    $skip = @()
+    if ($script:Recording -and $script:ResultsPath) { $skip = @($script:ResultsPath) }
+    Start-BgJob $MapBody @{ Folder = (Get-ResultsFolder); Skip = $skip; Cache = $script:MapCache } {
+        param($r)
+        $script:MapLoading = $false
+        $script:Map.Loading = $false
+        Set-MapData $r
+        if ($script:MapReload) { Start-MapLoad }
+    }
+}
+
+# Takes what Read-ScourgeResults returned, keeps the selection if that recording
+# is still there (otherwise picks the last run, or the newest recording), and
+# redraws everything that depends on it.
+function Set-MapData {
+    param($R)
+    $m = $script:Map
+    $m.Loaded = $true
+    $m.Error = ''
+    if ($R.Status -eq 'ok') {
+        $m.Sessions = @($R.Sessions)
+        $m.Rejected = @($R.Rejected)
+    } else {
+        $m.Sessions = @()
+        $m.Rejected = @()
+        $m.Error = [string]$R.Error
+        if (-not $m.Error) { $m.Error = 'Could not read the recordings.' }
+    }
+    $sel = -1
+    if ($m.SelectedFp) {
+        for ($i = 0; $i -lt $m.Sessions.Count; $i++) { if ($m.Sessions[$i].Fingerprint -eq $m.SelectedFp) { $sel = $i } }
+    }
+    if ($sel -lt 0) {
+        for ($i = $m.Sessions.Count - 1; $i -ge 0; $i--) { if ($m.Sessions[$i].Kind -eq 'run') { $sel = $i; break } }
+    }
+    if (($sel -lt 0) -and ($m.Sessions.Count -gt 0)) { $sel = $m.Sessions.Count - 1 }
+    $m.Selected = $sel
+    if ($sel -ge 0) { $m.SelectedFp = [string]$m.Sessions[$sel].Fingerprint } else { $m.SelectedFp = '' }
+    Update-MapPanel
+}
+
+# Fills the session list, the rejection note, and the last-run table.
+function Update-MapPanel {
+    $ui = $script:Ui
+    $m = $script:Map
+    $c = $script:Colors
+    $f = $script:Fonts
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+
+    $script:MapFilling = $true
+    try {
+        $lv = $ui.MapList
+        $lv.BeginUpdate()
+        $lv.Items.Clear()
+        # Newest first. The item remembers its place in the session list.
+        for ($i = $m.Sessions.Count - 1; $i -ge 0; $i--) {
+            $s = $m.Sessions[$i]
+            $item = New-Object System.Windows.Forms.ListViewItem((Get-KindLabel ([string]$s.Kind) ([string]$s.WasSide)))
+            [void]$item.SubItems.Add((Format-MapWhen ([string]$s.When)))
+            [void]$item.SubItems.Add([string]$s.Rows)
+            $item.Tag = $i
+            [void]$lv.Items.Add($item)
+            if ($i -eq $m.Selected) { $item.Selected = $true; $item.EnsureVisible() }
+        }
+        $lv.EndUpdate()
+    } finally { $script:MapFilling = $false }
+
+    # Rejected recordings: say so plainly. Newest three, then a count.
+    $lines = New-Object System.Collections.Generic.List[string]
+    if ($m.Error) { [void]$lines.Add($m.Error) }
+    $n = $m.Rejected.Count
+    for ($i = $n - 1; ($i -ge 0) -and ($i -ge ($n - 3)); $i--) { [void]$lines.Add([string]$m.Rejected[$i].Text) }
+    if ($n -gt 3) { [void]$lines.Add('and ' + ($n - 3) + ' more rejected recordings.') }
+    $ui.MapRejected.Text = ($lines.ToArray() -join "`n")
+
+    # Last run: the newest recording of kind run.
+    $run = $null
+    for ($i = $m.Sessions.Count - 1; $i -ge 0; $i--) { if ($m.Sessions[$i].Kind -eq 'run') { $run = $m.Sessions[$i]; break } }
+    $tbl = $ui.MapTable
+    $tbl.BeginUpdate()
+    $tbl.Items.Clear()
+    $ui.MapRunSummary.ForeColor = $c.Muted
+    if ($null -eq $run) {
+        $ui.MapRunSummary.Text = 'No run recorded yet.'
+    } else {
+        $rows = @(Get-MissRows $run)
+        $worst = $null
+        $worstStep = 0
+        $failed = 0
+        foreach ($r in $rows) {
+            if (($null -ne $r.Miss) -and (($null -eq $worst) -or ($r.Miss -gt $worst))) { $worst = $r.Miss; $worstStep = $r.Step }
+            if ($r.Ok -eq 0) { $failed++ }
+            $label = [string]$r.Type
+            if ($r.Step -ge 0) { $label = ([string]$r.Step) + ' ' + $label }
+            if ($r.Ok -eq 0) { $label += ' (failed)' }
+            $item = New-Object System.Windows.Forms.ListViewItem($label)
+            $item.UseItemStyleForSubItems = $false
+            $missText = '-'
+            if ($null -ne $r.Miss) { $missText = $r.Miss.ToString('0.0', $inv) }
+            $missCell = $item.SubItems.Add($missText)
+            $missCell.Font = $f.Strong
+            $missCell.ForeColor = $c.Muted
+            if ($r.Band -eq 'good') { $missCell.ForeColor = $c.Good }
+            elseif ($r.Band -eq 'warn') { $missCell.ForeColor = $c.Warn }
+            elseif ($r.Band -eq 'bad') { $missCell.ForeColor = $c.Bad }
+            $turnText = '-'
+            if ($null -ne $r.HMiss) { $turnText = $r.HMiss.ToString('0.0', $inv) }
+            $turnCell = $item.SubItems.Add($turnText)
+            $turnCell.ForeColor = $c.Muted
+            [void]$tbl.Items.Add($item)
+        }
+        $summary = Format-MapWhen ([string]$run.When)
+        if ($rows.Count -eq 0) {
+            $summary += '. This run has no step results.'
+        } else {
+            $summary += '. ' + $rows.Count + ' steps.'
+            if ($null -ne $worst) {
+                $summary += ' Worst miss ' + $worst.ToString('0.0', $inv) + ' in at step ' + $worstStep + '.'
+                $band = Get-MissBand $worst
+                if ($band -eq 'good') { $ui.MapRunSummary.ForeColor = $c.Good }
+                elseif ($band -eq 'bad') { $ui.MapRunSummary.ForeColor = $c.Bad }
+                else { $ui.MapRunSummary.ForeColor = $c.Text }
+            }
+            if ($failed -gt 0) { $summary += ' ' + $failed + ' did not finish.' }
+        }
+        $ui.MapRunSummary.Text = $summary
+    }
+    $tbl.EndUpdate()
+    if ($script:View -eq 'map') { Update-MapLayout }
+    $ui.MapCanvas.Invalidate()
+}
+
+# Where things are on the field, in the LEFT frame (see include/field.hpp in the
+# robot code). Goal spots, toggle spots, and the loose Cup and Pin spots are
+# measured from the field kit's drawings, not from a real field, so they are
+# approximate. The opponent's Goals are ours turned 180 degrees about the center.
+function Get-MapField {
+    if ($null -ne $script:MapField) { return $script:MapField }
+    $script:MapField = @{
+        Wall = 70.1
+        RobotLength = 17.0
+        RobotWidth = 16.0
+        Goals = @(
+            @('alliance', 23.6, -47.2), @('alliance', 47.2, -23.6),
+            @('neutral', -23.6, -47.2), @('neutral', 47.2, 23.6), @('neutral', 0.0, 0.0),
+            @('opponent', -23.6, 47.2), @('opponent', -47.2, 23.6),
+            @('neutral', 23.6, 47.2), @('neutral', -47.2, -23.6)
+        )
+        Toggles = @(@(0.0, -70.1), @(70.1, 0.0), @(-70.1, 0.0), @(0.0, 70.1))
+        Objects = @(@(-23.6, -68.7), @(23.6, -68.7), @(68.7, -23.6), @(0.0, -23.6), @(23.6, 0.0), @(47.2, -47.2), @(23.6, -23.6))
+    }
+    return $script:MapField
+}
+
+# One small symbol, centered on (X, Y), R pixels from center to edge. Goals use
+# alliance, neutral, opponent. Marks use drop, pin, stack, toggle, push.
+function Show-MapShape {
+    param($G, $Pal, [string]$Kind, [double]$X, [double]$Y, [double]$R)
+    $x0 = [single]($X - $R)
+    $y0 = [single]($Y - $R)
+    $d = [single](2.0 * $R)
+    if ($Kind -eq 'alliance') {
+        $G.FillEllipse($Pal.AccentTint, $x0, $y0, $d, $d)
+        $G.DrawEllipse($Pal.AccentPen, $x0, $y0, $d, $d)
+    } elseif ($Kind -eq 'neutral') {
+        $G.FillEllipse($Pal.BackBrush, $x0, $y0, $d, $d)
+        $G.DrawEllipse($Pal.MutedPen, $x0, $y0, $d, $d)
+    } elseif ($Kind -eq 'opponent') {
+        $G.FillRectangle($Pal.BadTint, $x0, $y0, $d, $d)
+        $G.DrawRectangle($Pal.BadPen, $x0, $y0, $d, $d)
+    } elseif ($Kind -eq 'drop') {
+        $pts = [System.Drawing.PointF[]]@(
+            [System.Drawing.PointF]::new([single]($X - $R), [single]($Y - 0.8 * $R)),
+            [System.Drawing.PointF]::new([single]($X + $R), [single]($Y - 0.8 * $R)),
+            [System.Drawing.PointF]::new([single]$X, [single]($Y + $R)))
+        $G.FillPolygon($Pal.AccentBrush, $pts)
+        $G.DrawPolygon($Pal.WhitePen, $pts)
+    } elseif ($Kind -eq 'stack') {
+        $G.FillRectangle($Pal.AccentBrush, $x0, $y0, $d, $d)
+        $G.DrawRectangle($Pal.WhitePen, $x0, $y0, $d, $d)
+    } elseif ($Kind -eq 'toggle') {
+        $pts = [System.Drawing.PointF[]]@(
+            [System.Drawing.PointF]::new([single]$X, [single]($Y - $R)),
+            [System.Drawing.PointF]::new([single]($X + $R), [single]$Y),
+            [System.Drawing.PointF]::new([single]$X, [single]($Y + $R)),
+            [System.Drawing.PointF]::new([single]($X - $R), [single]$Y))
+        $G.FillPolygon($Pal.AccentBrush, $pts)
+        $G.DrawPolygon($Pal.WhitePen, $pts)
+    } elseif ($Kind -eq 'push') {
+        $G.DrawLine($Pal.CrossPen, [single]($X - $R), [single]$Y, [single]($X + $R), [single]$Y)
+        $G.DrawLine($Pal.CrossPen, [single]$X, [single]($Y - $R), [single]$X, [single]($Y + $R))
+    } else {
+        # pin, and any mark type this version does not know
+        $G.FillEllipse($Pal.AccentBrush, $x0, $y0, $d, $d)
+        $G.DrawEllipse($Pal.WhitePen, $x0, $y0, $d, $d)
+    }
+}
+
+# A recording's path as screen points. Long recordings are thinned to at most
+# Max points: the line looks the same and a repaint stays quick.
+function Get-ScreenPath {
+    param($S, [int]$Max, [double]$Ox, [double]$Oy, [double]$Scale)
+    $n = $S.X.Length
+    $list = New-Object 'System.Collections.Generic.List[System.Drawing.PointF]'
+    if ($n -lt 1) { return ,$list.ToArray() }
+    $stride = 1
+    if ($n -gt $Max) { $stride = [int][math]::Ceiling($n / $Max) }
+    for ($i = 0; $i -lt $n; $i += $stride) {
+        [void]$list.Add([System.Drawing.PointF]::new([single]($Ox + $S.X[$i] * $Scale), [single]($Oy - $S.Y[$i] * $Scale)))
+    }
+    $last = $n - 1
+    if (($last % $stride) -ne 0) {
+        [void]$list.Add([System.Drawing.PointF]::new([single]($Ox + $S.X[$last] * $Scale), [single]($Oy - $S.Y[$last] * $Scale)))
+    }
+    return ,$list.ToArray()
+}
+
+# Paints the field and the selected recording. Field to scale: 1 inch = Scale
+# pixels, screen x = Ox + x * Scale, screen y = Oy - y * Scale (field +Y is up).
+function Show-RouteMapCanvas {
+    param($G, $Size)
+    $c = $script:Colors
+    $f = $script:Fonts
+    $m = $script:Map
+    $field = Get-MapField
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $G.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $G.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
+    $G.Clear($c.HeaderBack)
+    $W = [double]$Size.Width
+    $H = [double]$Size.Height
+    if (($W -lt 100) -or ($H -lt 160)) { return }
+
+    $thin = [double][math]::Max(1, (Px 1))
+    $mkPen = { param($col, $w) New-Object System.Drawing.Pen($col, [single]$w) }
+    $pal = @{}
+    try {
+        $pal.BackBrush = New-Object System.Drawing.SolidBrush($c.Back)
+        $pal.TintBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(16, $c.Accent))
+        $pal.AccentBrush = New-Object System.Drawing.SolidBrush($c.Accent)
+        $pal.AccentTint = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(64, $c.Accent))
+        $pal.TextBrush = New-Object System.Drawing.SolidBrush($c.Text)
+        $pal.MutedBrush = New-Object System.Drawing.SolidBrush($c.Muted)
+        $pal.IdleBrush = New-Object System.Drawing.SolidBrush($c.Idle)
+        $pal.BadTint = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(40, $c.Bad))
+        $pal.GoodBrush = New-Object System.Drawing.SolidBrush($c.Good)
+        $pal.WarnBrush = New-Object System.Drawing.SolidBrush($c.Warn)
+        $pal.BadBrush = New-Object System.Drawing.SolidBrush($c.Bad)
+        $pal.GridPen = & $mkPen $c.Line $thin
+        $pal.BorderPen = & $mkPen $c.Border ($thin * 1.5)
+        $pal.AutoPen = & $mkPen $c.Warn ($thin * 1.5)
+        $pal.AutoPen.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
+        $pal.TogglePen = & $mkPen $c.Idle (Px 4)
+        $pal.AccentPen = & $mkPen $c.Accent ($thin * 1.5)
+        $pal.MutedPen = & $mkPen $c.Muted ($thin * 1.5)
+        $pal.BadPen = & $mkPen $c.Bad ($thin * 1.5)
+        $pal.WhitePen = & $mkPen ([System.Drawing.Color]::White) ($thin * 1.5)
+        $pal.CrossPen = & $mkPen $c.Accent (Px 3)
+        $pal.PathPen = & $mkPen $c.Accent (Px 3)
+        $pal.PathPen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+        $pal.PathPen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+        $pal.PathPen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+        $pal.OtherPen = & $mkPen ([System.Drawing.Color]::FromArgb(150, $c.Idle)) (Px 2)
+        $pal.OtherPen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+        $pal.RobotPen = & $mkPen $c.Accent (Px 2)
+        $pal.RobotFill = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(48, $c.Accent))
+        $pal.GoodPen = & $mkPen $c.Good (Px 2)
+        $pal.WarnPen = & $mkPen $c.Warn (Px 2)
+        $pal.BadLine = & $mkPen $c.Bad (Px 2)
+        $pal.LinePen = & $mkPen $c.Line $thin
+
+        # What to draw: the selected recording, framed to its path unless Whole field is on.
+        $sel = $null
+        if (($m.Selected -ge 0) -and ($m.Selected -lt $m.Sessions.Count)) { $sel = $m.Sessions[$m.Selected] }
+        $bounds = $null
+        if ($null -ne $sel) { $bounds = Get-SessionBounds $sel }
+        $areaTop = [double](Px 36)
+        $areaBottom = $H - (Px 52)
+        $areaH = $areaBottom - $areaTop
+        $vp = Get-MapViewport -Width $W -Height $areaH -Pad (Px 22) -Whole ([bool]$m.Whole) -Bounds $bounds -Wall $field.Wall
+        $sc = [double]$vp.Scale
+        $ox = $W / 2.0 - $vp.Cx * $sc
+        $oy = $areaTop + $areaH / 2.0 + $vp.Cy * $sc
+
+        $wall = [double]$field.Wall
+        $left = $ox - $wall * $sc
+        $top = $oy - $wall * $sc
+        $side = 2.0 * $wall * $sc
+        $G.SetClip([System.Drawing.RectangleF]::new(0, [single]$areaTop, [single]$W, [single]$areaH))
+
+        # Floor, our side of the Autonomous Line (below y = x), tile seams, wall.
+        $G.FillRectangle($pal.BackBrush, [single]$left, [single]$top, [single]$side, [single]$side)
+        $tint = [System.Drawing.PointF[]]@(
+            [System.Drawing.PointF]::new([single]$left, [single]($top + $side)),
+            [System.Drawing.PointF]::new([single]($left + $side), [single]($top + $side)),
+            [System.Drawing.PointF]::new([single]($left + $side), [single]$top))
+        $G.FillPolygon($pal.TintBrush, $tint)
+        # Tiles are about 23.6 in, the spacing of the Goals.
+        foreach ($k in -2..2) {
+            $gx = $ox + 23.6 * $k * $sc
+            $gy = $oy - 23.6 * $k * $sc
+            $G.DrawLine($pal.GridPen, [single]$gx, [single]$top, [single]$gx, [single]($top + $side))
+            $G.DrawLine($pal.GridPen, [single]$left, [single]$gy, [single]($left + $side), [single]$gy)
+        }
+        $G.DrawRectangle($pal.BorderPen, [single]$left, [single]$top, [single]$side, [single]$side)
+        # Autonomous Line, y = x, from the left back corner to the far right corner.
+        $G.DrawLine($pal.AutoPen, [single]$left, [single]($top + $side), [single]($left + $side), [single]$top)
+
+        # Toggle bars sit on the walls, about 25.8 in long.
+        foreach ($t in $field.Toggles) {
+            $tx = $ox + $t[0] * $sc
+            $ty = $oy - $t[1] * $sc
+            $half = 12.9 * $sc
+            if ([math]::Abs($t[1]) -gt [math]::Abs($t[0])) {
+                $G.DrawLine($pal.TogglePen, [single]($tx - $half), [single]$ty, [single]($tx + $half), [single]$ty)
+            } else {
+                $G.DrawLine($pal.TogglePen, [single]$tx, [single]($ty - $half), [single]$tx, [single]($ty + $half))
+            }
+        }
+        # Loose Cups and Pins on our side, as small dots.
+        $dot = [math]::Max((Px 2), 1.6 * $sc)
+        foreach ($o in $field.Objects) {
+            $G.FillEllipse($pal.IdleBrush, [single]($ox + $o[0] * $sc - $dot), [single]($oy - $o[1] * $sc - $dot), [single](2.0 * $dot), [single](2.0 * $dot))
+        }
+        # Goals: alliance filled circle, neutral open circle, opponent square.
+        $goalR = [math]::Max((Px 5), 2.4 * $sc)
+        foreach ($gl in $field.Goals) {
+            Show-MapShape $G $pal ([string]$gl[0]) ($ox + $gl[1] * $sc) ($oy - $gl[2] * $sc) $goalR
+        }
+
+        # Recordings: the others faint, the selected one strong.
+        $drawn = 0
+        for ($i = $m.Sessions.Count - 1; ($i -ge 0) -and ($drawn -lt 30); $i--) {
+            if ($i -eq $m.Selected) { continue }
+            $pts = Get-ScreenPath $m.Sessions[$i] 160 $ox $oy $sc
+            if ($pts.Length -ge 2) { $G.DrawLines($pal.OtherPen, $pts); $drawn++ }
+        }
+        if ($null -ne $sel) {
+            $pts = Get-ScreenPath $sel 500 $ox $oy $sc
+            if ($pts.Length -ge 2) { $G.DrawLines($pal.PathPen, $pts) }
+            if ($pts.Length -ge 1) {
+                $sr = [double](Px 4)
+                $G.FillEllipse($pal.BackBrush, [single]($pts[0].X - $sr), [single]($pts[0].Y - $sr), [single](2 * $sr), [single](2 * $sr))
+                $G.DrawEllipse($pal.AccentPen, [single]($pts[0].X - $sr), [single]($pts[0].Y - $sr), [single](2 * $sr), [single](2 * $sr))
+            }
+            # Step results: a line from where the step aimed to where the robot ended, colored by the miss.
+            $er = [double](Px 4)
+            foreach ($e in $sel.Events) {
+                $want = Get-StepTargets ([string]$e.Type)
+                if (-not $want.Pos) { continue }
+                $ax = $ox + $e.X * $sc; $ay = $oy - $e.Y * $sc
+                $bx = $ox + $e.Tx * $sc; $by = $oy - $e.Ty * $sc
+                $band = Get-MissBand ([math]::Sqrt(($e.X - $e.Tx) * ($e.X - $e.Tx) + ($e.Y - $e.Ty) * ($e.Y - $e.Ty)))
+                $linePen = $pal.GoodPen; $dotBrush = $pal.GoodBrush
+                if ($band -eq 'warn') { $linePen = $pal.WarnPen; $dotBrush = $pal.WarnBrush }
+                elseif ($band -eq 'bad') { $linePen = $pal.BadLine; $dotBrush = $pal.BadBrush }
+                $G.DrawLine($linePen, [single]$bx, [single]$by, [single]$ax, [single]$ay)
+                $G.DrawEllipse($pal.MutedPen, [single]($bx - $er), [single]($by - $er), [single](2 * $er), [single](2 * $er))
+                $G.FillEllipse($dotBrush, [single]($ax - $er), [single]($ay - $er), [single](2 * $er), [single](2 * $er))
+            }
+            foreach ($mk in $sel.Marks) {
+                Show-MapShape $G $pal ([string]$mk.Type) ($ox + $mk.X * $sc) ($oy - $mk.Y * $sc) (Px 6)
+            }
+            # Robot box at the last pose. Heading 0 faces +Y and turns clockwise.
+            $has = $false
+            $rx = 0.0; $ry = 0.0; $rh = 0.0
+            $cnt = $sel.X.Length
+            if ($cnt -gt 0) { $rx = $sel.X[$cnt - 1]; $ry = $sel.Y[$cnt - 1]; $rh = $sel.H[$cnt - 1]; $has = $true }
+            elseif ($sel.Events.Count -gt 0) { $le = $sel.Events[$sel.Events.Count - 1]; $rx = $le.X; $ry = $le.Y; $rh = $le.H; $has = $true }
+            if ($has) {
+                $rad = $rh * [math]::PI / 180.0
+                $fx = [math]::Sin($rad); $fy = [math]::Cos($rad)
+                $sx = [math]::Cos($rad); $sy = -[math]::Sin($rad)
+                $hl = $field.RobotLength / 2.0
+                $hw = $field.RobotWidth / 2.0
+                $corner = {
+                    param($a, $b)
+                    [System.Drawing.PointF]::new([single]($ox + ($rx + $fx * $a + $sx * $b) * $sc), [single]($oy - ($ry + $fy * $a + $sy * $b) * $sc))
+                }
+                $fr = & $corner $hl $hw
+                $fl = & $corner $hl (-$hw)
+                $bl = & $corner (-$hl) (-$hw)
+                $br = & $corner (-$hl) $hw
+                $box = [System.Drawing.PointF[]]@($fr, $fl, $bl, $br)
+                $G.FillPolygon($pal.RobotFill, $box)
+                $G.DrawPolygon($pal.RobotPen, $box)
+                $G.DrawLine($pal.PathPen, $fr, $fl)
+            }
+        }
+        # Which way is the station? Under the bottom wall when there is room.
+        $below = $top + $side + (Px 2)
+        if (($below + (Px 15)) -le $areaBottom) {
+            $lw = $G.MeasureString('Our station', $f.Small).Width
+            $G.DrawString('Our station', $f.Small, $pal.MutedBrush, [single]($ox - $lw / 2.0), [single]$below)
+        }
+        $G.ResetClip()
+
+        # Caption (top) and legend (bottom).
+        $caption = ''
+        $note = ''
+        if ($null -ne $sel) {
+            $caption = (Get-KindLabel ([string]$sel.Kind) 'L') + '   ' + (Format-MapWhen ([string]$sel.When)) + '   ' + $sel.Rows + ' rows'
+            if ($sel.WasSide -eq 'R') { $note = 'Recorded on the right side, shown mirrored' }
+        } elseif ($m.Loading) {
+            $caption = 'Reading recordings...'
+        } elseif ($m.Error) {
+            $caption = 'Could not read the recordings'
+        } elseif ($m.Loaded) {
+            $caption = 'No recordings yet'
+        }
+        if ($caption) { $G.DrawString($caption, $f.Strong, $pal.TextBrush, [single](Px 14), [single](Px 8)) }
+        if ($note) {
+            $nw = $G.MeasureString($note, $f.Small).Width
+            $G.DrawString($note, $f.Small, $pal.MutedBrush, [single]($W - $nw - (Px 14)), [single](Px 11))
+        }
+        if (($m.Sessions.Count -eq 0) -and $m.Loaded -and (-not $m.Loading)) {
+            $cardW = [double](Px 300)
+            $cardH = [double](Px 64)
+            $card = [System.Drawing.RectangleF]::new([single]($W / 2.0 - $cardW / 2.0), [single]($areaTop + $areaH / 2.0 - $cardH / 2.0), [single]$cardW, [single]$cardH)
+            $G.FillRectangle($pal.BackBrush, $card)
+            $G.DrawRectangle($pal.LinePen, $card.X, $card.Y, $card.Width, $card.Height)
+            $fmt = New-Object System.Drawing.StringFormat
+            try {
+                $fmt.Alignment = [System.Drawing.StringAlignment]::Center
+                $fmt.LineAlignment = [System.Drawing.StringAlignment]::Center
+                $inner = [System.Drawing.RectangleF]::new($card.X + (Px 12), $card.Y + (Px 6), $card.Width - (Px 24), $card.Height - (Px 12))
+                $G.DrawString('Click Record results on the Upload tab, then send a recording from the robot.', $f.Small, $pal.MutedBrush, $inner, $fmt)
+            } finally { $fmt.Dispose() }
+        }
+        $r = [double](Px 5)
+        $rows = @(
+            @(@('drop', 'Drop'), @('pin', 'Pin'), @('stack', 'Stack'), @('toggle', 'Toggle'), @('push', 'Push')),
+            @(@('alliance', 'Alliance goal'), @('neutral', 'Neutral goal'), @('opponent', 'Opponent goal'), @('line', 'Autonomous Line'))
+        )
+        $rowY = $H - (Px 44)
+        foreach ($row in $rows) {
+            $lx = [double](Px 14)
+            foreach ($item in $row) {
+                $cy = $rowY + (Px 8)
+                if ($item[0] -eq 'line') {
+                    $G.DrawLine($pal.AutoPen, [single]$lx, [single]$cy, [single]($lx + 2.0 * $r + (Px 6)), [single]$cy)
+                    $lx += 2.0 * $r + (Px 6)
+                } else {
+                    Show-MapShape $G $pal $item[0] ($lx + $r) $cy $r
+                    $lx += 2.0 * $r
+                }
+                $lx += Px 5
+                $G.DrawString($item[1], $f.Small, $pal.MutedBrush, [single]$lx, [single]$rowY)
+                $lx += $G.MeasureString($item[1], $f.Small).Width + (Px 8)
+            }
+            $rowY += Px 20
+        }
+    } finally {
+        foreach ($o in @($pal.Values)) { try { $o.Dispose() } catch { } }
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -1836,6 +3025,8 @@ function Start-Recording {
         $script:Ui.RecordButton.Text = 'Record results'
         $script:Ui.SendButton.Enabled = Test-HaveResults
         Update-RecordingStatus
+        # The new file is complete now, so the Route Map can read it.
+        if ($script:View -eq 'map') { Start-MapLoad }
         if ($r.Status -eq 'error') {
             Add-LogText ('Recording stderr: ' + [string]$r.Error)
             Set-DetailsVisible $true
@@ -1979,6 +3170,180 @@ if ($SelfTest) {
     $failures = New-Object System.Collections.Generic.List[string]
     Write-Host ('Scourge Uploader self-test (install dir: ' + $InstallDir + ')')
 
+    # Builds recording text the way the robot sends it: BEGIN, rows numbered from 0,
+    # END. Path = points in inches, 10 samples between points at 20 Hz. Marks and
+    # Steps carry At = the path point they happen at. Used for the Route Map checks.
+    function New-SampleWire {
+        param([string]$Kind, [string]$Side, $Path, $Marks, $Steps)
+        $q = { param($v) [string][int][math]::Round([double]$v * 100.0) }
+        $rows = New-Object System.Collections.Generic.List[string]
+        $t = 0
+        $heading = 0.0
+        $last = $Path[0]
+        for ($k = 0; $k -lt $Path.Count; $k++) {
+            $p = $Path[$k]
+            if ($k -eq 0) {
+                $rows.Add('SCOURGE,AP,' + $rows.Count + ',0;' + (& $q $p[0]) + ';' + (& $q $p[1]) + ';0;0;0;0;0;0,')
+            } else {
+                $dx = $p[0] - $last[0]
+                $dy = $p[1] - $last[1]
+                $heading = [math]::Atan2($dx, $dy) * 180.0 / [math]::PI
+                for ($i = 1; $i -le 10; $i++) {
+                    $t += 50
+                    $rows.Add('SCOURGE,AP,' + $rows.Count + ',' + $t + ';' + (& $q ($last[0] + $dx * $i / 10.0)) + ';' + (& $q ($last[1] + $dy * $i / 10.0)) + ';' + (& $q $heading) + ';0;0;0;0;0,')
+                }
+            }
+            $last = $p
+            foreach ($mk in $Marks) {
+                if ($mk.At -eq $k) { $rows.Add('SCOURGE,AM,' + $rows.Count + ',' + $t + ';' + $mk.Type + ';' + (& $q $mk.X) + ';' + (& $q $mk.Y) + ';' + (& $q $heading) + ';300;0;0,') }
+            }
+            foreach ($st in $Steps) {
+                if ($st.At -eq $k) {
+                    $rows.Add('SCOURGE,AS,' + $rows.Count + ',' + $t + ';' + $st.Step + ';' + $st.Type + ';' + (& $q $st.Target[0]) + ';' + (& $q $st.Target[1]) + ';' + (& $q $st.Target[2]) + ';' + (& $q $st.Actual[0]) + ';' + (& $q $st.Actual[1]) + ';' + (& $q $st.Actual[2]) + ';' + $st.Ok + ',')
+                }
+            }
+        }
+        $n = $rows.Count
+        return ('SCOURGE,BEGIN,autopath,1;' + $Kind + ';' + $Side + ';' + $n + ';selftest,' + "`n" + ($rows.ToArray() -join "`n") + "`n" + 'SCOURGE,END,autopath,' + $n + ',' + "`n")
+    }
+
+    # 0. Route Map reader and math, against numbers worked out by hand.
+    $mapFails = New-Object System.Collections.Generic.List[string]
+    $near = { param($a, $b) ([math]::Abs([double]$a - [double]$b) -lt 0.000001) }
+    $expect = { param($ok, $what) if (-not $ok) { [void]$mapFails.Add($what) } }
+    try {
+        $header = 'kind,test,key,value,unit'
+        $fixA = (@($header,
+            'SCOURGE,BEGIN,autopath,1;teach_open;L;4;build-1,',
+            'SCOURGE,AP,0,0;800;-6160;0;0;0;0;0;0,',
+            'SCOURGE,AP,1,50;900;-5500;1000;0;0;0;0;0,',
+            'SCOURGE,AM,2,100;drop;1000;-5000;4500;300;0;0,',
+            'SCOURGE,AP,3,150;1100;-4800;4500;0;0;0;0;0,',
+            'SCOURGE,END,autopath,4,') -join "`n") + "`n"
+        # Rows 0 and 2 arrive, row 1 never does.
+        $fixGap = (@('SCOURGE,BEGIN,autopath,1;run;L;3;build-1,',
+            'SCOURGE,AP,0,0;0;0;0;0;0;0;0;0,',
+            'SCOURGE,AP,2,100;100;100;0;0;0;0;0;0,',
+            'SCOURGE,END,autopath,3,') -join "`n") + "`n"
+        $fixCut = (@('SCOURGE,BEGIN,autopath,1;push;L;2;build-1,',
+            'SCOURGE,AP,0,0;0;0;0;0;0;0;0;0,',
+            'SCOURGE,AP,1,50;0;100;0;0;0;0;0;0,') -join "`n") + "`n"
+        # Right side. Raw (x 10, y 20, heading 30) must become (-20, -10, 240).
+        $fixR = (@('SCOURGE,BEGIN,autopath,1;run;R;4;build-1,',
+            'SCOURGE,AP,0,0;1000;2000;3000;0;0;0;0;0,',
+            'SCOURGE,AP,1,100;-500;0;30000;0;0;0;0;0,',
+            'SCOURGE,AS,2,200;3;drive;1000;2000;0;1300;2400;0;1,',
+            'SCOURGE,AS,3,300;4;turn;0;0;1000;0;0;35000;1,',
+            'SCOURGE,END,autopath,4,') -join "`n") + "`n"
+
+        # Complete recording: hundredths become inches and degrees, text before SCOURGE is dropped.
+        $noisy = (($fixA -split "`n" | ForEach-Object { if ($_ -like 'SCOURGE,*') { '[12:00:01] pros: ' + $_ } else { $_ } }) -join "`r`n")
+        foreach ($variant in @($fixA, $noisy)) {
+            $p = ConvertFrom-ScourgeWire $variant
+            & $expect ($p.Sessions.Count -eq 1) 'complete recording was not accepted'
+            if ($p.Sessions.Count -eq 1) {
+                $s = $p.Sessions[0]
+                & $expect ($s.Kind -eq 'teach_open' -and $s.Side -eq 'L' -and $s.Rows -eq 4) 'BEGIN fields wrong'
+                & $expect ($s.X.Length -eq 3 -and $s.Marks.Count -eq 1 -and $s.Events.Count -eq 0) 'row counts wrong'
+                & $expect ((& $near $s.X[0] 8.0) -and (& $near $s.Y[0] -61.6) -and (& $near $s.H[1] 10.0) -and (& $near $s.X[2] 11.0) -and (& $near $s.T[2] 0.15)) 'hundredths and milliseconds wrong'
+                & $expect ($s.Marks[0].Type -eq 'drop' -and (& $near $s.Marks[0].X 10.0) -and (& $near $s.Marks[0].Y -50.0) -and (& $near $s.Marks[0].H 45.0) -and $s.Marks[0].Lift -eq 300) 'mark fields wrong'
+            }
+        }
+        # A gap is rejected, with the missing row named. A cut-off send is rejected too.
+        $p = ConvertFrom-ScourgeWire $fixGap
+        & $expect (($p.Sessions.Count -eq 0) -and ($p.Rejected.Count -eq 1)) 'gap was not rejected'
+        if ($p.Rejected.Count -eq 1) {
+            $rj = $p.Rejected[0]
+            & $expect ($rj.Got -eq 2 -and $rj.Expected -eq 3 -and $rj.MissingCount -eq 1 -and $rj.Missing[0] -eq 1) 'gap numbers wrong'
+            & $expect ($rj.Text -like '*received 2 of 3 rows with gaps*' -and $rj.Text -like '*Missing row numbers: 1.*') 'gap message wrong'
+        }
+        $p = ConvertFrom-ScourgeWire $fixCut
+        & $expect (($p.Sessions.Count -eq 0) -and ($p.Rejected.Count -eq 1) -and ($p.Rejected[0].Text -like '*no END*')) 'cut-off send was not rejected'
+        # A whole recording sent twice is kept once. A bad copy before a good one still shows as rejected.
+        $p = ConvertFrom-ScourgeWire ($fixA + $fixA)
+        & $expect ($p.Sessions.Count -eq 1) 'repeat was not kept once'
+        $p = ConvertFrom-ScourgeWire ($fixGap + $fixA)
+        & $expect (($p.Sessions.Count -eq 1) -and ($p.Rejected.Count -eq 1)) 'bad copy then good copy wrong'
+
+        # Right side to left frame: (x, y) -> (-y, -x), heading -> 270 - heading.
+        $p = ConvertFrom-ScourgeWire $fixR
+        $raw = $p.Sessions[0]
+        & $expect ($raw.Side -eq 'R' -and (& $near $raw.X[0] 10.0) -and (& $near $raw.Y[0] 20.0) -and (& $near $raw.H[0] 30.0)) 'right-side raw values wrong'
+        $left = ConvertTo-LeftFrame $raw
+        & $expect ($left.Side -eq 'L' -and $left.WasSide -eq 'R') 'mirror did not set the side'
+        & $expect ((& $near $left.X[0] -20.0) -and (& $near $left.Y[0] -10.0) -and (& $near $left.H[0] 240.0)) 'mirror of (10, 20, 30) should be (-20, -10, 240)'
+        & $expect ((& $near $left.X[1] 0.0) -and (& $near $left.Y[1] 5.0) -and (& $near $left.H[1] -30.0)) 'mirror of (-5, 0, 300) should be (0, 5, -30)'
+        & $expect ((& $near $left.Events[0].Tx -20.0) -and (& $near $left.Events[0].Ty -10.0) -and (& $near $left.Events[0].Th 270.0) -and (& $near $left.Events[0].X -24.0) -and (& $near $left.Events[0].Y -13.0)) 'mirror of step target and actual wrong'
+        $zero = ConvertTo-LeftFrame (ConvertFrom-ScourgeWire ((@('SCOURGE,BEGIN,autopath,1;run;R;1;b,', 'SCOURGE,AP,0,0;0;0;0;0;0;0;0;0,', 'SCOURGE,END,autopath,1,') -join "`n") + "`n")).Sessions[0]
+        & $expect (([string]$zero.X[0] -eq '0') -and ([string]$zero.Y[0] -eq '0')) 'a zero must stay 0, not -0'
+
+        # Miss: target (10, 20) to final (13, 24) is a 3-4-5 triangle, so 5.00 in.
+        foreach ($sess in @($raw, $left)) {
+            $mr = @(Get-MissRows $sess)
+            & $expect ($mr.Count -eq 2) 'miss table should have 2 rows'
+            if ($mr.Count -eq 2) {
+                & $expect ($mr[0].Step -eq 3 -and $mr[0].Type -eq 'drive' -and ([math]::Round($mr[0].Miss, 2) -eq 5.00) -and $mr[0].Band -eq 'bad' -and ($null -eq $mr[0].HMiss)) 'drive miss should be 5.00 in'
+                & $expect ($null -eq $mr[1].Miss -and (& $near $mr[1].HMiss 20.0) -and $mr[1].Band -eq 'none') 'turn: heading 350 vs 10 should be 20 deg and no distance'
+            }
+        }
+        $openRow = @(Get-MissRows @{ Events = @(@{ Step = -1; Type = 'opening'; Tx = 0.0; Ty = 0.0; Th = 0.0; X = 5.0; Y = 5.0; H = 0.0; Ok = 1 }) })
+        & $expect ($openRow.Count -eq 1 -and $null -eq $openRow[0].Miss -and $null -eq $openRow[0].HMiss) 'the opening has no target to miss'
+        & $expect ((Get-MissBand 0.99) -eq 'good' -and (Get-MissBand 1.0) -eq 'warn' -and (Get-MissBand 2.99) -eq 'warn' -and (Get-MissBand 3.0) -eq 'bad') 'miss color bands wrong'
+
+        # Framing: whole field, 701 px for 140.2 in is 5 px per inch. Fit: a 40 x 20 in path plus
+        # 12 in each side is 64 x 60 in, so 640 x 600 px gives 10 px per inch around (20, 10).
+        $vp = Get-MapViewport -Width 701 -Height 701 -Pad 0 -Whole $true -Bounds $null
+        & $expect ((& $near $vp.Scale 5.0) -and (& $near $vp.Cx 0.0) -and (& $near $vp.Cy 0.0)) 'whole field framing wrong'
+        $vp = Get-MapViewport -Width 640 -Height 600 -Pad 0 -Whole $false -Bounds @{ MinX = 0.0; MaxX = 40.0; MinY = 0.0; MaxY = 20.0 }
+        & $expect ((& $near $vp.Scale 10.0) -and (& $near $vp.Cx 20.0) -and (& $near $vp.Cy 10.0)) 'fit-to-path framing wrong'
+        $bx = Get-SessionBounds (ConvertFrom-ScourgeWire $fixA).Sessions[0]
+        & $expect ((& $near $bx.MinX 8.0) -and (& $near $bx.MaxX 11.0) -and (& $near $bx.MinY -61.6) -and (& $near $bx.MaxY -48.0)) 'path bounds wrong'
+        & $expect ((Format-MapWhen '2026-10-30 10:15') -eq 'Oct 30, 10:15 AM') 'time text wrong'
+
+        # The folder reader, on real files: a repeat across two files, a gap, a file still being written.
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('scourge-map-test-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        $utf8 = New-Object System.Text.UTF8Encoding($false)
+        $writer = $null
+        try {
+            [System.IO.File]::WriteAllText((Join-Path $tmp 'results-20261030-101500.csv'), ($header + "`n" + $fixA + $fixGap), $utf8)
+            [System.IO.File]::WriteAllText((Join-Path $tmp 'results-20261030-103000.csv'), ($header + "`n" + $fixR), $utf8)
+            [System.IO.File]::WriteAllText((Join-Path $tmp 'results-20261030-104500.csv'), ($header + "`n" + $fixA), $utf8)
+            [System.IO.File]::WriteAllText((Join-Path $tmp 'notes.csv'), 'not a results file', $utf8)
+            $cache = [hashtable]::Synchronized(@{})
+            $res = Read-ScourgeResults -Folder $tmp -Cache $cache
+            & $expect ($res.Status -eq 'ok' -and $res.Files -eq 3 -and $res.Sessions.Count -eq 2) 'folder: expected 3 files and 2 sessions'
+            & $expect ($res.Rejected.Count -eq 1 -and $res.Rejected[0].Text -like 'results-20261030-101500.csv: *') 'folder: the gap should show once, with its file name'
+            if ($res.Sessions.Count -eq 2) {
+                & $expect ($res.Sessions[0].WasSide -eq 'R' -and $res.Sessions[0].Side -eq 'L' -and (& $near $res.Sessions[0].X[0] -20.0)) 'folder: right-side session should arrive mirrored'
+                & $expect ($res.Sessions[1].Source -eq 'results-20261030-104500.csv' -and $res.Sessions[1].When -eq '2026-10-30 10:45') 'folder: the last copy of the repeat should win'
+            }
+            $again = Read-ScourgeResults -Folder $tmp -Cache $cache
+            & $expect ($cache.Count -eq 3 -and $again.Sessions.Count -eq 2) 'folder: cached read gave a different answer'
+            $skipped = Read-ScourgeResults -Folder $tmp -Skip @((Join-Path $tmp 'results-20261030-103000.csv'))
+            & $expect ($skipped.Files -eq 2 -and $skipped.Sessions.Count -eq 1) 'folder: Skip should leave a file out'
+            $writer = New-Object System.IO.StreamWriter((Join-Path $tmp 'results-20261030-110000.csv'), $false, $utf8)
+            $writer.WriteLine($header)
+            $writer.WriteLine('SCOURGE,BEGIN,autopath,1;run;L;5;build-1,')
+            $writer.Flush()
+            $open = Read-ScourgeResults -Folder $tmp
+            & $expect ($open.Unreadable -eq 0 -and $open.Files -eq 4) 'folder: a file that is still open should be readable'
+            $nothing = Read-ScourgeResults -Folder (Join-Path $tmp 'missing')
+            & $expect ($nothing.Status -eq 'ok' -and $nothing.Sessions.Count -eq 0) 'folder: a missing folder should read as empty'
+        } finally {
+            if ($null -ne $writer) { $writer.Dispose() }
+            Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+        [void]$mapFails.Add('route map check threw: ' + $_.Exception.Message)
+    }
+    if ($mapFails.Count -eq 0) {
+        Write-Host '  Route Map reader and math: OK'
+    } else {
+        foreach ($mf in $mapFails) { $failures.Add('route map: ' + $mf) }
+        Write-Host ('  Route Map reader and math: FAIL (' + ($mapFails -join '; ') + ')')
+    }
+
     # 1. Build the whole window (catches WinForms mistakes) and fill it in.
     try {
         $testForm = New-MainForm
@@ -1998,6 +3363,53 @@ if ($SelfTest) {
             $bmp.Dispose()
             Write-Host ('  Screenshot saved: ' + $env:SCOURGE_SCREENSHOT)
             $testForm.Hide()
+        }
+        # Route Map tab: sample recordings go through the same file reader the app uses.
+        $uploadSize = $testForm.ClientSize
+        $mapDir = Join-Path ([System.IO.Path]::GetTempPath()) ('scourge-map-shot-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $mapDir -Force | Out-Null
+        try {
+            $utf8 = New-Object System.Text.UTF8Encoding($false)
+            $sampleMarks = @(
+                @{ At = 0; Type = 'toggle'; X = 10.0; Y = -60.0 },
+                @{ At = 1; Type = 'drop'; X = 30.0; Y = -52.0 },
+                @{ At = 2; Type = 'pin'; X = 42.0; Y = -30.0 },
+                @{ At = 3; Type = 'stack'; X = 20.0; Y = -18.0 },
+                @{ At = 4; Type = 'push'; X = -8.0; Y = -30.0 })
+            $samplePath = @(@(10, -60), @(30, -52), @(42, -30), @(20, -18), @(-8, -30))
+            $sampleSteps = @(
+                @{ At = 0; Step = -1; Type = 'opening'; Target = @(10, -60, 0); Actual = @(10, -60, 0); Ok = 1 },
+                @{ At = 1; Step = 0; Type = 'drive'; Target = @(30, -52, 45); Actual = @(30.3, -52.4, 44); Ok = 1 },
+                @{ At = 2; Step = 1; Type = 'grab_stack'; Target = @(42, -30, 30); Actual = @(43.4, -28.6, 34); Ok = 1 },
+                @{ At = 3; Step = 2; Type = 'drop'; Target = @(20, -18, 300); Actual = @(22.5, -16.3, 296); Ok = 1 },
+                @{ At = 4; Step = 3; Type = 'drive'; Target = @(-8, -30, 240); Actual = @(-8.4, -30.3, 241); Ok = 1 })
+            [System.IO.File]::WriteAllText((Join-Path $mapDir 'results-20261029-163000.csv'), ('kind,test,key,value,unit' + "`n" + (New-SampleWire 'teach_open' 'L' $samplePath $sampleMarks @())), $utf8)
+            [System.IO.File]::WriteAllText((Join-Path $mapDir 'results-20261030-091500.csv'), ('kind,test,key,value,unit' + "`n" + (New-SampleWire 'push' 'R' @(@(58, -16), @(46, -36), @(24, -46)) @() @())), $utf8)
+            [System.IO.File]::WriteAllText((Join-Path $mapDir 'results-20261030-101500.csv'), ('kind,test,key,value,unit' + "`n" + (New-SampleWire 'run' 'L' $samplePath @() $sampleSteps)), $utf8)
+            $res = Read-ScourgeResults -Folder $mapDir
+            if (($res.Sessions.Count -ne 3) -or ($res.Rejected.Count -ne 0)) { throw ('sample recordings: expected 3 sessions and no rejections, got ' + $res.Sessions.Count + ' and ' + $res.Rejected.Count) }
+            Set-MapData $res
+            Set-View 'map' -NoLoad
+            if ($testForm.ClientSize.Width -ne (Px 880)) { $failures.Add('Route Map width is ' + $testForm.ClientSize.Width + ', expected ' + (Px 880)) }
+            if ($script:Ui.MapList.Items.Count -ne 3) { $failures.Add('Route Map session list has ' + $script:Ui.MapList.Items.Count + ' rows, expected 3') }
+            if ($script:Ui.MapTable.Items.Count -ne 5) { $failures.Add('Route Map miss table has ' + $script:Ui.MapTable.Items.Count + ' rows, expected 5') }
+            if ($env:SCOURGE_SCREENSHOT) {
+                $mapShot = Join-Path (Split-Path $env:SCOURGE_SCREENSHOT -Parent) 'uploader-route-map.png'
+                $testForm.Show()
+                [System.Windows.Forms.Application]::DoEvents()
+                $testForm.Refresh()
+                $bmp = New-Object System.Drawing.Bitmap $testForm.Width, $testForm.Height
+                $testForm.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle 0, 0, $testForm.Width, $testForm.Height))
+                $bmp.Save($mapShot, [System.Drawing.Imaging.ImageFormat]::Png)
+                $bmp.Dispose()
+                Write-Host ('  Route Map screenshot saved: ' + $mapShot)
+                $testForm.Hide()
+            }
+            Set-View 'upload'
+            if ($testForm.ClientSize -ne $uploadSize) { $failures.Add('Upload view size changed after visiting Route Map') }
+            Write-Host '  Route Map tab: OK'
+        } finally {
+            Remove-Item -Path $mapDir -Recurse -Force -ErrorAction SilentlyContinue
         }
         Set-DetailsVisible $false
         $testForm.Dispose()

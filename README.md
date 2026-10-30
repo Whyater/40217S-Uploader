@@ -46,6 +46,8 @@ You need a USB-C OTG adapter (or a USB-C to micro-USB data cable) between the ph
 
 The web version uploads the same files the same way PROS does, including the same compressed library, so switching between the phone and a laptop doesn't make the brain erase the other modes. It doesn't do Robot tests yet.
 
+The web version also has a **Route Map** tab beside **Upload**. It shows the robot's field map, its taught and recorded runs, and where a run missed. Pick results `.csv` files and `map-data.json` files with **Add Files**. The laptop app records results to the `Scourge Robot Data` folder in Documents, and you can move them to the phone with AirDrop, a cloud drive, or a cable. The files are kept on that device only (in the browser's own storage, up to 20 MB) and are never uploaded. The tab works offline once the uploader has been opened online. Unlike uploading, it works on iPhones and iPads too.
+
 ## Upload (every time)
 
 1. Plug a USB data cable into the **brain** (not the controller) and turn the brain on.
@@ -143,6 +145,18 @@ To run one test by itself, use the brain's left and right buttons (or D-pad Left
 
 The results are also saved on the laptop in `Documents\Scourge Robot Data`. The **Open folder** link opens it.
 
+## Route Map (Windows)
+
+The **Route Map** tab at the top right of the window shows the path recordings that the robot sends over USB. The **Upload** tab is the same as always.
+
+- The field is drawn to scale with the tile seams, the Goals, the Toggles, and the Autonomous Line. Alliance Goals are filled circles, neutral Goals are open circles, and the opponent's are squares.
+- The list on the right has every recording in `Documents\Scourge Robot Data` (all the `results-*.csv` files), newest first. Click one to draw it. The view frames the path. **Whole field** shows the entire field instead.
+- Marks on a path have their own shapes: Drop, Pin, Stack, Toggle, and Push. The small box is the robot at its last position. A recording made on the right side is shown mirrored onto the left side, and its list row ends in (R).
+- **Last run** lists how far each step ended from where it aimed. Green is under 1 in, amber is under 3 in, and red is 3 in or more.
+- A recording with missing rows is left out, and the tab says which rows are missing. If the same recording was sent twice, it shows once.
+
+The tab reads the files when you open it, when you click **Refresh**, and when **Stop recording** finishes.
+
 The tests:
 
 - **Lift travel and speed:** the lift must start fully down.
@@ -175,13 +189,15 @@ The robot source code is private. Each time the programmer pushes to the main br
 
 **Get latest code** first checks for a newer uploader (see [Update the uploader](#update-the-uploader)). Then it downloads the newest release and, when the release lists SHA-256 hashes, checks each file before using it. Nothing is built on your laptop. **Upload to robot** hands those files to the official PROS command line tool, pros-cli 3.5.6.
 
-The web version is in `web/` and is published with GitHub Pages. Browsers can't download release files from GitHub directly, so `scripts/publish-web.sh` copies the latest release's files onto the site (the `gh-pages` branch) and checks their hashes. It runs on the programmer's computer after each new build. Until it runs, the web version keeps the previous build. The web app sends them to the brain with its own port of the pros-cli 3.5.6 upload code. Its tests replay real pros-cli uploads and check every byte matches.
+The web version is in `web/` and is published with GitHub Pages. Browsers can't download release files from GitHub directly, so `scripts/publish-web.sh` copies the latest release's files onto the site (the `gh-pages` branch) and checks their hashes. It runs on the programmer's computer after each new build. Until it runs, the web version keeps the previous build. The web app sends them to the brain with its own port of the pros-cli 3.5.6 upload code. Its tests replay real pros-cli uploads and check every byte matches. The Route Map tab is the same page the laptop apps use (`web/map.html`), shown in a frame, with the file handling in `web/mapdata.js`, `web/mapstore.js`, and `web/maptab.js`.
 
 The installer downloads pros-cli from [github.com/purduesigbots/pros-cli](https://github.com/purduesigbots/pros-cli) and checks its SHA-256 hash before using it. The app and its files go into `%LOCALAPPDATA%\ScourgeUploader`. pros-cli also writes a small settings folder at `%APPDATA%\PROS`. Apart from those two folders and the two shortcuts, nothing else on your system changes.
 
 ## Status
 
 The installer and app are tested on Windows in CI up to the USB step. A first real upload to a brain has not happened yet.
+
+The Route Map tab is checked in CI against sample recordings. It has not been used with a real recording yet.
 
 The web version is tested against a simulated brain only. A first upload from a phone to a real brain has not happened yet.
 

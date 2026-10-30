@@ -1,0 +1,2061 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Auto Pathing map | 40217S Scourge</title>
+<script>if (new URLSearchParams(location.search).get('embed') === '1') document.documentElement.classList.add('embed');</script>
+<style>
+:root {
+  color-scheme: light dark;
+  /* tokens from 40217S-MacUploader/DESIGN.md and 40217S-Uploader/web/styles.css */
+  --accent: #3056D3;
+  --accent-fill: #3056D3;
+  --on-accent: #FFFFFF;
+  --good: #146E3A;
+  --warn: #8C5A00;
+  --bad: #B42318;
+  --idle: #9AA1AC;
+  --window: #ECECEC;
+  --panel: #FFFFFF;
+  --solid: #FFFFFF;
+  --sep: rgba(0, 0, 0, 0.12);
+  --text: rgba(0, 0, 0, 0.85);
+  --text-2: #616166;
+  --control-line: rgba(0, 0, 0, 0.16);
+  --track: rgba(0, 0, 0, 0.065);
+  --hover: rgba(0, 0, 0, 0.045);
+  --sel: rgba(48, 86, 211, 0.11);
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, "Roboto Mono", Consolas, monospace;
+  --body: 13px;
+  --callout: 12px;
+  --hit: 28px;
+  --pad: 16px;
+  --section: 12px;
+  --inset: 14px;
+  /* the field drawing */
+  --field: #FBFBFC;
+  --field-grid: #E7E8EB;
+  --field-seam: #CACCD2;
+  --opp: rgba(0, 0, 0, 0.035);
+  --wall: #3A3D44;
+  --route: #3056D3;
+  --raw: #7B818C;
+  --run: #7633C4;
+  --goal-ally: #1E2126;
+  --goal-neu: #6A6F78;
+  --goal-opp: #B42318;
+  --obj: #8C6D14;
+  --toggle: #4A4E56;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --accent: #7A98FF;
+    --good: #48C47A;
+    --warn: #ECB234;
+    --bad: #FF7060;
+    --idle: #787E88;
+    --window: #1E1E1E;
+    --panel: rgba(255, 255, 255, 0.06);
+    --solid: #2C2C2E;
+    --sep: rgba(255, 255, 255, 0.12);
+    --text: rgba(255, 255, 255, 0.85);
+    --text-2: rgba(255, 255, 255, 0.56);
+    --control-line: transparent;
+    --track: rgba(255, 255, 255, 0.09);
+    --hover: rgba(255, 255, 255, 0.06);
+    --sel: rgba(122, 152, 255, 0.17);
+    --field: #171717;
+    --field-grid: #272727;
+    --field-seam: #3C3C3C;
+    --opp: rgba(255, 255, 255, 0.035);
+    --wall: #8E8E93;
+    --route: #7A98FF;
+    --raw: #8F95A0;
+    --run: #BB90FF;
+    --goal-ally: #E8E8EA;
+    --goal-neu: #9A9EA6;
+    --goal-opp: #FF7060;
+    --obj: #CFAE45;
+    --toggle: #A6A9B0;
+  }
+}
+/* A phone needs bigger targets and a touch more type. */
+@media (pointer: coarse) {
+  :root { --hit: 44px; --body: 14px; --callout: 13px; }
+}
+[hidden] { display: none !important; }
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; background: var(--window); scrollbar-color: var(--idle) transparent; }
+html, body { margin: 0; }
+body {
+  background: var(--window);
+  color: var(--text);
+  font: 400 var(--body)/1.35 var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+::selection { background: var(--sel); }
+button { font: inherit; color: inherit; cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+p, ul, dl, dd, h1, h2, h3 { margin: 0; padding: 0; }
+h1, h2, h3 { font-size: var(--body); font-weight: 700; }
+.num, .id, code, td.n { font-family: var(--mono); font-size: var(--callout); font-variant-numeric: tabular-nums; }
+.id { overflow-wrap: anywhere; }
+code { background: var(--track); padding: 1px 4px; border-radius: 4px; }
+.muted, .hint { color: var(--text-2); }
+.hint { font-size: var(--callout); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* ---------- layout ---------- */
+.app {
+  max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: var(--section);
+  padding: max(var(--pad), env(safe-area-inset-top)) max(var(--pad), env(safe-area-inset-right)) max(var(--pad), env(safe-area-inset-bottom)) max(var(--pad), env(safe-area-inset-left));
+}
+.top { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; padding: 0 2px; }
+.top .sub { color: var(--text-2); font-size: var(--callout); }
+.top .grow { flex: 1; }
+.embed .top { display: none; }
+.badge { padding: 1px 7px; border: 0.5px solid currentColor; border-radius: 6px; color: var(--warn); font-size: var(--callout); font-weight: 600; }
+.panel { background: var(--panel); border: 0.5px solid var(--sep); border-radius: 12px; }
+.pad { padding: 12px var(--inset); }
+.stage { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--section); align-items: start; }
+.mapcol, .rail { display: flex; flex-direction: column; gap: var(--section); min-width: 0; }
+@media (min-width: 720px) { .stage { grid-template-columns: minmax(0, 1fr) 272px; } }
+@media (max-width: 480px) { :root { --pad: 12px; --inset: 12px; } }
+
+/* ---------- summary row ---------- */
+.sum-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 24px; }
+.sum-title { flex: 1 1 180px; min-width: 0; }
+.sum-sub { color: var(--text-2); font-size: var(--callout); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.stats { display: grid; grid-auto-flow: column; grid-auto-columns: max-content; gap: 24px; }
+.stat dt { color: var(--text-2); font-size: var(--callout); }
+.stat dd { font-family: var(--mono); font-weight: 600; font-variant-numeric: tabular-nums; display: flex; align-items: center; gap: 6px; margin-top: 1px; }
+.stat .more { display: block; color: var(--text-2); font: 400 var(--callout)/1.3 var(--font); margin-top: 1px; }
+.stat dd.plain { font-family: var(--font); font-weight: 400; color: var(--text-2); }
+@media (max-width: 520px) {
+  .stats { width: 100%; grid-auto-flow: row; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+}
+.pill { display: inline-flex; align-items: center; gap: 5px; }
+.pill + .pill { margin-left: 8px; }
+.pill i, .stat i { display: inline-block; flex: none; width: 8px; height: 8px; background: currentColor; }
+/* the shape says the same thing as the color, for anyone who cannot see the color */
+.pill i.good, .stat i.good { border-radius: 50%; }
+.pill i.warn, .stat i.warn { width: 10px; height: 9px; clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+.stat i.idle { border-radius: 50%; color: var(--idle); }
+.pill.good, .stat i.good, .good { color: var(--good); }
+.pill.warn, .stat i.warn, .warn { color: var(--warn); }
+.pill.bad, .stat i.bad, .bad { color: var(--bad); }
+
+/* ---------- disclosures ---------- */
+.disc > summary, .menu > summary { list-style: none; cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+.disc > summary::-webkit-details-marker, .menu > summary::-webkit-details-marker { display: none; }
+.disc > summary { display: flex; align-items: center; gap: 8px; min-height: var(--hit); }
+.disc > summary::after {
+  content: ""; width: 6px; height: 6px; margin: 0 4px 0 auto; flex: none;
+  border-right: 1.5px solid var(--text-2); border-top: 1.5px solid var(--text-2);
+  transform: rotate(45deg); transition: transform 0.15s ease-out;
+}
+.disc[open] > summary::after { transform: rotate(135deg); }
+.enter > :not(summary) { animation: settle 0.22s ease-out; }
+@keyframes settle { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+
+/* ---------- warning line ---------- */
+#warn { border-top: 0.5px solid var(--sep); margin-top: 10px; padding-top: 4px; font-size: var(--callout); }
+.calmline { display: flex; align-items: center; gap: 8px; min-height: var(--hit); color: var(--text-2); }
+.calmline i { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); flex: none; }
+.calmline i.good { background: var(--good); }
+.warnline svg { width: 14px; height: 14px; flex: none; fill: var(--warn); }
+.warnline.bad svg { fill: var(--bad); }
+.warnline { color: var(--text); }
+.warnlist { list-style: none; display: grid; gap: 8px; padding: 4px 0 8px 22px; }
+.warnlist .who { font-weight: 600; }
+.warnlist .bad { color: var(--bad); }
+.notel { color: var(--text-2); font-size: var(--callout); margin-top: 8px; }
+
+/* ---------- map card ---------- */
+.toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; }
+.app[data-frame="local"] .toolbar { display: none; }
+.seg { display: inline-flex; gap: 2px; padding: 2px; background: var(--track); border-radius: 8px; }
+.seg button {
+  border: 0; background: transparent; border-radius: 6px; min-height: calc(var(--hit) - 4px); padding: 0 10px;
+  font-size: var(--callout); font-weight: 500; transition: background-color 0.15s ease-out, color 0.15s ease-out;
+}
+.seg button:hover { background: var(--hover); }
+.seg button[aria-pressed="true"] { background: var(--accent-fill); color: var(--on-accent); }
+.menu { position: relative; }
+.menu > summary {
+  display: inline-flex; align-items: center; gap: 6px; min-height: var(--hit); padding: 0 8px; border-radius: 7px;
+  color: var(--text-2); font-size: var(--callout); transition: background-color 0.15s ease-out;
+}
+.menu > summary:hover, .menu[open] > summary { background: var(--hover); }
+.menu > summary svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linejoin: round; }
+/* The one shadow on the page: this floats over the map, and the shadow is what says so. */
+.menu-pop {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 5; width: 216px; padding: 4px;
+  background: var(--solid); border: 0.5px solid var(--sep); border-radius: 10px; box-shadow: 0 6px 22px rgba(0, 0, 0, 0.18);
+}
+.menu-row {
+  display: grid; grid-template-columns: 14px 24px minmax(0, 1fr); align-items: center; gap: 6px; width: 100%; min-height: var(--hit);
+  padding: 0 8px; border: 0; border-radius: 6px; background: transparent; text-align: left; font-size: var(--callout);
+}
+.menu-row:hover { background: var(--hover); }
+.menu-row .chk { width: 11px; height: 11px; fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; visibility: hidden; }
+.menu-row[aria-pressed="true"] .chk { visibility: visible; }
+.menu-row .sw { width: 22px; height: 12px; overflow: visible; }
+.mapbox { position: relative; background: var(--field); border-top: 0.5px solid var(--sep); border-bottom: 0.5px solid var(--sep); overflow: hidden; }
+#map { display: block; width: 100%; height: auto; aspect-ratio: 1 / 1; touch-action: manipulation; }
+.mapnote { position: absolute; left: 8px; bottom: 8px; right: 8px; font-size: var(--callout); color: var(--text-2); pointer-events: none; }
+.mapnote:empty { display: none; }
+.mapnote span { background: var(--solid); border: 0.5px solid var(--sep); border-radius: 6px; padding: 2px 6px; display: inline-block; }
+.mapnote b { color: var(--warn); font-weight: 600; }
+
+/* ---------- field drawing ---------- */
+svg text { font-family: var(--font); }
+.ns { vector-effect: non-scaling-stroke; }
+.field-bg { fill: var(--field); }
+.opp-side { fill: var(--opp); }
+.grid { stroke: var(--field-grid); stroke-width: 1; fill: none; }
+.seam { stroke: var(--field-seam); stroke-width: 1; fill: none; }
+.wall { fill: none; stroke: var(--wall); stroke-width: 2; }
+.aline { stroke: var(--text-2); stroke-width: 1.25; stroke-dasharray: 7 5; fill: none; }
+.axis { font-size: 10px; fill: var(--text-2); font-family: var(--mono); }
+.station { font-size: 10px; fill: var(--text-2); letter-spacing: 0.08em; font-weight: 600; }
+.lbl { font-size: 10.5px; fill: var(--text-2); }
+.lbl.strong { fill: var(--text); font-weight: 600; }
+.halo { paint-order: stroke; stroke: var(--field); stroke-width: 3px; stroke-linejoin: round; }
+.wm { font-size: 40px; font-weight: 700; fill: var(--text); opacity: 0.06; letter-spacing: 0.06em; text-anchor: middle; }
+.goal-ally-body { fill: var(--goal-ally); fill-opacity: 0.16; stroke: var(--goal-ally); stroke-width: 2.5; }
+.goal-ally-ring { fill: none; stroke: var(--goal-ally); stroke-width: 1.5; }
+.goal-neu-body { fill: var(--field); stroke: var(--goal-neu); stroke-width: 2.5; }
+.goal-neu-ring { fill: none; stroke: var(--goal-neu); stroke-width: 1; }
+.goal-opp-body { fill: var(--goal-opp); fill-opacity: 0.2; stroke: var(--goal-opp); stroke-width: 2; }
+.goal-opp-ring { fill: none; stroke: var(--goal-opp); stroke-width: 1.5; stroke-dasharray: 3 2.5; }
+.goal-opp-x { stroke: var(--goal-opp); stroke-width: 2; }
+.pinbadge rect { fill: var(--accent-fill); }
+.pinbadge text { fill: var(--on-accent); font-size: 10.5px; font-weight: 700; font-family: var(--mono); }
+.pinbadge .sym { fill: var(--on-accent); stroke: none; }
+.obj { fill: var(--obj); fill-opacity: 0.85; stroke: var(--obj); stroke-width: 1.5; }
+.obj-ring { fill: none; stroke: var(--obj); stroke-width: 1.5; }
+.toggle-bar { fill: var(--toggle); }
+.toggle-bar.other { fill: none; stroke: var(--toggle); stroke-width: 1.2; stroke-dasharray: 3 2; }
+.loader { fill: none; stroke: var(--text-2); stroke-width: 1.5; }
+.zone { fill: none; stroke: var(--field-seam); stroke-width: 1; stroke-dasharray: 4 3; }
+.raw-line { fill: none; stroke: var(--raw); stroke-width: 1.4; stroke-linejoin: round; stroke-linecap: round; opacity: 0.9; }
+.route-leg { fill: none; stroke: var(--route); stroke-width: 2.5; stroke-linecap: round; }
+.route-leg.back { stroke-dasharray: 6 4; }
+.chev { fill: var(--route); }
+.run-line { fill: none; stroke: var(--run); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; opacity: 0.85; }
+.run-trail { fill: none; stroke: var(--run); stroke-width: 3.5; stroke-linejoin: round; stroke-linecap: round; }
+.fp { fill: none; stroke: var(--route); stroke-width: 1; opacity: 0.55; }
+.fp.hit { stroke: var(--bad); opacity: 1; stroke-width: 1.8; fill: var(--bad); fill-opacity: 0.12; }
+.fp-front { stroke: var(--route); stroke-width: 2.5; opacity: 0.8; }
+.fp-front.hit { stroke: var(--bad); }
+.sweep { fill: var(--route); fill-opacity: 0.09; stroke: var(--route); stroke-width: 1; stroke-dasharray: 4 3; }
+.sweep.hit { fill: var(--bad); fill-opacity: 0.14; stroke: var(--bad); }
+.dot { fill: var(--route); stroke: var(--field); stroke-width: 1.5; }
+.sym { fill: var(--text); stroke: var(--field); stroke-width: 1.5; stroke-linejoin: round; }
+.sym.raw { fill: var(--field); stroke: var(--raw); stroke-width: 1.8; }
+.symline { stroke: var(--field); stroke-width: 1.4; fill: none; }
+.tag { cursor: pointer; }
+.tag rect { fill: var(--solid); stroke: var(--text-2); stroke-width: 0.75; }
+.tag text { font-size: 10.5px; font-weight: 600; font-family: var(--mono); fill: var(--text); text-anchor: middle; }
+.tag.sel rect { fill: var(--accent-fill); stroke: var(--accent-fill); }
+.tag.sel text { fill: var(--on-accent); }
+.hit-target { fill: transparent; stroke: none; cursor: pointer; pointer-events: all; }
+@media (pointer: coarse) { .hit-target { stroke: transparent; stroke-width: 20; } }
+.sel-fp { fill: var(--accent); fill-opacity: 0.26; stroke: var(--accent); stroke-width: 2; }
+.sel-fp-front { stroke: var(--accent); stroke-width: 4; }
+.sel-ring { fill: none; stroke: var(--accent); stroke-width: 2; }
+.claw { fill: none; stroke: var(--accent); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.leader { stroke: var(--text-2); stroke-width: 0.75; opacity: 0.8; }
+.open-ring { fill: var(--field); stroke: var(--text); stroke-width: 2; }
+.open-ring.approx { fill: none; stroke-dasharray: 3 2.5; stroke-width: 1.5; }
+.open-cross { stroke: var(--text); stroke-width: 1.6; fill: none; }
+.hov-fp { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 3 2; }
+.play-fp { fill: var(--run); fill-opacity: 0.1; stroke: var(--run); stroke-width: 1.5; }
+.play-front { stroke: var(--run); stroke-width: 3; }
+.play-dot { fill: var(--run); stroke: var(--field); stroke-width: 1.5; }
+.target-x { stroke: var(--text-2); stroke-width: 1.2; fill: none; }
+.miss-line { stroke-width: 1.6; fill: none; }
+.miss-ring { fill: var(--field); stroke-width: 2; }
+.miss-line.good, .miss-ring.good, .worst-ring.good { stroke: var(--good); }
+.miss-line.warn, .miss-ring.warn, .worst-ring.warn { stroke: var(--warn); }
+.miss-line.bad, .miss-ring.bad, .worst-ring.bad { stroke: var(--bad); }
+.worst-ring { fill: none; stroke-width: 1.5; }
+.worst-text { font-size: 11px; font-weight: 700; font-family: var(--mono); }
+.worst-text.good { fill: var(--good); }
+.worst-text.warn { fill: var(--warn); }
+.worst-text.bad { fill: var(--bad); }
+
+/* ---------- transport ---------- */
+.transport { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; padding: 8px 10px 4px; }
+.icbtn {
+  display: inline-flex; align-items: center; justify-content: center; width: var(--hit); height: var(--hit); padding: 0;
+  border: 0; border-radius: 7px; background: transparent; color: var(--text); transition: background-color 0.15s ease-out;
+}
+.icbtn:hover:not(:disabled) { background: var(--hover); }
+.icbtn:active:not(:disabled) { background: var(--track); }
+.icbtn:disabled { opacity: 0.4; cursor: default; }
+.icbtn svg { width: 14px; height: 14px; fill: currentColor; }
+.icbtn.play { background: var(--accent-fill); color: var(--on-accent); border-radius: 50%; }
+.icbtn.play:hover:not(:disabled) { background: var(--accent-fill); filter: brightness(1.08); }
+.icbtn.play:active:not(:disabled) { background: var(--accent-fill); filter: brightness(0.92); }
+.scrub { flex: 1 1 150px; min-width: 110px; position: relative; display: flex; align-items: center; min-height: var(--hit); padding-bottom: 8px; }
+.scrub input[type=range] { width: 100%; margin: 0; accent-color: var(--accent-fill); }
+.scrub input[type=range]:disabled { opacity: 0.4; }
+.ticks { position: absolute; left: 7px; right: 7px; bottom: 1px; height: 6px; pointer-events: none; }
+.ticks span { position: absolute; top: 0; width: 2px; height: 6px; margin-left: -1px; background: var(--idle); border-radius: 1px; }
+.ticks span.good { background: var(--good); }
+.ticks span.warn { background: var(--warn); }
+.ticks span.bad { background: var(--bad); }
+.readout { font-family: var(--mono); font-size: var(--callout); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.app[data-noplay="1"] .scrub, .app[data-noplay="1"] .readout, .app[data-noplay="1"] .speedseg, .app[data-noplay="1"] #btn-play { display: none; }
+.playinfo { padding: 0 12px 10px; min-height: 20px; color: var(--text-2); font-size: var(--callout); }
+@media (max-width: 520px) { .scrub { order: 5; flex-basis: 100%; } .transport .speedseg { order: 6; margin-left: auto; } }
+
+/* ---------- rail ---------- */
+#lists > summary { padding: 0 var(--inset); font-weight: 600; }
+@media (min-width: 720px) { #lists > summary { display: none; } }
+.listscroll { max-height: 440px; overflow: auto; padding-bottom: 6px; }
+.grouphead { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px var(--inset) 4px; color: var(--text-2); font-size: var(--callout); font-weight: 600; }
+.grouphead.sub { font-weight: 400; padding-top: 8px; }
+.grouphead .num { font-weight: 400; margin-left: auto; }
+.rowlist { list-style: none; }
+.row {
+  position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1px 8px; align-items: baseline; width: 100%; min-height: var(--hit);
+  padding: 7px var(--inset); border: 0; background: transparent; text-align: left; transition: background-color 0.15s ease-out;
+}
+li + li .row::before { content: ""; position: absolute; left: var(--inset); right: 0; top: 0; height: 0.5px; background: var(--sep); }
+.row:hover { background: var(--hover); }
+.row[aria-pressed="true"] { background: var(--sel); }
+.row[aria-pressed="true"] .row-t { color: var(--accent); }
+.row-t { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-x { font-size: var(--callout); white-space: nowrap; font-family: var(--mono); }
+.row-x.txt { font-family: var(--font); color: var(--text-2); }
+.row-m { grid-column: 1 / -1; color: var(--text-2); font-size: var(--callout); overflow-wrap: anywhere; }
+.row-note { grid-column: 1 / -1; color: var(--text-2); font-size: var(--callout); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.linkbtn { background: none; border: 0; color: var(--accent); padding: 0 2px; font-size: var(--callout); font-weight: 400; min-height: 20px; }
+@media (pointer: coarse) { .linkbtn { min-height: 44px; padding: 0 6px; } .grouphead { padding-top: 4px; padding-bottom: 0; } }
+.listnote { padding: 2px var(--inset) 8px; color: var(--text-2); font-size: var(--callout); }
+#inspector { display: flex; flex-direction: column; gap: var(--section); min-width: 0; }
+.sect + .sect { border-top: 0.5px solid var(--sep); margin-top: 10px; padding-top: 10px; }
+h3 { margin-bottom: 6px; }
+dl.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 12px; font-size: var(--callout); }
+dl.kv dt { color: var(--text-2); }
+dl.kv dd { overflow-wrap: anywhere; }
+.pinrow { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; font-size: var(--callout); }
+.minibar { display: block; height: 3px; background: var(--route); border-radius: 2px; margin: 2px 0 4px; }
+.contactlist { list-style: none; display: grid; gap: 3px; font-size: var(--callout); }
+.legendbox > summary { font-size: var(--callout); color: var(--text-2); }
+.legendbox { padding: 2px var(--inset); }
+.legend { display: grid; gap: 5px; list-style: none; padding: 4px 0 8px; }
+.legend li { display: grid; grid-template-columns: 26px minmax(0, 1fr); align-items: center; gap: 8px; color: var(--text-2); font-size: var(--callout); }
+.legend svg { width: 26px; height: 20px; overflow: visible; }
+.legendbox .hint { padding-bottom: 10px; }
+
+/* ---------- steps table ---------- */
+.steps { overflow: hidden; }
+.steps header { padding: 12px var(--inset) 10px; display: grid; gap: 3px; }
+.steps header .sumline, .steps header .muted { font-size: var(--callout); }
+.tablewrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: var(--callout); }
+th, td { padding: 5px 10px; text-align: left; white-space: nowrap; border-top: 0.5px solid var(--sep); }
+th:first-child, td:first-child { padding-left: var(--inset); }
+th { font-weight: 500; color: var(--text-2); }
+td.n, th.n { text-align: right; }
+tbody tr { cursor: pointer; transition: background-color 0.15s ease-out; }
+tbody tr:hover { background: var(--hover); }
+tbody tr.sel { background: var(--sel); }
+tbody tr.cur td:first-child { box-shadow: inset 2px 0 0 var(--run); }
+tr.unreached td { color: var(--text-2); }
+.stepbtn { background: none; border: 0; padding: 0 2px; font: 600 var(--callout) var(--mono); min-width: 22px; text-align: right; }
+.kindcell { display: flex; align-items: center; gap: 7px; }
+.kindcell svg { width: 14px; height: 14px; flex: none; overflow: visible; }
+td .na { color: var(--text-2); }
+@media (pointer: coarse) { th, td { padding-top: 11px; padding-bottom: 11px; } }
+@media (max-width: 560px) { .opt { display: none; } }
+.empty { padding: 14px var(--inset); color: var(--text-2); max-width: 62ch; font-size: var(--callout); }
+.empty b { display: block; margin-bottom: 3px; color: var(--text); font-size: var(--body); }
+
+/* ---------- empty state: the real field, quiet, and one plain instruction ---------- */
+.emptybox { padding: 14px var(--inset) 16px; }
+.emptybox p { color: var(--text-2); margin-top: 4px; max-width: 58ch; }
+.app[data-empty="1"] { max-width: 560px; }
+.app[data-empty="1"] .stage { grid-template-columns: minmax(0, 1fr); }
+.app[data-empty="1"] #summary, .app[data-empty="1"] .rail, .app[data-empty="1"] .steps,
+.app[data-empty="1"] .toolbar, .app[data-empty="1"] .transport, .app[data-empty="1"] .playinfo { display: none; }
+.app[data-empty="1"] .mapbox { border-top: 0; border-radius: 12px 12px 0 0; }
+.app[data-empty="1"] #map { opacity: 0.62; }
+.embed .standalone-only { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <header class="top">
+    <h1>Auto Pathing</h1>
+    <span class="sub">40217S Scourge, Override field map</span>
+    <span class="grow"></span>
+    <span class="sub" id="gen"></span>
+    <span class="badge" id="samplebadge" hidden>Illustrative sample data</span>
+  </header>
+
+  <section class="panel pad" id="summary" aria-label="Summary">
+    <div id="sumrow"></div>
+    <div id="warn" aria-live="polite"></div>
+  </section>
+
+  <div class="stage">
+    <section class="mapcol" aria-label="Field map">
+      <div class="panel mapcard">
+        <div class="toolbar" id="layers"></div>
+        <div class="mapbox">
+          <svg id="map" role="img" aria-label="Field map" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+            <g id="g-static"></g>
+            <g id="g-sel"></g>
+            <g id="g-play"></g>
+          </svg>
+          <div class="mapnote" id="mapnote"></div>
+        </div>
+        <div class="emptybox" id="emptybox" hidden>
+          <h2>No routes or runs yet</h2>
+          <p>Teach a route or record a run, then bring its results file here. The field fills in with the path, the marks, and how far the robot missed.</p>
+          <p class="standalone-only">Build this page from your data with <code>python3 tools/autopath/autopath.py go</code>.</p>
+        </div>
+        <div class="transport" id="transport">
+          <button class="icbtn" id="btn-prev" type="button" aria-label="Previous step (left arrow)" title="Previous step (left arrow)">
+            <svg viewBox="0 0 14 14" aria-hidden="true"><path d="M9.5 1.5 3.5 7l6 5.5v-3L7 7l2.5-2.5z"/></svg>
+          </button>
+          <button class="icbtn play" id="btn-play" type="button" aria-label="Play or pause (space)" title="Play or pause (space)">
+            <svg viewBox="0 0 14 14" aria-hidden="true" id="play-ico"><path d="M3 1.5v11l9-5.5z"/></svg>
+            <span class="sr" id="play-txt">Play</span>
+          </button>
+          <button class="icbtn" id="btn-next" type="button" aria-label="Next step (right arrow)" title="Next step (right arrow)">
+            <svg viewBox="0 0 14 14" aria-hidden="true"><path d="M4.5 1.5 10.5 7l-6 5.5v-3L7 7 4.5 4.5z"/></svg>
+          </button>
+          <div class="scrub">
+            <input type="range" id="scrub" min="0" max="1000" value="0" step="1" aria-label="Playback time" disabled>
+            <div class="ticks" id="ticks" aria-hidden="true"></div>
+          </div>
+          <div class="readout" aria-live="off"><output id="time" for="scrub">0.00 s</output> <span class="muted" id="dur"></span></div>
+          <div class="seg speedseg" id="speed" role="group" aria-label="Playback speed">
+            <button type="button" data-speed="0.5" aria-pressed="false">0.5x</button>
+            <button type="button" data-speed="1" aria-pressed="true">1x</button>
+            <button type="button" data-speed="2" aria-pressed="false">2x</button>
+            <button type="button" data-speed="4" aria-pressed="false">4x</button>
+          </div>
+        </div>
+        <div class="playinfo" id="playinfo"></div>
+      </div>
+    </section>
+
+    <aside class="rail" aria-label="Routes, sessions and step details">
+      <div class="panel">
+        <details class="disc" id="lists" open>
+          <summary id="listsum">Routes and sessions</summary>
+          <div id="listbody" class="listscroll"></div>
+        </details>
+      </div>
+      <div id="inspector"></div>
+    </aside>
+  </div>
+
+  <section class="steps panel" id="steps" aria-label="Step table"></section>
+</div>
+<div class="sr" id="live" aria-live="polite"></div>
+<script>
+/*__DATA__*/
+</script>
+<script>
+/*<pure>*/
+// Everything between the pure markers touches no DOM, so map_check.mjs can load and test it in Node.
+// Units: inches and degrees. Field frame: origin at center, +Y up, +X right, heading 0 up, clockwise positive.
+
+const LIMITS = { goodIn: 1, warnIn: 3, goodDeg: 2, warnDeg: 5 }; // in the miss colors; the degree limits are a display choice
+const KIND_LABEL = { opening: 'Opening', turn: 'Turn', drive: 'Drive', grab_stack: 'Grab stack', grab_pin: 'Grab Pin', drop: 'Drop', toggle: 'Toggle', push: 'Push' };
+const SESSION_LABEL = { teach_open: 'Teach after opening', teach_start: 'Teach from start', push: 'Push test', run: 'Run' };
+const MARK_TO_KIND = { pin: 'grab_pin', stack: 'grab_stack', drop: 'drop', toggle: 'toggle', push: 'push' };
+const NO_POS = new Set(['turn', 'toggle', 'opening', 'push']);
+const NO_HEAD = new Set(['drive', 'toggle', 'opening', 'push']);
+const MARK_KINDS = new Set(['grab_stack', 'grab_pin', 'drop', 'toggle']);
+
+/* ---------- small helpers ---------- */
+const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+const nn = (v) => (isNum(v) ? v : null);
+const arr = (v) => (Array.isArray(v) ? v : []);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const f3 = (n) => String(Math.round(n * 1000) / 1000);
+function fmt(v, d) {
+  if (!isNum(v)) return 'n/a';
+  const s = v.toFixed(d == null ? 1 : d);
+  return /^-0(\.0+)?$/.test(s) ? s.slice(1) : s;
+}
+const fmtS = (v) => (isNum(v) ? v.toFixed(2) + ' s' : 'n/a');
+
+/* ---------- the miss math ---------- */
+function wrap180(d) { return ((((d + 180) % 360) + 360) % 360) - 180; }
+function headingMiss(actual, target) { return isNum(actual) && isNum(target) ? wrap180(actual - target) : null; }
+function missIn(ev) {
+  if (!ev || !isNum(ev.x) || !isNum(ev.y) || !isNum(ev.tx) || !isNum(ev.ty)) return null;
+  return Math.hypot(ev.x - ev.tx, ev.y - ev.ty);
+}
+function rate(v, good, warn) {
+  if (!isNum(v)) return null;
+  const r = Math.round(v * 100) / 100; // rate what the table shows
+  return r < good ? 'good' : r < warn ? 'warn' : 'bad';
+}
+const rateIn = (v) => rate(v, LIMITS.goodIn, LIMITS.warnIn);
+const rateDeg = (v) => rate(isNum(v) ? Math.abs(v) : null, LIMITS.goodDeg, LIMITS.warnDeg);
+const ORDER = { good: 0, warn: 1, bad: 2 };
+const worse = (a, b) => (a == null ? b : b == null ? a : ORDER[b] > ORDER[a] ? b : a);
+
+/* ---------- normalising whatever the tool hands over ---------- */
+function normPt(o) {
+  o = o && typeof o === 'object' ? o : {};
+  const zone = o.zone && typeof o.zone === 'object' ? { w: nn(o.zone.w), h: nn(o.zone.h) } : null;
+  return { name: String(o.name || ''), kind: String(o.kind || ''), x: nn(o.x), y: nn(o.y), r: nn(o.r), w: nn(o.w), h: nn(o.h), len: nn(o.len), zone };
+}
+const hasXY = (p) => p.x !== null && p.y !== null;
+
+function normField(f) {
+  f = f && typeof f === 'object' ? f : {};
+  const rb = f.robot && typeof f.robot === 'object' ? f.robot : {};
+  return {
+    wall: nn(f.wall) != null ? f.wall : 70.1,
+    goalRadius: nn(f.goal_radius) != null ? f.goal_radius : 2.4,
+    robot: { length: nn(rb.length) != null ? rb.length : 17, width: nn(rb.width) != null ? rb.width : 16 },
+    goals: arr(f.goals).map(normPt).filter(hasXY),
+    toggles: arr(f.toggles).map(normPt).filter(hasXY),
+    objects: arr(f.objects).map(normPt).filter(hasXY),
+    loaders: arr(f.loaders).map(normPt).filter(hasXY),
+  };
+}
+
+function normStep(s) {
+  s = s && typeof s === 'object' ? s : {};
+  return {
+    kind: String(s.kind || '?'), x: nn(s.x), y: nn(s.y), heading: nn(s.heading), raw_heading: nn(s.raw_heading),
+    lift: nn(s.lift), drop_lift: nn(s.drop_lift), goal: s.goal ? String(s.goal) : null,
+    forwards: typeof s.forwards === 'boolean' ? s.forwards : null, approach: typeof s.approach === 'boolean' ? s.approach : null,
+  };
+}
+
+// One pose per step. Turns and Toggles carry the previous position, so every step can be drawn.
+function resolveWaypoints(steps, wps, start) {
+  const byStep = new Map();
+  arr(wps).forEach((w) => { if (w && isNum(w.step)) byStep.set(w.step, w); });
+  let cur = start && start.kind === 'pose' && isNum(start.x) && isNum(start.y) ? { x: start.x, y: start.y, h: isNum(start.theta) ? start.theta : 0 } : null;
+  const out = [];
+  steps.forEach((s, i) => {
+    const w = byStep.get(i);
+    let x = null, y = null, h = null, src = 'none';
+    if (w && isNum(w.x) && isNum(w.y)) { x = w.x; y = w.y; h = nn(w.heading); src = 'waypoint'; }
+    else if (s.x !== null && s.y !== null) { x = s.x; y = s.y; src = 'step'; }
+    else if (cur) { x = cur.x; y = cur.y; src = 'carried'; }
+    if (h === null && s.heading !== null) h = s.heading;
+    if (h === null && s.kind === 'drive' && cur && x !== null && Math.hypot(x - cur.x, y - cur.y) > 0.05) {
+      h = (Math.atan2(x - cur.x, y - cur.y) * 180) / Math.PI + (s.forwards === false ? 180 : 0);
+    }
+    const hKnown = h !== null || (cur && src === 'carried');
+    if (h === null) h = cur ? cur.h : 0;
+    const prev = cur;
+    const moved = x !== null && prev ? Math.hypot(x - prev.x, y - prev.y) > 0.05 : false;
+    out.push({ x, y, h, hKnown: !!hKnown, src, moved, from: moved ? { x: prev.x, y: prev.y, h: prev.h } : null });
+    if (x !== null) cur = { x, y, h };
+  });
+  return out;
+}
+
+function normRoute(r, i) {
+  r = r && typeof r === 'object' ? r : {};
+  const st = r.start && typeof r.start === 'object' ? r.start : {};
+  const start = { kind: String(st.kind || 'opening'), x: nn(st.x), y: nn(st.y), theta: nn(st.theta) };
+  const steps = arr(r.steps).map(normStep);
+  const ck = r.checks && typeof r.checks === 'object' ? r.checks : {};
+  const pins = {};
+  if (ck.pins_per_goal && typeof ck.pins_per_goal === 'object') {
+    Object.keys(ck.pins_per_goal).forEach((k) => { if (isNum(ck.pins_per_goal[k])) pins[k] = ck.pins_per_goal[k]; });
+  }
+  const warnings = arr(ck.warnings).map((w) => (w && typeof w === 'object' ? String(w.text || w.message || JSON.stringify(w)) : String(w)));
+  return {
+    slot: String(r.slot != null ? r.slot : '#' + (i + 1)), note: r.note ? String(r.note) : '', source: r.source ? String(r.source) : '',
+    start, steps, rawWps: arr(r.waypoints), wp: resolveWaypoints(steps, r.waypoints, start),
+    checks: { warnings, estimated_s: nn(ck.estimated_s), pins },
+  };
+}
+
+function timeUnitOf(s, forced) {
+  if (forced === 's' || forced === 'ms') return { unit: forced, guessed: false };
+  let mx = 0;
+  ['samples', 'marks', 'events'].forEach((k) => arr(s[k]).forEach((o) => { if (o && isNum(o.t) && Math.abs(o.t) > mx) mx = Math.abs(o.t); }));
+  return { unit: mx >= 1000 ? 'ms' : 's', guessed: true };
+}
+
+function normSession(s, i, forcedUnit) {
+  s = s && typeof s === 'object' ? s : {};
+  const tu = timeUnitOf(s, forcedUnit);
+  const sc = tu.unit === 'ms' ? 0.001 : 1;
+  const samples = arr(s.samples).filter((p) => p && isNum(p.t) && isNum(p.x) && isNum(p.y))
+    .map((p) => ({ t: p.t * sc, x: p.x, y: p.y, h: isNum(p.h) ? p.h : 0 })).sort((a, b) => a.t - b.t);
+  const marks = arr(s.marks).filter((m) => m && isNum(m.t)).map((m) => ({
+    t: m.t * sc, type: String(m.type || ''), kind: MARK_TO_KIND[m.type] || String(m.type || ''), x: nn(m.x), y: nn(m.y), h: nn(m.h), lift: nn(m.lift),
+  })).sort((a, b) => a.t - b.t);
+  const events = arr(s.events).filter((e) => e && isNum(e.t)).map((e) => ({
+    t: e.t * sc, step: isNum(e.step) ? Math.trunc(e.step) : null, type: String(e.type || ''), tx: nn(e.tx), ty: nn(e.ty), th: nn(e.th),
+    x: nn(e.x), y: nn(e.y), h: nn(e.h), ok: e.ok === 1 || e.ok === true ? true : e.ok === 0 || e.ok === false ? false : null,
+  })).sort((a, b) => a.t - b.t);
+  const t0 = samples.length ? samples[0].t : 0; // times start at the first sample, or at zero when there are none
+  samples.forEach((p) => { p.t -= t0; });
+  marks.forEach((m) => { m.t -= t0; });
+  events.forEach((e) => { e.t -= t0; });
+  const ends = [samples.length ? samples[samples.length - 1].t : 0, events.length ? events[events.length - 1].t : 0, marks.length ? marks[marks.length - 1].t : 0];
+  return {
+    id: String(s.id != null ? s.id : 'session-' + (i + 1)), kind: String(s.kind || ''), side: s.side ? String(s.side) : '', when: s.when ? String(s.when) : '',
+    for_slot: s.for_slot != null ? String(s.for_slot) : null, samples, marks, events, duration: Math.max.apply(null, ends),
+    unit: tu.unit, unitGuessed: tu.guessed,
+  };
+}
+
+function normalize(raw) {
+  const d = raw && typeof raw === 'object' ? raw : {};
+  const forced = d.time_unit === 's' || d.time_unit === 'ms' ? d.time_unit : null;
+  const sessions = arr(d.sessions).map((s, i) => normSession(s, i, forced));
+  uniqueIds(sessions);
+  return {
+    field: normField(d.field), routes: arr(d.routes).map(normRoute), sessions, rejected: [], note: '',
+    illustrative: !!d.illustrative, label: d.label ? String(d.label) : '', generated: d.generated ? String(d.generated) : '',
+  };
+}
+
+/* ---------- geometry ---------- */
+function footprintCorners(x, y, h, len, wid) {
+  const a = (h * Math.PI) / 180, fx = Math.sin(a), fy = Math.cos(a), rx = Math.cos(a), ry = -Math.sin(a);
+  const hl = len / 2, hw = wid / 2;
+  const c = (sf, sr) => ({ x: x + fx * hl * sf + rx * hw * sr, y: y + fy * hl * sf + ry * hw * sr });
+  return [c(1, 1), c(1, -1), c(-1, -1), c(-1, 1)]; // front right, front left, rear left, rear right
+}
+function hull(points) {
+  const p = points.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+  if (p.length < 3) return p;
+  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lo = [];
+  for (const q of p) { while (lo.length >= 2 && cross(lo[lo.length - 2], lo[lo.length - 1], q) <= 0) lo.pop(); lo.push(q); }
+  const up = [];
+  for (let i = p.length - 1; i >= 0; i--) { const q = p[i]; while (up.length >= 2 && cross(up[up.length - 2], up[up.length - 1], q) <= 0) up.pop(); up.push(q); }
+  lo.pop(); up.pop();
+  return lo.concat(up);
+}
+function areaOf(poly) {
+  let s = 0;
+  for (let i = 0; i < poly.length; i++) { const a = poly[i], b = poly[(i + 1) % poly.length]; s += a.x * b.y - b.x * a.y; }
+  return Math.abs(s) / 2;
+}
+function lerpPose(a, b, u) { return { x: a.x + (b.x - a.x) * u, y: a.y + (b.y - a.y) * u, h: a.h + wrap180(b.h - a.h) * u }; }
+function sweepPoints(a, b, len, wid) {
+  const dist = Math.hypot(b.x - a.x, b.y - a.y), dh = Math.abs(wrap180(b.h - a.h));
+  const n = Math.max(1, Math.ceil(Math.max(dist / 3, dh / 10)));
+  const pts = [];
+  for (let i = 0; i <= n; i++) { const p = lerpPose(a, b, i / n); pts.push.apply(pts, footprintCorners(p.x, p.y, p.h, len, wid)); }
+  return pts;
+}
+function distToSeg(px, py, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
+  let u = l2 ? ((px - a.x) * dx + (py - a.y) * dy) / l2 : 0;
+  u = Math.max(0, Math.min(1, u));
+  return Math.hypot(px - (a.x + u * dx), py - (a.y + u * dy));
+}
+function circleHitsHull(poly, cx, cy, r) {
+  if (poly.length < 3) return false;
+  let inside = true;
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    if ((b.x - a.x) * (cy - a.y) - (b.y - a.y) * (cx - a.x) < 0) { inside = false; break; } // hull is counterclockwise
+  }
+  if (inside) return true;
+  for (let i = 0; i < poly.length; i++) if (distToSeg(cx, cy, poly[i], poly[(i + 1) % poly.length]) <= r) return true;
+  return false;
+}
+function interpPose(samples, t) {
+  const n = samples.length;
+  if (!n) return null;
+  if (t <= samples[0].t) return { x: samples[0].x, y: samples[0].y, h: samples[0].h };
+  if (t >= samples[n - 1].t) { const l = samples[n - 1]; return { x: l.x, y: l.y, h: l.h }; }
+  let lo = 0, hi = n - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (samples[m].t <= t) lo = m; else hi = m; }
+  const a = samples[lo], b = samples[hi], span = b.t - a.t;
+  return lerpPose(a, b, span > 0 ? (t - a.t) / span : 0);
+}
+function samplesUpTo(samples, t) {
+  const out = [];
+  for (let i = 0; i < samples.length && samples[i].t <= t; i++) out.push(samples[i]);
+  const p = interpPose(samples, t);
+  if (p && (!out.length || out[out.length - 1].t < t)) out.push({ t, x: p.x, y: p.y, h: p.h });
+  return out;
+}
+
+/* ---------- route logic: raw session, miss table, contacts, pushes ---------- */
+const baseName = (s) => String(s || '').split(/[\\/]/).pop().replace(/\.[^.]*$/, '');
+function rawSessionFor(route, sessions) {
+  if (!route) return null;
+  const c = sessions.filter((s) => s.kind.indexOf('teach') === 0 && s.for_slot === route.slot);
+  if (!c.length) return null;
+  const want = baseName(route.source);
+  return c.find((s) => want && s.id === want) || c[c.length - 1];
+}
+
+function missRows(route, session) {
+  const rows = [];
+  if (!session) return rows;
+  const byStep = new Map();
+  let opening = null;
+  session.events.forEach((e) => { if (e.step === null) return; if (e.step < 0) opening = e; else byStep.set(e.step, e); });
+  const mk = (idx, kind, ev, wp) => {
+    const tx = ev && isNum(ev.tx) ? ev.tx : wp && wp.x !== null ? wp.x : null;
+    const ty = ev && isNum(ev.ty) ? ev.ty : wp && wp.y !== null ? wp.y : null;
+    const th = ev && isNum(ev.th) ? ev.th : wp && wp.hKnown ? wp.h : null;
+    const e2 = ev ? { tx, ty, x: ev.x, y: ev.y } : null;
+    const usesPos = !NO_POS.has(kind), usesHead = !NO_HEAD.has(kind);
+    const mi = ev && usesPos ? missIn(e2) : null;
+    const md = ev && usesHead ? headingMiss(ev.h, th) : null;
+    const rIn = rateIn(mi), rDeg = rateDeg(md);
+    return {
+      idx, kind, reached: !!ev, t: ev ? ev.t : null, ok: ev ? ev.ok : null,
+      target: { x: tx, y: ty, h: th }, actual: ev ? { x: ev.x, y: ev.y, h: ev.h } : null,
+      missIn: mi, missDeg: md, ratingIn: rIn, ratingDeg: rDeg, rating: worse(rIn, rDeg),
+    };
+  };
+  if (opening) rows.push(mk(-1, 'opening', opening, null));
+  const n = route ? route.steps.length : byStep.size ? Math.max.apply(null, Array.from(byStep.keys())) + 1 : 0;
+  for (let i = 0; i < n; i++) {
+    const ev = byStep.get(i) || null;
+    const kind = route && route.steps[i] ? route.steps[i].kind : ev ? ev.type : '?';
+    rows.push(mk(i, kind, ev, route ? route.wp[i] : null));
+  }
+  return rows;
+}
+
+function runSummary(rows, session) {
+  const scored = rows.filter((r) => r.missIn !== null);
+  const sum = { total: session ? session.duration : null, scored: scored.length, good: 0, warn: 0, bad: 0, worstIn: null, worstInStep: null, worstDeg: null, worstDegStep: null, failed: 0, notReached: 0 };
+  scored.forEach((r) => {
+    sum[r.ratingIn]++;
+    if (sum.worstIn === null || r.missIn > sum.worstIn) { sum.worstIn = r.missIn; sum.worstInStep = r.idx; }
+  });
+  rows.forEach((r) => {
+    if (r.missDeg !== null && (sum.worstDeg === null || Math.abs(r.missDeg) > sum.worstDeg)) { sum.worstDeg = Math.abs(r.missDeg); sum.worstDegStep = r.idx; }
+    if (r.ok === false) sum.failed++;
+    if (!r.reached && r.idx >= 0) sum.notReached++;
+  });
+  return sum;
+}
+
+function pushDistances(session) {
+  const o = session && session.samples.length ? session.samples[0] : null;
+  const rows = (session ? session.marks : []).filter((m) => m.type === 'push').map((m, i) => ({
+    n: i + 1, t: m.t, x: m.x, y: m.y, h: m.h, dist: o && m.x !== null && m.y !== null ? Math.hypot(m.x - o.x, m.y - o.y) : null,
+  }));
+  const ds = rows.map((r) => r.dist).filter(isNum);
+  return { rows, hasSamples: !!o, spread: ds.length > 1 ? Math.max.apply(null, ds) - Math.min.apply(null, ds) : null, mean: ds.length ? ds.reduce((a, b) => a + b, 0) / ds.length : null, max: ds.length ? Math.max.apply(null, ds) : null };
+}
+
+const contactMemo = new WeakMap();
+function contacts(model, route) {
+  if (!route) return [];
+  if (contactMemo.has(route)) return contactMemo.get(route);
+  const out = [], seen = new Set();
+  const add = (step, severity, text) => { const k = step + '|' + text; if (!seen.has(k)) { seen.add(k); out.push({ step, severity, text }); } };
+  const F = model.field, L = F.robot.length, W = F.robot.width;
+  const steps = route.steps, wp = route.wp;
+  // A Drop is meant to touch its own Goal, and the steps right before and after it stay within a few inches of it.
+  const exempt = steps.map(() => new Set());
+  steps.forEach((s, j) => {
+    if (s.kind !== 'drop' || !s.goal || !wp[j] || wp[j].x === null) return;
+    for (const dir of [-1, 1]) {
+      for (let i = j; i >= 0 && i < steps.length; i += dir) {
+        if (!wp[i] || wp[i].x === null || Math.hypot(wp[i].x - wp[j].x, wp[i].y - wp[j].y) > 14) break;
+        exempt[i].add(s.goal);
+      }
+    }
+  });
+  let prev = startPoseOf(route);
+  steps.forEach((s, i) => {
+    const w = wp[i];
+    if (!w || w.x === null) return;
+    const here = { x: w.x, y: w.y, h: w.h };
+    const pts = prev ? sweepPoints(prev, here, L, W) : footprintCorners(here.x, here.y, here.h, L, W);
+    const poly = hull(pts);
+    if (pts.some((p) => p.y - p.x > 0.05)) add(i, 'bad', 'Footprint crosses the Autonomous Line (y = x)');
+    if (pts.some((p) => Math.abs(p.x) > F.wall + 0.05 || Math.abs(p.y) > F.wall + 0.05)) add(i, 'warn', 'Footprint reaches past the field wall');
+    F.goals.forEach((g) => {
+      if (exempt[i].has(g.name)) return;
+      if (circleHitsHull(poly, g.x, g.y, F.goalRadius)) add(i, g.kind === 'opponent' ? 'bad' : 'warn', (g.kind === 'opponent' ? 'Touches the opponent Goal ' : 'Touches Goal ') + shortName(g.name || 'Goal'));
+    });
+    prev = here;
+  });
+  contactMemo.set(route, out);
+  return out;
+}
+const contactsAt = (list, step) => list.filter((c) => c.step === step);
+
+function sweepPolygons(route, L, W) {
+  const out = [];
+  if (!route) return out;
+  let prev = startPoseOf(route);
+  route.wp.forEach((w, i) => {
+    if (!w || w.x === null) return;
+    const here = { x: w.x, y: w.y, h: w.h };
+    if (prev) out.push({ step: i, poly: hull(sweepPoints(prev, here, L, W)) });
+    prev = here;
+  });
+  return out;
+}
+
+const shortName = (n) => String(n).replace(/^OPP_ALLIANCE_GOAL/i, 'OPP').replace(/_GOAL/i, '').replace(/_/g, ' ').trim();
+function activeEvent(session, t) {
+  let a = null;
+  if (session) for (const e of session.events) { if (e.t <= t + 1e-9) a = e; else break; }
+  return a;
+}
+// Where the robot stands when the route's own steps begin: the pose start, or the point the opening ended at.
+function startPoseOf(route) {
+  if (!route) return null;
+  if (route.start.kind === 'pose' && route.start.x !== null && route.start.y !== null) return { x: route.start.x, y: route.start.y, h: route.start.theta || 0 };
+  if (route.opening && route.opening.source === 'teach') return { x: route.opening.x, y: route.opening.y, h: route.opening.h };
+  return null;
+}
+// The "after opening" point: first sample of a teach_open session, else the first waypoint the route has.
+function openingPoint(route, rawSession) {
+  if (!route || route.start.kind !== 'opening') return null;
+  if (rawSession && rawSession.kind === 'teach_open' && rawSession.samples.length) {
+    const p = rawSession.samples[0];
+    return { x: p.x, y: p.y, h: p.h, source: 'teach' };
+  }
+  const i = route.wp.findIndex((w) => w && w.x !== null);
+  return i >= 0 ? { x: route.wp[i].x, y: route.wp[i].y, h: route.wp[i].h, source: 'waypoint', step: i } : null;
+}
+const displayMemo = new WeakMap();
+function displayRoute(route, rawSession) {
+  if (!route) return null;
+  const op = openingPoint(route, rawSession);
+  if (!op) return route;
+  const key = op.source + '|' + op.x + '|' + op.y + '|' + op.h;
+  let byKey = displayMemo.get(route);
+  if (!byKey) { byKey = new Map(); displayMemo.set(route, byKey); }
+  if (!byKey.has(key)) {
+    // A step with no position of its own (a first turn) then sits at the opening point instead of vanishing.
+    const wp = op.source === 'teach' ? resolveWaypoints(route.steps, route.rawWps, { kind: 'pose', x: op.x, y: op.y, theta: op.h }) : route.wp;
+    byKey.set(key, Object.assign({}, route, { wp, opening: op }));
+  }
+  return byKey.get(key);
+}
+
+// Square window (inches) around the route and the session paths that are drawn, plus a margin. null means the whole field.
+const FIT_MARGIN = 15, FIT_MIN_SPAN = 50;
+function fitWindow(model, sel, layers) {
+  const pts = [];
+  const addAll = (list) => list.forEach((p) => { if (p && isNum(p.x) && isNum(p.y)) pts.push(p); });
+  if (sel.route) {
+    addAll(sel.route.wp);
+    addAll([startPoseOf(sel.route), sel.route.opening]);
+  }
+  if (sel.session) addAll(sel.session.samples);
+  if (sel.rawSession && (!layers || layers.raw)) addAll(sel.rawSession.samples);
+  if (!pts.length) return null;
+  const wall = model.field.wall;
+  const b = extent(pts), x0 = b.x0 - FIT_MARGIN, x1 = b.x1 + FIT_MARGIN, y0 = b.y0 - FIT_MARGIN, y1 = b.y1 + FIT_MARGIN;
+  const span = Math.max(FIT_MIN_SPAN, x1 - x0, y1 - y0);
+  if (span >= 2 * wall - 0.01) return null;
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  const wx = Math.max(-wall, Math.min(wall - span, cx - span / 2)), wy = Math.max(-wall, Math.min(wall - span, cy - span / 2));
+  return { x0: wx, y0: wy, x1: wx + span, y1: wy + span };
+}
+
+// Step number tags, placed in screen pixels so they never sit on a symbol or on each other.
+// pts: waypoint positions in px (y down) or null; labels: tag text; extra: more things to keep clear: discs ({x, y}) or boxes ({x, y, w, h}, x and y the top left).
+const TAG_H = 15, TAG_DISC = 8.5, TAG_ANG = [-45, 0, -90, -135, 180, 45, 90, 135], TAG_RAD = [22, 34, 48, 62];
+function layoutTags(pts, labels, extra) {
+  const hitsRect = (a, b) => a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0;
+  const discs = [];
+  pts.forEach((p) => { if (p && !discs.some((d) => Math.hypot(d.x - p.x, d.y - p.y) < 2)) discs.push({ x: p.x, y: p.y }); });
+  (extra || []).forEach((p) => discs.push(p));
+  const hitsDisc = (d, r) => { if (d.w) return hitsRect({ x0: d.x, x1: d.x + d.w, y0: d.y, y1: d.y + d.h }, r); const nx = Math.max(r.x0, Math.min(d.x, r.x1)), ny = Math.max(r.y0, Math.min(d.y, r.y1)); return Math.hypot(d.x - nx, d.y - ny) < (d.r || TAG_DISC); };
+  const placed = [], out = [];
+  pts.forEach((p, i) => {
+    if (!p) { out.push(null); return; }
+    const w = Math.max(15, String(labels[i]).length * 6.6 + 8);
+    const rectAt = (cx, cy) => ({ x0: cx - w / 2 - 1, x1: cx + w / 2 + 1, y0: cy - TAG_H / 2 - 1, y1: cy + TAG_H / 2 + 1 });
+    let best = null, fallback = null;
+    for (const r of TAG_RAD) {
+      for (const a of TAG_ANG) {
+        const cx = p.x + Math.cos((a * Math.PI) / 180) * r, cy = p.y + Math.sin((a * Math.PI) / 180) * r, rect = rectAt(cx, cy);
+        if (placed.some((q) => hitsRect(q, rect))) continue;
+        if (!fallback) fallback = { dx: cx - p.x, dy: cy - p.y, r, w, rect };
+        if (discs.some((d) => hitsDisc(d, rect))) continue;
+        best = { dx: cx - p.x, dy: cy - p.y, r, w, rect };
+        break;
+      }
+      if (best) break;
+    }
+    if (!best) best = fallback || { dx: 22, dy: -22, r: 22, w, rect: rectAt(p.x + 22, p.y - 22) };
+    placed.push(best.rect);
+    out.push({ dx: best.dx, dy: best.dy, r: best.r, w: best.w, leader: best.r > TAG_RAD[0] });
+  });
+  return out;
+}
+
+
+/* ---------- results files: the same rules as tools/autopath/wire.py ---------- */
+const WIRE_ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+// The strings Python's int() accepts, so a line one parser takes the other takes too. null means not a number.
+function wireInt(s) { return /^\s*[+-]?\d+(_\d+)*\s*$/.test(s) ? parseInt(s.replace(/_/g, ''), 10) : null; }
+function wireInts(list) { const out = list.map(wireInt); return out.includes(null) ? null : out; }
+
+function wireRow(tag, payload) {
+  const p = payload.split(';');
+  if (tag === 'AP') {
+    if (p.length !== 9) return null;
+    const n = wireInts(p);
+    return n && { t: n[0] / 1000, x: n[1] / 100, y: n[2] / 100, h: n[3] / 100 };
+  }
+  if (tag === 'AM') {
+    if (p.length !== 8 || !p[1]) return null;
+    const t = wireInt(p[0]), n = wireInts(p.slice(2));
+    return t !== null && n && { t: t / 1000, type: p[1], x: n[0] / 100, y: n[1] / 100, h: n[2] / 100, lift: n[3] };
+  }
+  if (p.length !== 10 || !p[2]) return null;
+  const t = wireInt(p[0]), step = wireInt(p[1]), n = wireInts(p.slice(3));
+  return t !== null && step !== null && n && { t: t / 1000, step, type: p[2], tx: n[0] / 100, ty: n[1] / 100, th: n[2] / 100, x: n[3] / 100, y: n[4] / 100, h: n[5] / 100, ok: n[6] };
+}
+
+function wireBegin(payload) {
+  const p = payload.split(';');
+  if (p.length < 5) return null;
+  let v = p[0].trim();
+  if (v.startsWith('v=')) v = v.slice(2);
+  const version = wireInt(v), rows = wireInt(p[3]), side = p[2].trim();
+  if (version === null || rows === null || (side !== 'L' && side !== 'R')) return null;
+  return { rows, kind: p[1].trim(), side, build: p.slice(4).join(';'), version };
+}
+
+function rejectionText(r) {
+  let text = 'REJECTED ' + r.kind + ' session: ' + r.reason;
+  if (r.missing.length) {
+    const more = r.missing.length <= 8 ? '' : ' (and ' + (r.missing.length - 8) + ' more)';
+    text += ' Missing row numbers: ' + r.missing.slice(0, 8).join(',') + more + '.';
+  }
+  return text;
+}
+
+function wireFinish(op, endRows, out) {
+  const seqs = Array.from(op.rows.keys()).sort((a, b) => a - b), got = seqs.length, expected = op.begin.rows;
+  const missing = [], top = Math.max(got ? seqs[got - 1] + 1 : 0, expected);
+  for (let i = 0; i < top; i++) if (!op.rows.has(i)) missing.push(i);
+  let fail = null;
+  if (op.conflict !== null) fail = op.conflict;
+  else if (op.begin.version !== 1) fail = 'unknown wire version ' + op.begin.version + ' (this tool reads version 1).';
+  else if (endRows === null) fail = 'no END line (the send was cut off) after ' + got + ' of ' + expected + ' rows.';
+  else if (endRows !== expected) fail = 'BEGIN says ' + expected + ' rows but END says ' + endRows + ' (received ' + got + ').';
+  else if (missing.length) fail = 'received ' + got + ' of ' + expected + ' rows with gaps.';
+  else if (got !== expected) fail = 'received ' + got + ' rows but BEGIN says ' + expected + '.';
+  if (fail) { out.rejected.push({ reason: fail, kind: op.begin.kind, got, expected, missing }); return; }
+  const s = { kind: op.begin.kind, side: op.begin.side, rows: expected, build: op.begin.build, samples: [], marks: [], events: [], fingerprint: '' };
+  const canon = [];
+  seqs.forEach((q) => {
+    const r = op.rows.get(q);
+    canon.push(r.tag + '|' + r.payload);
+    (r.tag === 'AP' ? s.samples : r.tag === 'AM' ? s.marks : s.events).push(r.row);
+  });
+  s.fingerprint = s.kind + '|' + s.side + '|' + canon.join('\n');
+  out.sessions.push(s);
+}
+
+function parseWire(text) {
+  const out = { sessions: [], rejected: [], noise: 0 };
+  let op = null, orphans = 0;
+  String(text).split(/[\r\n]+/).forEach((raw) => {
+    const line = raw.replace(WIRE_ANSI, '');
+    if (!line.includes('SCOURGE,')) {
+      const bare = line.trim();
+      if (bare && bare !== 'kind,test,key,value,unit') out.noise++;
+      return;
+    }
+    line.split(/(?=SCOURGE,)/).forEach((rawPiece) => {
+      const piece = rawPiece.trim();
+      if (!piece.startsWith('SCOURGE,')) { if (piece) out.noise++; return; }
+      const f = piece.split(',');
+      if (f.length !== 5 || f[4] !== '') { out.noise++; return; } // a line cut short loses its last comma
+      const tag = f[1];
+      if (tag === 'BEGIN' && f[2] === 'autopath') {
+        const begin = wireBegin(f[3]);
+        if (!begin) { out.noise++; return; }
+        if (op) wireFinish(op, null, out);
+        op = { begin, rows: new Map(), conflict: null };
+      } else if (tag === 'END' && f[2] === 'autopath') {
+        const endRows = wireInt(f[3]);
+        if (endRows === null) { out.noise++; return; }
+        if (!op) { orphans++; return; }
+        wireFinish(op, endRows, out);
+        op = null;
+      } else if (tag === 'AP' || tag === 'AM' || tag === 'AS') {
+        const seq = wireInt(f[2]);
+        const row = seq === null ? null : wireRow(tag, f[3]);
+        if (!row || seq < 0) { out.noise++; return; }
+        if (!op) { orphans++; return; }
+        const seen = op.rows.get(seq);
+        if (seen) { if (seen.tag !== tag || seen.payload !== f[3]) op.conflict = 'row ' + seq + ' arrived twice with different contents.'; return; }
+        op.rows.set(seq, { tag, payload: f[3], row });
+      } else out.noise++;
+    });
+  });
+  if (op) wireFinish(op, null, out);
+  if (orphans) out.rejected.push({ reason: orphans + ' data or END lines with no BEGIN before them (the capture started mid-send).', kind: '?', got: 0, expected: 0, missing: [] });
+  // A resend repeats a whole recording: keep the last complete copy of each.
+  const unique = new Map();
+  out.sessions.forEach((s) => { unique.delete(s.fingerprint); unique.set(s.fingerprint, s); });
+  out.sessions = Array.from(unique.values());
+  return out;
+}
+
+// A RIGHT session in the LEFT frame: (x, y) -> (-y, -x), h -> 270 - h.
+function leftFrame(s) {
+  if (s.side !== 'R') return s;
+  const pose = (o) => ({ x: -o.y, y: -o.x, h: 270 - o.h });
+  return Object.assign({}, s, {
+    side: 'L',
+    samples: s.samples.map((q) => Object.assign({}, q, pose(q))),
+    marks: s.marks.map((q) => Object.assign({}, q, pose(q))),
+    events: s.events.map((e) => Object.assign({}, e, pose(e), { tx: -e.ty, ty: -e.tx, th: 270 - e.th })),
+  });
+}
+
+function csvSession(s, name) {
+  const left = leftFrame(s), stem = baseName(name), m = /(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})\d{2}/.exec(stem);
+  return { id: stem, kind: s.kind, side: s.side, when: m ? m[1] + '-' + m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5] : '', samples: left.samples, marks: left.marks, events: left.events };
+}
+
+// The same recording arriving twice, once through the tool and once as a file: kind, row count, first and last sample.
+function sameSession(a, b) {
+  const ends = (s) => (s.samples.length ? s.samples : s.marks.length ? s.marks : s.events);
+  const close = (p, q) => (!p && !q) || (p && q && Math.abs(p.t - q.t) < 0.002 && (p.x === q.x || Math.abs(p.x - q.x) < 0.011) && (p.y === q.y || Math.abs(p.y - q.y) < 0.011));
+  const ea = ends(a), eb = ends(b);
+  return a.kind === b.kind && a.samples.length + a.marks.length + a.events.length === b.samples.length + b.marks.length + b.events.length &&
+    close(ea[0], eb[0]) && close(ea[ea.length - 1], eb[eb.length - 1]);
+}
+
+// A results file can hold several sessions under one file name, and the page selects sessions by id.
+function uniqueIds(sessions) {
+  const seen = new Map();
+  sessions.forEach((s) => { const n = (seen.get(s.id) || 0) + 1; seen.set(s.id, n); if (n > 1) s.id += '-' + n; });
+}
+
+// The Goals and walls, same numbers as field.py (tests/test_map_embed.py compares them), so results files alone still get a real field.
+const DEFAULT_FIELD = {
+  wall: 70.1,
+  goals: [
+    { name: 'ALLIANCE_GOAL_NEAR', kind: 'alliance', x: 23.6, y: -47.2 }, { name: 'ALLIANCE_GOAL_SIDE', kind: 'alliance', x: 47.2, y: -23.6 },
+    { name: 'NEUTRAL_GOAL_NEAR', kind: 'neutral', x: -23.6, y: -47.2 }, { name: 'NEUTRAL_GOAL_SIDE', kind: 'neutral', x: 47.2, y: 23.6 },
+    { name: 'CENTER_GOAL', kind: 'neutral', x: 0, y: 0 }, { name: 'OPP_ALLIANCE_GOAL_FAR', kind: 'opponent', x: -23.6, y: 47.2 },
+    { name: 'OPP_ALLIANCE_GOAL_LEFT', kind: 'opponent', x: -47.2, y: 23.6 }, { name: 'NEUTRAL_GOAL_FAR', kind: 'neutral', x: 23.6, y: 47.2 },
+    { name: 'NEUTRAL_GOAL_LEFT', kind: 'neutral', x: -47.2, y: -23.6 },
+  ],
+  toggles: [{ name: 'TOGGLE_NEAR', x: 0, y: -70.1 }, { name: 'TOGGLE_SIDE', x: 70.1, y: 0 }, { name: 'TOGGLE_LEFT', x: -70.1, y: 0 }, { name: 'TOGGLE_FAR', x: 0, y: 70.1 }],
+  objects: [
+    { name: 'OBJ_WALL_NEAR_LEFT', x: -23.6, y: -68.7 }, { name: 'OBJ_WALL_NEAR_RIGHT', x: 23.6, y: -68.7 }, { name: 'OBJ_WALL_SIDE', x: 68.7, y: -23.6 },
+    { name: 'OBJ_MID_NEAR', x: 0, y: -23.6 }, { name: 'OBJ_MID_SIDE', x: 23.6, y: 0 }, { name: 'OBJ_DIAGONAL_SIDE', x: 47.2, y: -47.2 }, { name: 'OBJ_DIAGONAL_INNER', x: 23.6, y: -23.6 },
+  ],
+  loaders: [{ name: 'LOADER_LEFT', x: -58.7, y: -68.5 }, { name: 'LOADER_RIGHT', x: 58.7, y: -68.5 }],
+  robot: { length: 17, width: 16 },
+};
+
+// What window.ScourgeMap.load gets: { mapData, csvTexts: [{ name, text }], note }. Routes only ever come from mapData.
+function buildModel(input) {
+  const i = input && typeof input === 'object' ? input : {};
+  const m = normalize(i.mapData);
+  if (!(i.mapData && i.mapData.field && typeof i.mapData.field === 'object')) m.field = normField(DEFAULT_FIELD);
+  m.note = i.note ? String(i.note) : '';
+  arr(i.csvTexts).forEach((f) => {
+    if (!f || typeof f.text !== 'string') return;
+    const name = String(f.name || 'results.csv'), parsed = parseWire(f.text);
+    parsed.rejected.forEach((r) => m.rejected.push({ file: name, text: rejectionText(r) }));
+    parsed.sessions.forEach((s) => {
+      const c = normSession(csvSession(s, name), m.sessions.length, 's');
+      if (!m.sessions.some((o) => sameSession(o, c))) m.sessions.push(c);
+    });
+  });
+  uniqueIds(m.sessions);
+  return m;
+}
+
+/* ---------- which run the first glance talks about ---------- */
+// A run with no route named fits a route when every logged step is the kind that route has at that index.
+function runFitsRoute(route, s) {
+  return s.events.every((e) => e.step === null || e.step < 0 || (route.steps[e.step] && route.steps[e.step].kind === e.type));
+}
+function lastRun(model, route) {
+  let best = null;
+  model.sessions.forEach((s) => {
+    if (s.kind !== 'run') return;
+    if (route && !(s.for_slot === route.slot || (s.for_slot === null && runFitsRoute(route, s)))) return;
+    if (!best || s.when >= best.when) best = s;
+  });
+  return best;
+}
+// prev: { slot, session, step, cleared }. Keeps what still exists, otherwise opens on the route and its last run.
+function pickSelection(model, prev) {
+  const p = prev || {};
+  let route = p.slot != null ? model.routes.findIndex((r) => r.slot === p.slot) : -1;
+  const kept = route >= 0;
+  if (!kept) route = model.routes.length ? 0 : null;
+  const r = route !== null ? model.routes[route] : null;
+  let session = p.session != null && model.sessions.some((s) => s.id === p.session) ? p.session : null;
+  if (session === null && !p.cleared) {
+    const run = lastRun(model, r);
+    if (run) session = run.id;
+    else if (!r && model.sessions.length) session = model.sessions.reduce((a, b) => (b.when >= a.when ? b : a)).id;
+  }
+  return { route, session, step: kept && isNum(p.step) && r.steps[p.step] ? p.step : null };
+}
+
+/* ---------- drawing long paths ---------- */
+// Drop points closer than tol to the last kept one, so every dropped point stays within tol of the drawn line's vertices.
+// Only the drawing uses this: tables, misses and playback poses read the full samples.
+function thinPath(pts, tol) {
+  if (pts.length < 3) return pts;
+  const out = [pts[0]], t2 = tol * tol;
+  let last = pts[0];
+  for (let i = 1; i < pts.length - 1; i++) {
+    const p = pts[i], dx = p.x - last.x, dy = p.y - last.y;
+    if (dx * dx + dy * dy >= t2) { out.push(p); last = p; }
+  }
+  out.push(pts[pts.length - 1]);
+  return out;
+}
+const PATH_TOL_PX = 0.75, thinMemo = new WeakMap();
+function drawnPath(samples, k) {
+  let m = thinMemo.get(samples);
+  if (!m || m.k !== k) { m = { k, pts: thinPath(samples, k * PATH_TOL_PX) }; thinMemo.set(samples, m); }
+  return m.pts;
+}
+function extent(pts) {
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const p of pts) { if (p.x < x0) x0 = p.x; if (p.x > x1) x1 = p.x; if (p.y < y0) y0 = p.y; if (p.y > y1) y1 = p.y; }
+  return { x0, x1, y0, y1 };
+}
+
+/* ---------- svg building blocks (strings) ---------- */
+const at = (x, y, k, inner, extra) => '<g transform="translate(' + f3(x) + ' ' + f3(-y) + ') scale(' + f3(k) + ')"' + (extra || '') + '>' + inner + '</g>';
+const polyPts = (pts) => pts.map((p) => f3(p.x) + ',' + f3(-p.y)).join(' ');
+const linePath = (pts) => (pts.length ? 'M' + pts.map((p) => f3(p.x) + ' ' + f3(-p.y)).join('L') : '');
+
+function sym(kind, r, cls) {
+  const c = cls || 'sym';
+  if (kind === 'grab_pin') return '<path class="' + c + '" d="M0 ' + f3(-r * 1.1) + 'L' + f3(r * 1.0) + ' ' + f3(r * 0.7) + 'L' + f3(-r * 1.0) + ' ' + f3(r * 0.7) + 'Z"/>';
+  if (kind === 'grab_stack') { const a = r * 0.85; return '<path class="' + c + '" d="M' + f3(-a) + ' ' + f3(-a) + 'h' + f3(2 * a) + 'v' + f3(2 * a) + 'h' + f3(-2 * a) + 'Z"/><path class="symline" d="M' + f3(-a) + ' 0h' + f3(2 * a) + '"/>'; }
+  if (kind === 'drop') { const a = r * 1.2; return '<path class="' + c + '" d="M0 ' + f3(-a) + 'L' + f3(a) + ' 0L0 ' + f3(a) + 'L' + f3(-a) + ' 0Z"/>'; }
+  if (kind === 'toggle') { const pts = []; for (let i = 0; i < 6; i++) { const a = (Math.PI / 3) * i; pts.push(f3(r * 1.05 * Math.cos(a)) + ',' + f3(r * 1.05 * Math.sin(a))); } return '<polygon class="' + c + '" points="' + pts.join(' ') + '"/>'; }
+  if (kind === 'push') return '<rect class="' + c + '" x="' + f3(-r * 1.2) + '" y="' + f3(-r * 0.4) + '" width="' + f3(r * 2.4) + '" height="' + f3(r * 0.8) + '" rx="1"/>';
+  return '<circle class="' + c + '" r="' + f3(r * 0.6) + '"/>';
+}
+
+function tagSvg(n, label, selected, extraAttr) {
+  const s = String(label), w = Math.max(15, s.length * 6.6 + 8);
+  return '<g class="tag' + (selected ? ' sel' : '') + '"' + (extraAttr || '') + '><rect x="' + f3(-w / 2) + '" y="-7.5" width="' + f3(w) + '" height="15" rx="3.5"/><text y="3.8">' + esc(s) + '</text></g>';
+}
+
+function frameCtx(model, sel, W, fit, layers) {
+  const mgPx = 28;
+  const wide = Math.max(120, W || 560);
+  if (sel.frame === 'local') {
+    const pts = [{ x: 0, y: 0 }];
+    sel.session.samples.forEach((p) => pts.push(p));
+    sel.session.marks.forEach((m) => { if (m.x !== null && m.y !== null) pts.push(m); });
+    const { x0, x1, y0, y1 } = extent(pts);
+    const span = Math.max(48, x1 - x0, y1 - y0) * 1.12;
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    const k = span / (wide - 2 * mgPx), mg = mgPx * k;
+    const half = span / 2 + mg;
+    return { frame: 'local', k, half, cx, cy, span, vb: [cx - half, -cy - half, 2 * half, 2 * half], grid: 12, wall: null, W: wide };
+  }
+  const wall = model.field.wall;
+  const win = (fit && fitWindow(model, sel, layers)) || { x0: -wall, y0: -wall, x1: wall, y1: wall };
+  const span = win.x1 - win.x0;
+  const k = span / (wide - 2 * mgPx), mg = mgPx * k;
+  return { frame: 'field', k, span, win, fit: span < 2 * wall - 0.01, vb: [win.x0 - mg, -win.y1 - mg, span + 2 * mg, span + 2 * mg], grid: 24, wall, W: wide };
+}
+
+function resolveSel(model, state) {
+  const baseRoute = state.route != null && model.routes[state.route] ? model.routes[state.route] : null;
+  const session = state.session != null ? model.sessions.find((s) => s.id === state.session) || null : null;
+  const kind = session ? session.kind : '';
+  const frame = kind === 'push' ? 'local' : 'field';
+  const rawSession = frame === 'local' ? null : kind.indexOf('teach') === 0 ? session : rawSessionFor(baseRoute, model.sessions);
+  const route = frame === 'local' ? baseRoute : displayRoute(baseRoute, rawSession);
+  const runSession = kind === 'run' ? session : null;
+  const rows = runSession ? missRows(route, runSession) : null;
+  const scrub = session && session.samples.length ? session : null;
+  const list = frame === 'field' ? contacts(model, route) : [];
+  return { route, session, frame, rawSession, runSession, rows, scrub, contactList: list };
+}
+
+/* ---------- map layers ---------- */
+function renderBase(model, sel, ctx) {
+  const F = model.field, k = ctx.k, p = [];
+  if (ctx.frame === 'local') {
+    const g = ctx.grid, x0 = ctx.vb[0], x1 = x0 + ctx.vb[2], y0 = -(ctx.vb[1] + ctx.vb[3]), y1 = -ctx.vb[1];
+    p.push('<rect class="field-bg" x="' + f3(ctx.vb[0]) + '" y="' + f3(ctx.vb[1]) + '" width="' + f3(ctx.vb[2]) + '" height="' + f3(ctx.vb[3]) + '"/>');
+    for (let v = Math.ceil(x0 / g) * g; v <= x1; v += g) p.push('<line class="' + (v === 0 ? 'seam' : 'grid') + ' ns" x1="' + f3(v) + '" y1="' + f3(-y0) + '" x2="' + f3(v) + '" y2="' + f3(-y1) + '"/>');
+    for (let v = Math.ceil(y0 / g) * g; v <= y1; v += g) p.push('<line class="' + (v === 0 ? 'seam' : 'grid') + ' ns" x1="' + f3(x0) + '" y1="' + f3(-v) + '" x2="' + f3(x1) + '" y2="' + f3(-v) + '"/>');
+    for (let v = Math.ceil(x0 / g) * g; v <= x1; v += g) p.push(at(v, y0, k, '<text class="axis" y="-6" text-anchor="middle">' + v + '</text>'));
+    for (let v = Math.ceil(y0 / g) * g; v <= y1; v += g) p.push(at(x0, v, k, '<text class="axis" x="4" y="3.5">' + v + '</text>'));
+    p.push(at(x1, y0, k, '<text class="station" x="-6" y="-22" text-anchor="end">START POSE IS THE ORIGIN, NOT A FIELD SPOT</text>'));
+    return p.join('');
+  }
+  const w = F.wall, g = ctx.grid, win = ctx.win;
+  p.push('<rect class="field-bg" x="' + f3(-w) + '" y="' + f3(-w) + '" width="' + f3(2 * w) + '" height="' + f3(2 * w) + '"/>');
+  p.push('<polygon class="opp-side" points="' + f3(-w) + ',' + f3(w) + ' ' + f3(w) + ',' + f3(-w) + ' ' + f3(-w) + ',' + f3(-w) + '"/>');
+  // Grid lines span the whole field (the view clips them); axis numbers sit on the edge of what is shown.
+  for (let v = -Math.floor(w / g) * g; v <= w; v += g) {
+    const cls = (v === 0 ? 'seam' : 'grid') + ' ns';
+    p.push('<line class="' + cls + '" x1="' + f3(v) + '" y1="' + f3(-w) + '" x2="' + f3(v) + '" y2="' + f3(w) + '"/>');
+    p.push('<line class="' + cls + '" x1="' + f3(-w) + '" y1="' + f3(v) + '" x2="' + f3(w) + '" y2="' + f3(v) + '"/>');
+    if (v >= win.x0 - 0.01 && v <= win.x1 + 0.01) p.push(at(v, win.y0, k, '<text class="axis" y="14" text-anchor="middle">' + v + '</text>'));
+    if (v >= win.y0 - 0.01 && v <= win.y1 + 0.01) p.push(at(win.x0, v, k, '<text class="axis" x="-6" y="3.5" text-anchor="end">' + v + '</text>'));
+  }
+  if (win.y0 <= -w + 0.01) p.push(at((win.x0 + win.x1) / 2, win.y0, k, '<text class="station" y="27" text-anchor="middle">OUR STATION</text>'));
+  if (win.y1 >= w - 0.01) p.push(at((win.x0 + win.x1) / 2, win.y1, k, '<text class="station" y="-18" text-anchor="middle">FAR WALL</text>'));
+  p.push(at(win.x1, win.y0, k, '<text class="axis" y="27" text-anchor="end">+X right, in</text>'));
+  p.push(at(win.x0, win.y1, k, '<text class="axis" y="-18" text-anchor="start">+Y up, in</text>'));
+  p.push('<line class="aline ns" x1="' + f3(-w) + '" y1="' + f3(w) + '" x2="' + f3(w) + '" y2="' + f3(-w) + '"/>');
+  // The two line labels go on the part of y = x that is in view. Our side is below it, the other alliance's side above.
+  const lo = Math.max(win.x0, win.y0), hi = Math.min(win.x1, win.y1);
+  if (hi - lo > 24) {
+    const t1 = lo + (hi - lo) * 0.3, t2 = lo + (hi - lo) * 0.72;
+    p.push(at(t1, t1, k, '<g transform="rotate(-45)"><text class="lbl halo" y="13" text-anchor="middle">AUTONOMOUS LINE  y = x</text></g>'));
+    p.push(at(t2, t2, k, '<g transform="rotate(-45)"><text class="lbl halo muted" y="-7" text-anchor="middle">other alliance side</text></g>'));
+  }
+  p.push('<rect class="wall ns" x="' + f3(-w) + '" y="' + f3(-w) + '" width="' + f3(2 * w) + '" height="' + f3(2 * w) + '"/>');
+  return p.join('');
+}
+
+// Where a Goal's body and name sit, in px around the Goal: the name is centered underneath.
+function goalGeom(g, F, ctx) {
+  const k = ctx.k, R = Math.max(F.goalRadius / k, 4), ring = g.kind === 'neutral' ? R : R + 4;
+  const w = shortName(g.name || 'Goal').length * 6.4;
+  return { R, labelY: ring + 13, box: { x: g.x / k - w / 2, y: -g.y / k + ring + 3, w, h: 14 }, disc: { x: g.x / k, y: -g.y / k, r: R + 6 } };
+}
+
+function renderFieldObjects(model, route, ctx) {
+  const F = model.field, k = ctx.k, p = [];
+  F.loaders.forEach((o) => {
+    if (o.zone && o.zone.w !== null && o.zone.h !== null) {
+      const w = o.zone.w, h = o.zone.h, left = o.x < 0;
+      p.push('<rect class="zone ns" x="' + f3(left ? -F.wall : F.wall - w) + '" y="' + f3(-(-F.wall + h)) + '" width="' + f3(w) + '" height="' + f3(h) + '"><title>Load Zone near ' + esc(o.name || 'Loader') + '</title></rect>');
+    }
+    p.push(at(o.x, o.y, k, '<rect class="loader" x="-6" y="-6" width="12" height="12" rx="1.5" transform="rotate(45)"/><title>' + esc(o.name || 'Loader') + '</title>'));
+  });
+  F.toggles.forEach((o) => {
+    const len = o.len !== null ? o.len : 25.8, th = 2.4, horiz = Math.abs(Math.abs(o.y) - F.wall) < Math.abs(Math.abs(o.x) - F.wall);
+    const w = horiz ? len : th, h = horiz ? th : len, cls = 'toggle-bar' + (o.kind === 'other' ? ' other' : '');
+    p.push('<rect class="' + cls + '" x="' + f3(o.x - w / 2) + '" y="' + f3(-o.y - h / 2) + '" width="' + f3(w) + '" height="' + f3(h) + '" rx="0.5"><title>' + esc(o.name || 'Toggle') + '</title></rect>');
+  });
+  F.objects.forEach((o) => {
+    const R = Math.max((o.r !== null ? o.r : 1.6) / k, 3);
+    let inner;
+    if (o.kind === 'cup') inner = '<circle class="obj-ring" r="' + f3(R) + '"/>';
+    else if (o.kind === 'stack') inner = '<circle class="obj-ring" r="' + f3(R) + '"/><circle class="obj" r="' + f3(R * 0.45) + '"/>';
+    else if (o.kind === 'pin') inner = '<circle class="obj" r="' + f3(R * 0.8) + '"/>';
+    else inner = '<path class="obj-ring" d="M' + f3(-R) + ' ' + f3(-R) + 'L' + f3(R) + ' ' + f3(R) + 'M' + f3(R) + ' ' + f3(-R) + 'L' + f3(-R) + ' ' + f3(R) + '"/>';
+    p.push(at(o.x, o.y, k, inner + '<title>' + esc((o.name || 'Object') + (o.kind ? ' (' + o.kind + ')' : '')) + '</title>'));
+  });
+  F.goals.forEach((g) => {
+    const gg = goalGeom(g, F, ctx), R = gg.R, kind = g.kind;
+    let body;
+    if (kind === 'alliance') body = '<circle class="goal-ally-ring" r="' + f3(R + 4) + '"/><circle class="goal-ally-body" r="' + f3(R) + '"/>';
+    else if (kind === 'opponent') { const a = R * 0.62; body = '<circle class="goal-opp-ring" r="' + f3(R + 4) + '"/><circle class="goal-opp-body" r="' + f3(R) + '"/><path class="goal-opp-x" d="M' + f3(-a) + ' ' + f3(-a) + 'L' + f3(a) + ' ' + f3(a) + 'M' + f3(a) + ' ' + f3(-a) + 'L' + f3(-a) + ' ' + f3(a) + '"/>'; }
+    else if (kind === 'center') body = '<circle class="goal-neu-ring" r="' + f3(R + 4) + '"/><circle class="goal-neu-body" r="' + f3(R) + '"/>';
+    else body = '<circle class="goal-neu-body" r="' + f3(R) + '"/>';
+    const pins = route && route.checks.pins[g.name] ? route.checks.pins[g.name] : 0;
+    let badge = '';
+    if (pins > 0) {
+      const tx = String(pins), bw = 12 + tx.length * 7;
+      badge = '<g class="pinbadge" transform="translate(' + f3(R + 6) + ' -7.5)"><rect width="' + f3(bw) + '" height="15" rx="3.5"/><g transform="translate(8 8)">' + sym('grab_pin', 3.4, 'sym') + '</g><text x="' + f3(bw - 5) + '" y="11.3" text-anchor="end">' + esc(tx) + '</text></g>';
+    }
+    const label = '<text class="lbl strong halo" y="' + f3(gg.labelY) + '" text-anchor="middle">' + esc(shortName(g.name || 'Goal')) + '</text>';
+    const kindName = kind === 'alliance' ? 'our alliance Goal' : kind === 'opponent' ? 'opponent alliance Goal' : kind === 'center' ? 'tall neutral Goal' : 'neutral Goal';
+    p.push(at(g.x, g.y, k, body + label + badge + '<title>' + esc((g.name || 'Goal') + ', ' + kindName + ', at ' + fmt(g.x) + ', ' + fmt(g.y) + (pins ? ', ' + pins + ' Pin' + (pins === 1 ? '' : 's') + ' from this route' : '')) + '</title>'));
+  });
+  return p.join('');
+}
+
+function renderRoute(model, state, sel, ctx) {
+  const route = sel.route, k = ctx.k, F = model.field, L = F.robot.length, W = F.robot.width, p = [];
+  if (!route) return '';
+  const hitSteps = new Set(sel.contactList.map((c) => c.step));
+  if (state.layers.sweep) sweepPolygons(route, L, W).forEach((s) => p.push('<polygon class="sweep ns' + (hitSteps.has(s.step) ? ' hit' : '') + '" points="' + polyPts(s.poly) + '"/>'));
+  // Footprints are off by default. A footprint that touches something is drawn anyway, in red, so a hit is never hidden.
+  route.wp.forEach((w, i) => {
+    const hit = hitSteps.has(i);
+    if (!w || w.x === null || !(state.layers.foot || hit)) return;
+    const c = footprintCorners(w.x, w.y, w.h, L, W), hc = hit ? ' hit' : '';
+    p.push('<polygon class="fp ns' + hc + '" points="' + polyPts(c) + '"/><line class="fp-front ns' + hc + '" x1="' + f3(c[0].x) + '" y1="' + f3(-c[0].y) + '" x2="' + f3(c[1].x) + '" y2="' + f3(-c[1].y) + '"/>');
+  });
+  const start = route.start.kind === 'pose' ? startPoseOf(route) : null;
+  const extra = [];
+  if (start) { extra.push({ x: start.x / k, y: -start.y / k }); extra.push({ x: start.x / k + 8, y: -start.y / k - 19, w: 40, h: 14 }); } // the START word
+  if (route.opening) {
+    const ex = route.opening.source === 'teach';
+    extra.push({ x: route.opening.x / k, y: -route.opening.y / k });
+    extra.push({ x: route.opening.x / k + (ex ? 10 : 14), y: -route.opening.y / k + (ex ? 4 : 6), w: ex ? 92 : 150, h: 14 }); // the AFTER OPENING words
+  }
+  if (state.layers.route) {
+    route.wp.forEach((w, i) => {
+      if (!w || w.x === null || !w.moved || !w.from) return;
+      const back = route.steps[i].kind === 'drive' && route.steps[i].forwards === false;
+      p.push('<line class="route-leg ns' + (back ? ' back' : '') + '" x1="' + f3(w.from.x) + '" y1="' + f3(-w.from.y) + '" x2="' + f3(w.x) + '" y2="' + f3(-w.y) + '"/>');
+      const mx = (w.from.x + w.x) / 2, my = (w.from.y + w.y) / 2, ang = (Math.atan2(-(w.y - w.from.y), w.x - w.from.x) * 180) / Math.PI;
+      if (Math.hypot(w.x - w.from.x, w.y - w.from.y) * (1 / k) > 36) p.push(at(mx, my, k, '<path class="chev" d="M5 0L-4 4.5L-4 -4.5Z" transform="rotate(' + f3(ang) + ')"/>'));
+    });
+    if (start) {
+      if (state.layers.foot) p.push('<polygon class="fp ns" points="' + polyPts(footprintCorners(start.x, start.y, start.h, L, W)) + '" style="stroke-dasharray:3 2"/>');
+      p.push(at(start.x, start.y, k, '<circle class="dot" r="4.5"/><text class="lbl strong halo" x="8" y="-7">START</text>'));
+    }
+    const op = route.opening;
+    if (op) {
+      const exact = op.source === 'teach';
+      p.push(at(op.x, op.y, k, '<circle class="open-ring' + (exact ? '' : ' approx') + '" r="' + (exact ? 6.5 : 11) + '"/>' + (exact ? '<path class="open-cross" d="M-3.5 0h7M0 -3.5v7"/>' : '') +
+        (ctx.W < 420 ? '' : '<text class="lbl strong halo" x="' + (exact ? 10 : 14) + '" y="' + (exact ? 15 : 17) + '">' + (exact ? 'AFTER OPENING' : 'AFTER OPENING (approx.)') + '</text>') +
+        '<title>' + (exact ? 'Where the opening ended: first sample of the teach session. Step 0 starts here.' : 'No teach_open session selected, so this is the first waypoint the route has, not a measured end of the opening.') + '</title>'));
+    }
+  }
+  // Symbols first, then number tags on top, so a tag is never hidden by a neighbour's symbol.
+  model.field.goals.forEach((g) => { const gg = goalGeom(g, F, ctx); extra.push(gg.disc, gg.box); });
+  const wm = state.layers.run ? worstMark(model, sel, ctx) : null;
+  if (wm) extra.push(wm.box);
+  const labels = route.wp.map((w, i) => i);
+  const px = route.wp.map((w) => (w && w.x !== null ? { x: w.x / k, y: -w.y / k } : null));
+  const lay = state.layers.tags ? layoutTags(px, labels, extra) : [];
+  route.wp.forEach((w, i) => {
+    if (!w || w.x === null) return;
+    const kind = route.steps[i].kind, isMark = MARK_KINDS.has(kind);
+    let inner = '<circle class="hit-target" r="12"/>';
+    if (state.layers.route) inner += isMark ? sym(kind, 6.5, 'sym') : '<circle class="dot" r="3.2"/>';
+    p.push(at(w.x, w.y, k, inner + '<title>Step ' + i + ': ' + esc(KIND_LABEL[kind] || kind) + '</title>', ' data-step="' + i + '" class="stepmark"'));
+  });
+  route.wp.forEach((w, i) => {
+    const L2 = lay[i];
+    if (!w || w.x === null || !L2) return;
+    let inner = '';
+    if (L2.leader) {
+      const d = Math.hypot(L2.dx, L2.dy) || 1, ux = L2.dx / d, uy = L2.dy / d;
+      inner += '<line class="leader" x1="' + f3(ux * 8) + '" y1="' + f3(uy * 8) + '" x2="' + f3(L2.dx - ux * 9) + '" y2="' + f3(L2.dy - uy * 9) + '"/>';
+    }
+    inner += '<g transform="translate(' + f3(L2.dx) + ' ' + f3(L2.dy) + ')">' + tagSvg(i, i, state.step === i) + '</g>';
+    p.push(at(w.x, w.y, k, inner + '<title>Step ' + i + ': ' + esc(KIND_LABEL[route.steps[i].kind] || route.steps[i].kind) + '</title>', ' data-step="' + i + '" class="steptag"'));
+  });
+  return p.join('');
+}
+
+function renderRaw(model, sel, ctx) {
+  const s = sel.rawSession, k = ctx.k, p = [];
+  if (!s) return '';
+  if (s.samples.length > 1) p.push('<path class="raw-line ns" d="' + linePath(drawnPath(s.samples, k)) + '"/>');
+  s.marks.forEach((m) => {
+    if (m.x === null || m.y === null || !MARK_KINDS.has(m.kind)) return;
+    p.push(at(m.x, m.y, k, sym(m.kind, 5.2, 'sym raw') + '<title>Hand mark: ' + esc(KIND_LABEL[m.kind] || m.kind) + ' at ' + fmt(m.t, 1) + ' s</title>'));
+  });
+  return p.join('');
+}
+
+// Where the worst miss gets its label: the first spot beside the ring in view and clear of Goal names.
+function worstMark(model, sel, ctx) {
+  if (!sel.runSession || !sel.rows) return null;
+  const sm = runSummary(sel.rows, sel.runSession), worst = sm.worstIn !== null ? sel.rows.find((r) => r.idx === sm.worstInStep) : null;
+  if (!worst || !worst.actual) return null;
+  const k = ctx.k, label = fmt(sm.worstIn, 2) + ' in', tw = label.length * 6.8;
+  const px = worst.actual.x / k, py = -worst.actual.y / k, right = ctx.win.x1 / k, goals = model.field.goals.map((g) => goalGeom(g, model.field, ctx).box);
+  const boxAt = (c) => ({ x: px + (c[0] < 0 ? c[0] - tw : c[0]), y: py + c[1] - 10, w: tw, h: 12 });
+  const clear = (b, g) => b.x + b.w < g.x || b.x > g.x + g.w || b.y + b.h < g.y || b.y > g.y + g.h;
+  const spot = [[12, -8], [12, 18], [-12, -8], [-12, 18]].find((c) => boxAt(c).x + tw < right && goals.every((g) => clear(boxAt(c), g))) || [-12, -8];
+  return { x: worst.actual.x, y: worst.actual.y, dx: spot[0], dy: spot[1], label, cl: rateIn(sm.worstIn), box: boxAt(spot) };
+}
+
+function renderRunOverlay(model, sel, ctx) {
+  const s = sel.runSession, k = ctx.k, p = [];
+  if (!s) return '';
+  if (s.samples.length > 1) p.push('<path class="run-line ns" d="' + linePath(drawnPath(s.samples, k)) + '"/>');
+  (sel.rows || []).forEach((r) => {
+    if (!r.reached || !r.actual || !isNum(r.actual.x) || !isNum(r.actual.y)) return;
+    const cl = r.ratingIn || (r.ok === false ? 'bad' : 'good');
+    if (isNum(r.target.x) && isNum(r.target.y) && r.missIn !== null) {
+      p.push('<line class="miss-line ' + cl + ' ns" x1="' + f3(r.target.x) + '" y1="' + f3(-r.target.y) + '" x2="' + f3(r.actual.x) + '" y2="' + f3(-r.actual.y) + '"/>');
+      p.push(at(r.target.x, r.target.y, k, '<path class="target-x" d="M-3.5 -3.5L3.5 3.5M3.5 -3.5L-3.5 3.5"/>'));
+    }
+    p.push(at(r.actual.x, r.actual.y, k, '<circle class="miss-ring ' + cl + '" r="3.6"/><title>Step ' + r.idx + ' actual ' + fmt(r.actual.x) + ', ' + fmt(r.actual.y) + (r.missIn !== null ? ', miss ' + fmt(r.missIn, 2) + ' in' : '') + '</title>'));
+  });
+  const w = worstMark(model, sel, ctx);
+  if (w) p.push(at(w.x, w.y, k, '<circle class="worst-ring ' + w.cl + '" r="8"/><text class="worst-text halo ' + w.cl + '" x="' + w.dx + '" y="' + w.dy + '" text-anchor="' + (w.dx < 0 ? 'end' : 'start') + '">' + w.label + '</text>'));
+  return p.join('');
+}
+
+function renderPushLayer(sel, ctx) {
+  const s = sel.session, k = ctx.k, p = [];
+  if (s.samples.length > 1) p.push('<path class="run-line ns" d="' + linePath(drawnPath(s.samples, k)) + '"/>');
+  let n = 0;
+  s.marks.forEach((m) => {
+    if (m.x === null || m.y === null || m.type !== 'push') return;
+    n++;
+    p.push(at(m.x, m.y, k, sym('push', 6, 'sym') + '<g transform="translate(12 -11)">' + tagSvg(n, n, false) + '</g><title>Push ' + n + ' marked at ' + fmt(m.t, 1) + ' s</title>'));
+  });
+  return p.join('');
+}
+
+function renderStatic(model, state, sel, ctx) {
+  const p = [renderBase(model, sel, ctx)];
+  if (ctx.frame === 'field') {
+    p.push(renderFieldObjects(model, sel.route, ctx));
+    if (model.illustrative) p.push(at(0, 0, ctx.k, '<g transform="rotate(-30)"><text class="wm" y="14">ILLUSTRATIVE SAMPLE</text></g>'));
+    if (state.layers.raw) p.push(renderRaw(model, sel, ctx));
+    p.push(renderRoute(model, state, sel, ctx));
+    if (state.layers.run) p.push(renderRunOverlay(model, sel, ctx));
+  } else {
+    p.push(renderPushLayer(sel, ctx));
+  }
+  return p.join('');
+}
+
+function robotAt(pose, L, W, k, cls, fcls) {
+  const c = footprintCorners(pose.x, pose.y, pose.h, L, W);
+  return '<polygon class="' + cls + ' ns" points="' + polyPts(c) + '"/><line class="' + fcls + ' ns" x1="' + f3(c[0].x) + '" y1="' + f3(-c[0].y) + '" x2="' + f3(c[1].x) + '" y2="' + f3(-c[1].y) + '"/>';
+}
+
+function renderSel(model, state, sel, ctx) {
+  const route = sel.route;
+  if (ctx.frame !== 'field' || !route) return '';
+  const F = model.field, k = ctx.k, p = [];
+  const one = (i, cls, fcls, ring) => {
+    const w = route.wp[i];
+    if (!w || w.x === null) return;
+    p.push(robotAt(w, F.robot.length, F.robot.width, k, cls, fcls));
+    if (ring) {
+      // claw direction: an arrow leaving the middle of the front edge, along the heading
+      const c = footprintCorners(w.x, w.y, w.h, F.robot.length, F.robot.width);
+      p.push(at((c[0].x + c[1].x) / 2, (c[0].y + c[1].y) / 2, k, '<g transform="rotate(' + f3(w.h) + ')"><path class="claw" d="M0 0V-14M-4.5 -9L0 -14L4.5 -9"/></g>'));
+      p.push(at(w.x, w.y, k, '<circle class="sel-ring" r="12"/>'));
+    }
+  };
+  if (state.hover != null && state.hover !== state.step) one(state.hover, 'hov-fp', 'hov-fp', false);
+  if (state.step != null) one(state.step, 'sel-fp', 'sel-fp-front', true);
+  return p.join('');
+}
+
+function renderPlay(model, state, sel, ctx) {
+  const s = sel.scrub;
+  if (!s) return '';
+  const k = ctx.k, F = model.field, pose = interpPose(s.samples, state.t || 0);
+  if (!pose) return '';
+  const trail = samplesUpTo(drawnPath(s.samples, k), state.t || 0);
+  if (trail.length) trail[trail.length - 1] = pose; // the trail ends where the robot is, not at the thinned path
+  const out = [];
+  if (trail.length > 1) out.push('<path class="run-trail ns" d="' + linePath(trail) + '"/>');
+  out.push(robotAt(pose, F.robot.length, F.robot.width, k, 'play-fp', 'play-front'));
+  out.push(at(pose.x, pose.y, k, '<circle class="play-dot" r="3"/>'));
+  return out.join('');
+}
+
+/* ---------- html panels (strings) ---------- */
+const WARN_ICON = '<svg viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1 13.5 12.5h-13z"/><path d="M6.4 5h1.2v4H6.4zM6.4 9.8h1.2V11H6.4z" fill="var(--solid)"/></svg>';
+const isOpen = (state, key) => (state && state.open && state.open[key] ? ' open' : '');
+const plural = (n, word, many) => n + ' ' + (n === 1 ? word : many || word + 's');
+const when2 = (s) => s.when || 'time not recorded';
+
+function sessionLabel(s) { return SESSION_LABEL[s.kind] || s.kind || 'Session'; }
+
+// The one row that answers first: which route, did the last run hit, where it missed.
+function renderSummary(model, state, sel) {
+  const r = sel.route, s = sel.session;
+  const stat = (label, value, more, plain) => '<div class="stat"><dt>' + label + '</dt><dd' + (plain ? ' class="plain"' : '') + '>' + value + '</dd>' + (more ? '<span class="more">' + more + '</span>' : '') + '</div>';
+  let title, sub = '', stats = [];
+  if (sel.frame === 'local') {
+    const pd = pushDistances(s);
+    title = 'Push test';
+    sub = esc(when2(s));
+    stats = [stat('Pushes', String(pd.rows.length)), stat('Mean', pd.mean !== null ? fmt(pd.mean, 2) + ' in' : 'n/a'), stat('Spread', pd.spread !== null ? fmt(pd.spread, 2) + ' in' : 'n/a')];
+  } else {
+    title = r ? 'Route ' + esc(r.slot) : s ? esc(sessionLabel(s)) : 'No route selected';
+    if (r) sub = esc(r.note || (s ? sessionLabel(s) + ', ' + when2(s) : r.steps.length + ' steps'));
+    else if (s) sub = esc(when2(s)) + '. No cleaned route here: routes come from autopath.py on the programmer\'s computer.';
+    else if (model.sessions.length) sub = 'Pick a session to see it on the field.';
+    const latest = lastRun(model, r), run = sel.runSession || latest;
+    if (run) {
+      const sm = runSummary(sel.runSession ? sel.rows : missRows(r, run), run), label = run === latest ? 'Last run' : 'This run';
+      if (sm.worstIn !== null) {
+        const rt = rateIn(sm.worstIn);
+        stats.push(stat(label, '<i class="' + rt + '"></i>' + fmt(sm.worstIn, 2) + ' in<span class="sr">, rated ' + rt + '</span>', 'worst, step ' + sm.worstInStep));
+      } else stats.push(stat(label, '<i class="idle"></i>No scored steps', '', true));
+      if (r) stats.push(stat('Pins planned', pinsTotal(r)));
+      stats.push(stat('Run time', fmtS(sm.total)));
+    } else {
+      stats.push(stat('Last run', '<i class="idle"></i>No run yet', '', true));
+      if (r) stats.push(stat('Pins planned', pinsTotal(r)), stat('Estimate', isNum(r.checks.estimated_s) ? fmt(r.checks.estimated_s, 1) + ' s' : 'n/a'));
+    }
+  }
+  return '<div class="sum-row"><div class="sum-title"><h2>' + title + '</h2>' + (sub ? '<p class="sum-sub">' + sub + '</p>' : '') + '</div><dl class="stats">' + stats.join('') + '</dl></div>' +
+    (model.note ? '<p class="notel">' + esc(model.note) + '</p>' : '');
+}
+function pinsTotal(r) {
+  const k = Object.keys(r.checks.pins);
+  return k.length ? String(k.reduce((a, g) => a + r.checks.pins[g], 0)) : 'n/a';
+}
+
+function renderWarn(model, sel, state) {
+  const items = [];
+  let bad = false;
+  const li = (who, text, cls) => '<li' + (cls ? ' class="' + cls + '"' : '') + '><span class="who">' + esc(who) + '</span><br>' + esc(text) + '</li>';
+  arr(model.rejected).forEach((x) => items.push(li(x.file, x.text)));
+  model.routes.forEach((r) => r.checks.warnings.forEach((w) => items.push(li('Route ' + r.slot, w))));
+  (sel.contactList || []).forEach((c) => {
+    if (c.severity === 'bad') bad = true;
+    items.push(li('Route ' + sel.route.slot + ', step ' + c.step, c.text, c.severity === 'bad' ? 'bad' : ''));
+  });
+  if (!items.length) {
+    return model.routes.length ? '<div class="calmline"><i class="good"></i>No warnings on the selected route</div>' : '<div class="calmline"><i></i>No routes, so no route warnings</div>';
+  }
+  return '<details class="disc warnline' + (bad ? ' bad' : '') + '" data-keep="warn"' + isOpen(state, 'warn') + '><summary>' + WARN_ICON + '<span>' + plural(items.length, 'warning') + '</span></summary><ul class="warnlist">' + items.join('') + '</ul></details>';
+}
+
+function renderLists(model, state) {
+  const p = [];
+  p.push('<div class="grouphead">Routes <span class="num">' + model.routes.length + '</span></div>');
+  if (!model.routes.length) p.push('<p class="listnote">None yet. Clean a teach session with <code>autopath.py clean</code>.</p>');
+  else {
+    p.push('<ul class="rowlist">');
+    model.routes.forEach((r, i) => {
+      const pins = pinsTotal(r);
+      const meta = [plural(r.steps.length, 'step'), isNum(r.checks.estimated_s) ? 'about ' + fmt(r.checks.estimated_s, 1) + ' s' : '', pins !== 'n/a' ? pins + (pins === '1' ? ' Pin' : ' Pins') : ''].filter(Boolean);
+      p.push('<li><button type="button" class="row" data-key="route-' + i + '" data-route="' + i + '" aria-pressed="' + (state.route === i) + '"><span class="row-t">Route ' + esc(r.slot) + '</span><span class="row-x txt">' + (r.start.kind === 'pose' ? 'pose start' : 'after opening') + '</span>' +
+        (r.note ? '<span class="row-note">' + esc(r.note) + '</span>' : '') + '<span class="row-m">' + esc(meta.join(' · ')) + '</span></button></li>');
+    });
+    p.push('</ul>');
+  }
+  const groups = [['teach', 'Taught', (s) => s.kind.indexOf('teach') === 0], ['run', 'Runs', (s) => s.kind === 'run'], ['push', 'Push tests', (s) => s.kind === 'push']];
+  const shown = new Set();
+  p.push('<div class="grouphead">Sessions <span class="num">' + model.sessions.length + '</span>' + (state.session ? '<button type="button" class="linkbtn" data-key="clear" data-clear="1">Clear</button>' : '') + '</div>');
+  if (!model.sessions.length) p.push('<p class="listnote">No sessions yet.</p>');
+  groups.concat([['other', 'Other', () => true]]).forEach((g) => {
+    const list = model.sessions.filter((s) => !shown.has(s.id) && g[2](s)).sort((a, b) => (a.when < b.when ? 1 : a.when > b.when ? -1 : 0));
+    if (!list.length) return;
+    list.forEach((s) => shown.add(s.id));
+    p.push('<div class="grouphead sub">' + g[1] + '</div><ul class="rowlist">');
+    list.forEach((s) => {
+      const route = model.routes.find((r) => r.slot === s.for_slot) || null;
+      let extra = '';
+      if (s.kind === 'run') {
+        const sum = runSummary(missRows(route, s), s);
+        extra = sum.worstIn !== null ? '<span class="row-x pill ' + rateIn(sum.worstIn) + '"><i class="' + rateIn(sum.worstIn) + '"></i>' + fmt(sum.worstIn, 2) + ' in</span>' : '<span class="row-x txt">no scored steps</span>';
+      } else if (s.kind === 'push') {
+        extra = '<span class="row-x txt">' + plural(s.marks.filter((m) => m.type === 'push').length, 'push', 'pushes') + '</span>';
+      }
+      const bits = [when2(s), s.side ? 'side ' + s.side : '', s.samples.length ? fmt(s.duration, 1) + ' s' : 'no samples', s.for_slot ? 'route ' + s.for_slot : ''].filter(Boolean);
+      p.push('<li><button type="button" class="row" title="' + esc(s.id) + '" data-key="ses-' + esc(s.id) + '" data-session="' + esc(s.id) + '" aria-pressed="' + (state.session === s.id) + '"><span class="row-t">' + esc(sessionLabel(s)) + '</span>' + extra + '<span class="row-m">' + esc(bits.join(' · ')) + '</span></button></li>');
+    });
+    p.push('</ul>');
+  });
+  return p.join('');
+}
+
+function layerSwatch(id) {
+  const s = {
+    route: '<line x1="1" y1="6" x2="21" y2="6" stroke="var(--route)" stroke-width="2.5" stroke-linecap="round"/>',
+    raw: '<path d="M1 8 C5 2,8 10,12 5 S18 7,21 4" fill="none" stroke="var(--raw)" stroke-width="1.4"/>',
+    run: '<line x1="1" y1="6" x2="21" y2="6" stroke="var(--run)" stroke-width="2.2" stroke-linecap="round"/>',
+    foot: '<rect x="4" y="0.5" width="14" height="11" fill="none" stroke="var(--route)" stroke-width="1" opacity="0.7"/><line x1="4" y1="0.5" x2="18" y2="0.5" stroke="var(--route)" stroke-width="2.5"/>',
+    sweep: '<rect x="1" y="1" width="20" height="10" fill="var(--route)" fill-opacity="0.12" stroke="var(--route)" stroke-dasharray="3 2"/>',
+    tags: '<rect x="3" y="-1" width="16" height="14" rx="3.5" fill="var(--solid)" stroke="var(--text-2)"/><text x="11" y="9.5" font-size="10" font-weight="600" text-anchor="middle" fill="var(--text)">3</text>',
+  };
+  return '<svg class="sw" viewBox="0 0 22 12" aria-hidden="true">' + s[id] + '</svg>';
+}
+const LAYER_DEFS = [['route', 'Cleaned route'], ['raw', 'Raw hand path'], ['run', 'Run path'], ['foot', 'Footprints'], ['sweep', 'Swept outline'], ['tags', 'Step numbers']];
+function renderLayers(state) {
+  const seg = (v, label, on) => '<button type="button" data-key="view-' + v + '" data-view="' + v + '" aria-pressed="' + on + '">' + label + '</button>';
+  const view = '<div class="seg" role="group" aria-label="Map view">' + seg('fit', 'Fit route', state.view !== 'field') + seg('field', 'Whole field', state.view === 'field') + '</div>';
+  const rows = LAYER_DEFS.map((d) => '<button type="button" class="menu-row" data-key="layer-' + d[0] + '" data-layer="' + d[0] + '" aria-pressed="' + !!state.layers[d[0]] + '"><svg class="chk" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6.5 5 9.5 10 3"/></svg>' + layerSwatch(d[0]) + '<span>' + esc(d[1]) + '</span></button>').join('');
+  return view + '<details class="menu" data-keep="layers"' + isOpen(state, 'layers') + '><summary><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.5 13 4.7 7 8 1 4.7z"/><path d="M1 7.6 7 10.9 13 7.6"/></svg>Layers</summary><div class="menu-pop" role="group" aria-label="Map layers">' + rows + '</div></details>';
+}
+
+function legendSvg(inner) { return '<svg viewBox="-13 -10 26 20" aria-hidden="true">' + inner + '</svg>'; }
+function renderLegend(state) {
+  const it = (ic, tx) => '<li>' + legendSvg(ic) + '<span>' + tx + '</span></li>';
+  return '<div class="panel legendbox"><details class="disc" data-keep="legend"' + isOpen(state, 'legend') + '><summary>Legend and how checks work</summary><div><ul class="legend">' +
+    it('<circle r="9" fill="none" stroke="var(--goal-ally)" stroke-width="1.5"/><circle r="5.5" fill="var(--goal-ally)" fill-opacity="0.16" stroke="var(--goal-ally)" stroke-width="2"/>', 'Goal, our alliance') +
+    it('<circle r="5.5" fill="var(--solid)" stroke="var(--goal-neu)" stroke-width="2.5"/>', 'Goal, neutral') +
+    it('<circle r="9" fill="none" stroke="var(--goal-opp)" stroke-width="1.5" stroke-dasharray="3 2.5"/><circle r="5.5" fill="var(--goal-opp)" fill-opacity="0.22" stroke="var(--goal-opp)" stroke-width="2"/><path d="M-3.4 -3.4L3.4 3.4M3.4 -3.4L-3.4 3.4" stroke="var(--goal-opp)" stroke-width="2"/>', 'Goal, opponent alliance') +
+    it('<g class="sym">' + sym('grab_pin', 6.5, 'sym') + '</g>', 'Grab Pin') +
+    it(sym('grab_stack', 6.5, 'sym'), 'Grab stack (Cup + Pin)') +
+    it(sym('drop', 6.5, 'sym'), 'Drop') +
+    it(sym('toggle', 6.5, 'sym'), 'Toggle') +
+    it(sym('push', 6.5, 'sym'), 'Push mark (push test)') +
+    it(sym('grab_stack', 5.2, 'sym raw'), 'Hollow: a mark made by hand, raw position') +
+    it('<rect x="-6" y="-2" width="12" height="4" fill="var(--toggle)"/>', 'Toggle bar on the wall') +
+    it('<circle r="4" fill="none" stroke="var(--obj)" stroke-width="1.5"/><circle r="1.8" fill="var(--obj)"/>', 'Cup stack, Cup, Pin on the field') +
+    it('<line x1="-11" y1="0" x2="11" y2="0" stroke="var(--route)" stroke-width="2.5" stroke-dasharray="5 3.5"/>', 'Dashed leg: driven in reverse') +
+    it('<path d="M-9 8L9 -8" stroke="var(--text-2)" stroke-width="1.5" stroke-dasharray="5 3.5"/>', 'Autonomous Line, y = x') +
+    '</ul><p class="hint">Heading 0 is up, clockwise is positive. A number on a Goal is how many Pins the route puts on it. Step numbers match <code>nudge</code>. Goal radius ' + '2.4 in and the robot box are from field.hpp notes, not measured here.</p>' +
+    '<p class="hint">Footprint contacts are checked on this page: the robot box at each waypoint and along straight legs between them, against Goals, the Autonomous Line and the wall. Each Drop may touch its own Goal. The hand path is not checked.</p></div></details></div>';
+}
+
+function stepDetailHtml(model, state, sel, i) {
+  const route = sel.route;
+  const s = route.steps[i], w = route.wp[i];
+  if (!s) return '';
+  const kv = [];
+  const na = '<span class="na" title="not in the data">n/a</span>';
+  kv.push(['Kind', esc(KIND_LABEL[s.kind] || s.kind)]);
+  if (route.opening && w && w.x !== null && route.steps.findIndex((q, j) => route.wp[j] && route.wp[j].x !== null) === i) {
+    kv.push(['After opening', fmt(route.opening.x) + ', ' + fmt(route.opening.y) + ' in' + (route.opening.source === 'teach' ? ' <span class="muted">(first teach sample)</span>' : ' <span class="muted">(approx., first waypoint)</span>')]);
+  }
+    if (w && w.x !== null) kv.push(['Position', fmt(w.x) + ', ' + fmt(w.y) + ' in' + (w.src === 'carried' ? ' <span class="muted">(where the robot already is)</span>' : '')]);
+  else kv.push(['Position', na]);
+  kv.push(['Heading', w && w.hKnown ? fmt(w.h) + ' deg' : na]);
+  if (s.raw_heading !== null) kv.push(['Raw heading', fmt(s.raw_heading) + ' deg' + (s.heading !== null && Math.abs(wrap180(s.raw_heading - s.heading)) > 0.5 ? ' <span class="muted">(snapped to ' + fmt(s.heading) + ')</span>' : '')]);
+  if (s.kind === 'drop') kv.push(['Lift height', s.lift !== null ? fmt(s.lift, 0) + ' deg' : na], ['Goal', s.goal ? esc(shortName(s.goal)) : na]);
+  if (s.kind === 'grab_stack' || s.kind === 'grab_pin') kv.push(['Lift for next drop', s.drop_lift !== null ? fmt(s.drop_lift, 0) + ' deg' : na]);
+  if (s.kind === 'drive') kv.push(['Direction', s.forwards === null ? na : s.forwards ? 'forwards' : 'in reverse'], ['Approach', s.approach === null ? na : s.approach ? 'yes, slowed for a mark' : 'no']);
+  if (s.kind === 'toggle') kv.push(['Action', 'Turns the Toggle at this spot']);
+  const row = sel.rows ? sel.rows.find((r) => r.idx === i) : null;
+  if (sel.runSession) {
+    if (row && row.reached) {
+      kv.push(['Run actual', fmt(row.actual.x) + ', ' + fmt(row.actual.y) + ' in, ' + fmt(row.actual.h) + ' deg']);
+      kv.push(['Run target', fmt(row.target.x) + ', ' + fmt(row.target.y) + ' in, ' + fmt(row.target.h) + ' deg']);
+      kv.push(['Miss', (row.missIn !== null ? '<span class="pill ' + row.ratingIn + '"><i class="' + row.ratingIn + '"></i>' + fmt(row.missIn, 2) + ' in</span> ' : '') + (row.missDeg !== null ? '<span class="pill ' + row.ratingDeg + '"><i class="' + row.ratingDeg + '"></i>' + fmt(row.missDeg, 1) + ' deg</span>' : '') + (row.missIn === null && row.missDeg === null ? '<span class="muted">not scored for this step kind</span>' : '')]);
+      kv.push(['Finished at', fmt(row.t, 2) + ' s' + (row.ok === false ? ' <span class="pill bad"><i class="bad"></i>step reported failure</span>' : '')]);
+    } else kv.push(['Run', '<span class="muted">no result logged for this step</span>']);
+  }
+  const cs = contactsAt(sel.contactList, i);
+  if (cs.length) kv.push(['Map check', cs.map((c) => '<span class="' + (c.severity === 'bad' ? 'bad' : 'warn') + '" style="stroke:none">' + esc(c.text) + '</span>').join('<br>')]);
+  return '<h3>Step ' + i + ': ' + esc(KIND_LABEL[s.kind] || s.kind) + '</h3><dl class="kv">' + kv.map((r) => '<dt>' + r[0] + '</dt><dd' + (/^-?\d/.test(r[1]) ? ' class="num"' : '') + '>' + r[1] + '</dd>').join('') + '</dl>';
+}
+
+function pushPanel(sel) {
+  const pd = pushDistances(sel.session);
+  let h = '<h3>Push test</h3>';
+  if (!pd.rows.length) return h + '<p class="hint">No push marks in this session.</p>';
+  if (!pd.hasSamples) return h + '<p class="hint">' + pd.rows.length + ' push mark' + (pd.rows.length === 1 ? '' : 's') + ' found, but this session has no samples, so no distances are shown.</p>';
+  const mx = pd.max || 1;
+  h += '<p class="hint" style="margin-bottom:8px">Straight-line distance from the first sample (the start pose) to each push mark. This assumes the robot was dragged back to the start each time. The gate verdict (pod and motor inches) comes from <code>autopath.py gate</code>.</p>';
+  h += pd.rows.map((r) => '<div class="pinrow"><span>Push ' + r.n + ' <span class="muted">at ' + fmt(r.t, 1) + ' s</span></span><span>' + fmt(r.dist, 2) + ' in</span></div>' + (r.dist !== null ? '<span class="minibar" style="width:' + Math.max(2, (r.dist / mx) * 100).toFixed(1) + '%"></span>' : '')).join('');
+  h += '<dl class="kv" style="margin-top:10px"><dt>Mean</dt><dd>' + fmt(pd.mean, 2) + ' in</dd><dt>Spread</dt><dd>' + (pd.spread !== null ? fmt(pd.spread, 2) + ' in (max minus min)' : 'needs 2 or more pushes') + '</dd></dl>';
+  return h;
+}
+
+function renderInspector(model, state, sel) {
+  const p = [];
+  const active = state.hover != null ? state.hover : state.step;
+  if (sel.frame === 'local') p.push('<div class="panel pad">' + pushPanel(sel) + '</div>');
+  else if (sel.route && active != null && sel.route.steps[active]) p.push('<div class="panel pad" id="stepbox">' + stepDetailHtml(model, state, sel, active) + '</div>');
+  else if (sel.route) {
+    const r = sel.route, pins = Object.keys(r.checks.pins), cl = sel.contactList;
+    let h = '<div class="sect"><h3>Route ' + esc(r.slot) + '</h3><dl class="kv">';
+    h += '<dt>Start</dt><dd>' + (r.start.kind === 'pose' ? (r.start.x !== null ? fmt(r.start.x) + ', ' + fmt(r.start.y) + ' in, ' + fmt(r.start.theta || 0) + ' deg' : 'pose not given') : 'after the opening') + '</dd>';
+    h += '<dt>Steps</dt><dd class="num">' + r.steps.length + '</dd>';
+    h += '<dt>Estimate</dt><dd>' + (isNum(r.checks.estimated_s) ? fmt(r.checks.estimated_s, 1) + ' s, a rough tool estimate' : 'n/a') + '</dd>';
+    if (r.source) h += '<dt>Source</dt><dd class="id">' + esc(r.source) + '</dd>';
+    h += '</dl></div>';
+    h += '<div class="sect"><h3>Pins per Goal</h3>' + (pins.length ? pins.map((g) => '<div class="pinrow"><span>' + esc(shortName(g)) + '</span><b class="num">' + r.checks.pins[g] + '</b></div>').join('') : '<p class="hint">Not in this route\'s checks.</p>') + '</div>';
+    h += '<div class="sect"><h3>Footprint contacts</h3>' + (cl.length ? '<ul class="contactlist">' + cl.map((c) => '<li class="' + (c.severity === 'bad' ? 'bad' : 'warn') + '">Step ' + c.step + ': ' + esc(c.text) + '</li>').join('') + '</ul>' : '<p class="hint">None found.</p>') + '</div>';
+    h += '<div class="sect"><p class="hint">Click or tap a step number or table row. Left and right arrows move a step. Space plays the selected session.</p></div>';
+    p.push('<div class="panel pad">' + h + '</div>');
+  } else {
+    const s = sel.session;
+    p.push('<div class="panel pad">' + (s ? '<h3>' + esc(sessionLabel(s)) + '</h3><dl class="kv"><dt>Recorded</dt><dd>' + esc(when2(s)) + '</dd><dt>Samples</dt><dd class="num">' + s.samples.length + '</dd><dt>Marks</dt><dd class="num">' + s.marks.length + '</dd><dt>Length</dt><dd class="num">' + fmt(s.duration, 1) + ' s</dd><dt>Source</dt><dd class="id">' + esc(s.id) + '</dd></dl>' : '<h3>Nothing selected</h3><p class="hint">Pick a session to draw it on the field.</p>') + '</div>');
+  }
+  p.push(renderLegend(state));
+  return p.join('');
+}
+
+const RATE_WORD = { good: 'good', warn: 'warn', bad: 'bad' };
+function kindIcon(kind) {
+  if (MARK_KINDS.has(kind) || kind === 'push') return '<svg viewBox="-9 -9 18 18" aria-hidden="true">' + sym(kind, 6.5, 'sym') + '</svg>';
+  return '<svg viewBox="-9 -9 18 18" aria-hidden="true"><circle r="3.2" fill="var(--route)"/></svg>';
+}
+function ratingCell(r) {
+  if (!r) return '<span class="na">n/a</span>';
+  return '<span class="pill ' + r + '"><i class="' + r + '"></i>' + RATE_WORD[r] + '</span>';
+}
+
+function renderSteps(model, state, sel, cur) {
+  const route = sel.route, rows = sel.rows;
+  if (sel.frame === 'local') {
+    return '<div class="empty"><b>Push test selected</b>Per-step tables belong to routes. Pick a route or a run to see one. The push distances are in the panel beside the plot.</div>';
+  }
+  if (!route && !rows) {
+    return model.sessions.length
+      ? '<div class="empty"><b>No route to tabulate</b>These sessions have no cleaned route here. A route comes from <code>autopath.py</code> on the programmer\'s computer.</div>'
+      : '<div class="empty"><b>No route to tabulate</b>The step table fills in when a route is loaded. Teach a route on the robot, then run <code>python3 tools/autopath/autopath.py go</code> to rebuild this page.</div>';
+  }
+  const run = !!sel.runSession;
+  let head = '<header><h2>' + (route ? 'Route ' + esc(route.slot) + ' steps' : 'Run events') + '</h2>';
+  if (run) {
+    const sm = runSummary(rows, sel.runSession);
+    head += '<span class="sumline">Run <span class="id">' + esc(sel.runSession.id) + '</span>: total time <b>' + fmtS(sm.total) + '</b>. ' +
+      (sm.scored ? sm.good + ' good, ' + sm.warn + ' warn, ' + sm.bad + ' bad of ' + sm.scored + ' position-scored steps. Worst <b>' + fmt(sm.worstIn, 2) + ' in</b> at step ' + sm.worstInStep + '.' : 'No position-scored steps.') +
+      (sm.worstDeg !== null ? ' Worst heading miss <b>' + fmt(sm.worstDeg, 1) + ' deg</b> at step ' + sm.worstDegStep + '.' : '') +
+      (sm.failed ? ' ' + sm.failed + ' step' + (sm.failed === 1 ? '' : 's') + ' reported failure.' : '') + (sm.notReached ? ' ' + sm.notReached + ' step' + (sm.notReached === 1 ? '' : 's') + ' have no logged result.' : '') +
+      (sel.runSession.unitGuessed ? ' <span class="muted">Times read as ' + sel.runSession.unit + ' (guessed).</span>' : '') + '</span>' +
+      '<span class="muted">Good under ' + LIMITS.goodIn + ' in, warn under ' + LIMITS.warnIn + ' in, bad above. Heading: under ' + LIMITS.goodDeg + ' / ' + LIMITS.warnDeg + ' deg.</span>';
+  } else {
+    head += '<span class="muted">Pick a run to add actual pose and miss columns.</span>';
+  }
+  head += '</header>';
+  const cols = ['<th class="n">#</th>', '<th>Step</th>', '<th class="n' + (run ? ' opt' : '') + '">Target x, y (in)</th>', '<th class="n' + (run ? ' opt' : '') + '">Heading (deg)</th>', '<th class="n opt">Lift (deg)</th>'];
+  if (run) cols.push('<th class="n opt">Actual x, y (in)</th>', '<th class="n opt">Actual h (deg)</th>', '<th class="n">Miss (in)</th>', '<th class="n">Miss (deg)</th>', '<th>Result</th>');
+  else cols.push('<th>Notes</th>');
+  const body = [];
+  const rowFor = (i) => (rows ? rows.find((r) => r.idx === i) : null);
+  const mkRow = (i, kind, s, w, row) => {
+    const na = '<span class="na" title="not in the data">n/a</span>';
+    const dash = '<span class="muted" title="not a target for this step kind">-</span>';
+    const pos = NO_POS.has(kind) ? dash : row && row.target && isNum(row.target.x) ? fmt(row.target.x) + ', ' + fmt(row.target.y) : w && w.x !== null ? fmt(w.x) + ', ' + fmt(w.y) : na;
+    const hd = kind === 'toggle' || kind === 'opening' ? dash : row && row.target && isNum(row.target.h) ? fmt(row.target.h) : w && w.hKnown ? fmt(w.h) : na;
+    const lift = s ? (s.kind === 'drop' ? (s.lift !== null ? fmt(s.lift, 0) : na) : s.drop_lift !== null && (s.kind === 'grab_stack' || s.kind === 'grab_pin') ? fmt(s.drop_lift, 0) + ' <span class="muted" title="lift for the next drop">next</span>' : '<span class="muted">-</span>') : '<span class="muted">-</span>';
+    const cls = (state.step === i ? ' sel' : '') + (cur === i ? ' cur' : '') + (run && !(row && row.reached) && i >= 0 ? ' unreached' : '');
+    let tds = '<td class="n"><button type="button" class="stepbtn" data-key="step-' + i + '" data-step="' + i + '" aria-label="Select step ' + i + '">' + (i < 0 ? 'open' : i) + '</button></td><td><span class="kindcell">' + kindIcon(kind) + esc(KIND_LABEL[kind] || kind) + '</span></td><td class="n' + (run ? ' opt' : '') + '">' + pos + '</td><td class="n' + (run ? ' opt' : '') + '">' + hd + '</td><td class="n opt">' + lift + '</td>';
+    if (run) {
+      if (row && row.reached && row.actual) {
+        tds += '<td class="n opt">' + (isNum(row.actual.x) ? fmt(row.actual.x) + ', ' + fmt(row.actual.y) : na) + '</td><td class="n opt">' + fmt(row.actual.h) + '</td>';
+        tds += '<td class="n">' + (row.missIn !== null ? '<span class="pill ' + row.ratingIn + '">' + fmt(row.missIn, 2) + '</span>' : na) + '</td>';
+        tds += '<td class="n">' + (row.missDeg !== null ? '<span class="pill ' + row.ratingDeg + '">' + fmt(row.missDeg, 1) + '</span>' : na) + '</td>';
+        tds += '<td>' + (row.ok === false ? '<span class="pill bad"><i class="bad"></i>failed</span>' : row.rating ? ratingCell(row.rating) : row.ok === true ? '<span class="muted">ok</span>' : ratingCell(null)) + '</td>';
+      } else tds += '<td colspan="5" class="muted">' + (i < 0 ? 'no opening event logged' : 'no result logged for this step') + '</td>';
+    } else {
+      const notes = [];
+      if (s) {
+        if (s.kind === 'drive') { if (s.forwards === false) notes.push('reverse'); if (s.approach) notes.push('approach'); }
+        if (s.kind === 'drop' && s.goal) notes.push(shortName(s.goal));
+        if (s.raw_heading !== null && s.heading !== null && Math.abs(wrap180(s.raw_heading - s.heading)) > 0.5) notes.push('snapped from ' + fmt(s.raw_heading) + ' deg');
+      }
+      tds += '<td class="muted">' + esc(notes.join(', ')) + '</td>';
+    }
+    return '<tr data-step="' + i + '" class="' + cls.trim() + '">' + tds + '</tr>';
+  };
+  if (rows) { const o = rowFor(-1); if (o) body.push(mkRow(-1, 'opening', null, null, o)); }
+  if (route) route.steps.forEach((s, i) => body.push(mkRow(i, s.kind, s, route.wp[i], rowFor(i))));
+  else rows.filter((r) => r.idx >= 0).forEach((r) => body.push(mkRow(r.idx, r.kind, null, null, r)));
+  const unit = '';
+  return head + '<div class="tablewrap"><table><thead><tr>' + cols.join('') + '</tr></thead><tbody>' + body.join('') + '</tbody></table></div>' + unit;
+}
+
+function renderTicks(sel) {
+  const s = sel.scrub;
+  if (!s || !(s.duration > 0)) return '';
+  const out = [];
+  if (sel.rows && sel.runSession === s) {
+    sel.rows.forEach((r) => { if (r.reached && isNum(r.t)) out.push('<span class="' + (r.ok === false ? 'bad' : r.rating || '') + '" style="left:' + ((r.t / s.duration) * 100).toFixed(2) + '%" title="Step ' + r.idx + ' done at ' + fmt(r.t, 2) + ' s"></span>'); });
+  } else {
+    s.marks.forEach((m) => out.push('<span style="left:' + ((m.t / s.duration) * 100).toFixed(2) + '%" title="' + esc(KIND_LABEL[m.kind] || m.kind) + ' mark at ' + fmt(m.t, 2) + ' s"></span>'));
+  }
+  return out.join('');
+}
+
+function playInfoText(sel, t) {
+  const s = sel.scrub;
+  if (!s) return sel.frame === 'local' ? 'This push test has no samples, so there is nothing to play.' : 'Pick a run or taught session to play it back.';
+  const e = activeEvent(s, t);
+  const rows = sel.rows;
+  if (rows && e) {
+    const r = rows.find((x) => x.reached && x.t === e.t && (e.step === null ? true : x.idx === e.step));
+    return 'Last result: ' + (e.step !== null && e.step < 0 ? 'opening' : 'step ' + e.step) + ' (' + (KIND_LABEL[e.type] || e.type || 'step') + ') at ' + fmt(e.t, 2) + ' s' + (r && r.missIn !== null ? ', miss ' + fmt(r.missIn, 2) + ' in' : '') + '.';
+  }
+  const mk = s.marks.filter((m) => m.t <= t + 1e-9);
+  if (!rows && mk.length) { const m = mk[mk.length - 1]; return 'Last mark: ' + (KIND_LABEL[m.kind] || m.kind) + ' at ' + fmt(m.t, 2) + ' s.'; }
+  return 'No step result yet at this time.';
+}
+function currentStepAt(sel, t) {
+  if (!sel.runSession) return null;
+  const e = activeEvent(sel.runSession, t);
+  return e && e.step !== null ? e.step : null;
+}
+
+function renderAll(model, state, W) {
+  const sel = resolveSel(model, state);
+  const ctx = frameCtx(model, sel, W, state.view !== 'field', state.layers);
+  const cur = currentStepAt(sel, state.t || 0);
+  return {
+    sel, ctx, viewBox: ctx.vb.map(f3).join(' '),
+    static: renderStatic(model, state, sel, ctx), selLayer: renderSel(model, state, sel, ctx), play: renderPlay(model, state, sel, ctx),
+    summary: renderSummary(model, state, sel), warn: renderWarn(model, sel, state), lists: renderLists(model, state), layers: renderLayers(state), inspector: renderInspector(model, state, sel),
+    steps: renderSteps(model, state, sel, cur), ticks: renderTicks(sel), playinfo: playInfoText(sel, state.t || 0),
+  };
+}
+
+const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normalize, resolveWaypoints, missRows, runSummary, pushDistances, footprintCorners, hull, areaOf, interpPose, circleHitsHull, sweepPoints, contacts, rawSessionFor, layoutTags, fitWindow, openingPoint, displayRoute, startPoseOf, frameCtx, resolveSel, renderAll, renderPlay, fmt, esc, activeEvent, shortName, parseWire, leftFrame, rejectionText, buildModel, sameSession, lastRun, runFitsRoute, pickSelection, thinPath, drawnPath, DEFAULT_FIELD };
+/*</pure>*/
+
+/* ---------- page shell (DOM) ---------- */
+(function () {
+  const EMBED = document.documentElement.classList.contains('embed');
+  const sampleOn = typeof DATA === 'undefined' && !EMBED && typeof window.__SAMPLE_DATA__ !== 'undefined';
+  const rawData = typeof DATA !== 'undefined' ? DATA : sampleOn ? window.__SAMPLE_DATA__ : null;
+  let model = buildModel({ mapData: rawData });
+  model.illustrative = sampleOn; // the banner and watermark mean the embedded sample, never real tool data
+  const $ = (id) => document.getElementById(id);
+  const svg = $('map'), app = $('app');
+  const state = {
+    route: null, session: null, step: null, hover: null, t: 0, playing: false, speed: 1, cleared: false,
+    view: 'fit', open: {},
+    layers: { route: true, raw: true, run: true, foot: false, sweep: false, tags: true },
+  };
+  Object.assign(state, pickSelection(model, null));
+  let W = 560, last = null, raf = 0, lastTs = 0;
+
+  if (model.illustrative) $('samplebadge').hidden = false;
+  if (model.generated) $('gen').textContent = 'Built ' + model.generated;
+
+  const view = () => renderAll(model, state, W);
+  // Writes only what changed, so a list keeps its scroll position and nothing repaints for no reason.
+  const painted = new Map();
+  function put(el, html) { if (painted.get(el) !== html) { painted.set(el, html); el.innerHTML = html; } }
+  function keepFocus(fn) {
+    const a = document.activeElement, key = a && a.dataset ? a.dataset.key : null;
+    fn();
+    if (key) { const n = document.querySelector('[data-key="' + (window.CSS && CSS.escape ? CSS.escape(key) : key) + '"]'); if (n && n !== document.activeElement) n.focus({ preventScroll: true }); }
+  }
+  function setMapNote(v) {
+    let t = '';
+    if (model.illustrative) t += '<b>ILLUSTRATIVE SAMPLE.</b> Hand-written route, synthetic path and run. Not robot data. ';
+    if (v.sel.frame === 'local') t += 'Local frame: the origin is the push test start pose, not a field position.';
+    put($('mapnote'), t ? '<span>' + t + '</span>' : '');
+  }
+  function paintMap(v) {
+    svg.setAttribute('viewBox', v.viewBox);
+    put($('g-static'), v.static);
+    put($('g-sel'), v.selLayer);
+    put($('g-play'), v.play);
+    const r = v.sel.route, ses = v.sel.session;
+    svg.setAttribute('aria-label', 'Field map, ' + (v.sel.frame === 'local' ? 'push test frame' : r ? 'route ' + r.slot + ' with ' + r.steps.length + ' steps' : 'no route loaded') + (ses ? ', session ' + ses.id : ''));
+  }
+  function paintTransport(v) {
+    const s = v.sel.scrub, dur = s ? s.duration : 0, can = !!s && dur > 0;
+    $('scrub').disabled = !can;
+    put($('ticks'), v.ticks);
+    $('dur').textContent = s ? '/ ' + dur.toFixed(2) + ' s' : '';
+    $('btn-play').disabled = !can;
+    app.dataset.noplay = can ? '0' : '1';
+    const hasRoute = !!v.sel.route && v.sel.frame === 'field';
+    $('btn-prev').disabled = !hasRoute; $('btn-next').disabled = !hasRoute;
+    paintTime(v.sel);
+  }
+  function paintTime(sel) {
+    const s = sel.scrub, dur = s ? s.duration : 0;
+    $('time').textContent = (state.t || 0).toFixed(2) + ' s';
+    $('scrub').value = dur > 0 ? Math.round((state.t / dur) * 1000) : 0;
+    $('playinfo').textContent = playInfoText(sel, state.t || 0);
+    $('play-txt').textContent = state.playing ? 'Pause' : 'Play';
+    put($('play-ico'), state.playing ? '<path d="M3 1.5h3.2v11H3zM7.8 1.5H11v11H7.8z"/>' : '<path d="M3 1.5v11l9-5.5z"/>');
+  }
+  function paintChrome(v) {
+    keepFocus(() => {
+      put($('sumrow'), v.summary);
+      put($('warn'), v.warn);
+      put($('listbody'), v.lists);
+      put($('layers'), v.layers);
+      put($('inspector'), v.inspector);
+      put($('steps'), v.steps);
+    });
+    const n = model.routes.length + model.sessions.length;
+    $('listsum').textContent = 'Routes and sessions (' + n + ')';
+    const empty = !n && !model.rejected.length;
+    app.dataset.empty = empty ? '1' : '0';
+    app.dataset.frame = v.sel.frame;
+    $('emptybox').hidden = !empty;
+  }
+  function refresh() { last = view(); paintMap(last); setMapNote(last); paintChrome(last); paintTransport(last); }
+  // Hover and playback run often, so they redraw only their own layer from the selection already worked out.
+  function refreshHover() {
+    put($('g-sel'), renderSel(model, state, last.sel, last.ctx));
+    keepFocus(() => put($('inspector'), renderInspector(model, state, last.sel)));
+  }
+  function refreshStep() {
+    put($('g-static'), renderStatic(model, state, last.sel, last.ctx)); // the number tag highlight lives here
+    put($('g-sel'), renderSel(model, state, last.sel, last.ctx));
+    keepFocus(() => {
+      put($('inspector'), renderInspector(model, state, last.sel));
+      put($('steps'), renderSteps(model, state, last.sel, currentStepAt(last.sel, state.t || 0)));
+    });
+  }
+  function refreshPlay() {
+    put($('g-play'), renderPlay(model, state, last.sel, last.ctx));
+    paintTime(last.sel);
+    document.querySelectorAll('#steps tbody tr.cur').forEach((r) => r.classList.remove('cur'));
+    const c = currentStepAt(last.sel, state.t);
+    if (c !== null) { const tr = document.querySelector('#steps tbody tr[data-step="' + c + '"]'); if (tr) tr.classList.add('cur'); }
+  }
+
+  /* ----- actions ----- */
+  function stop() { state.playing = false; cancelAnimationFrame(raf); }
+  function selectRoute(i) {
+    stop();
+    state.route = i; state.step = null; state.hover = null; state.t = 0; state.cleared = false;
+    const s = model.sessions.find((x) => x.id === state.session), r = model.routes[i];
+    if (!s || (s.kind !== 'push' && s.for_slot !== r.slot)) { const run = lastRun(model, r); state.session = run ? run.id : null; }
+    refresh();
+  }
+  function selectSession(id) {
+    stop();
+    if (state.session === id) { state.session = null; state.cleared = true; } else {
+      state.session = id; state.cleared = false;
+      const s = model.sessions.find((x) => x.id === id);
+      const cur = state.route != null ? model.routes[state.route] : null;
+      let ri = state.route;
+      if (s && s.for_slot != null) { const f = model.routes.findIndex((r) => r.slot === s.for_slot); if (f >= 0) ri = f; }
+      else if (s && s.kind === 'run' && !(cur && runFitsRoute(cur, s))) { const f = model.routes.findIndex((r) => runFitsRoute(r, s)); ri = f >= 0 ? f : null; }
+      if (ri !== state.route) { state.route = ri; state.step = null; }
+    }
+    state.t = 0; state.hover = null;
+    refresh();
+  }
+  function seekToStep(i) {
+    const rows = last.sel.rows;
+    if (!rows) return;
+    const r = rows.find((x) => x.idx === i && x.reached);
+    if (r && isNum(r.t)) state.t = Math.min(r.t, last.sel.scrub ? last.sel.scrub.duration : r.t);
+  }
+  function selectStep(i, seek) {
+    if (!model.routes.length || state.route == null) return;
+    state.step = i;
+    if (seek) seekToStep(i);
+    refreshStep();
+    refreshPlay();
+    const r = model.routes[state.route];
+    $('live').textContent = r.steps[i] ? 'Step ' + i + ', ' + (KIND_LABEL[r.steps[i].kind] || r.steps[i].kind) : '';
+  }
+  function stepBy(d) {
+    const r = state.route != null ? model.routes[state.route] : null;
+    if (!r || !r.steps.length) return;
+    const n = r.steps.length;
+    const next = state.step == null ? (d > 0 ? 0 : n - 1) : Math.max(0, Math.min(n - 1, state.step + d));
+    selectStep(next, true);
+  }
+  function tick(ts) {
+    if (!state.playing) return;
+    const dt = Math.min(0.1, (ts - lastTs) / 1000); lastTs = ts;
+    const s = last.sel.scrub;
+    state.t += dt * state.speed;
+    if (s && state.t >= s.duration) { state.t = s.duration; state.playing = false; }
+    refreshPlay();
+    if (state.playing) raf = requestAnimationFrame(tick);
+  }
+  function togglePlay() {
+    const s = last.sel.scrub;
+    if (!s || !(s.duration > 0)) return;
+    if (state.playing) { stop(); refreshPlay(); return; }
+    if (state.t >= s.duration - 1e-6) state.t = 0;
+    state.playing = true; lastTs = performance.now(); raf = requestAnimationFrame(tick);
+    refreshPlay();
+  }
+
+  /* ----- host ----- */
+  function load(input) {
+    stop();
+    const slot = state.route != null && model.routes[state.route] ? model.routes[state.route].slot : null;
+    model = buildModel(input);
+    model.illustrative = false; // only the page's own sample is ever a sample
+    $('samplebadge').hidden = true;
+    $('gen').textContent = '';
+    Object.assign(state, pickSelection(model, { slot, session: state.session, step: state.step, cleared: state.cleared }));
+    state.hover = null; state.t = 0;
+    W = box.clientWidth || W;
+    refresh();
+    syncLists();
+    return { routes: model.routes.length, sessions: model.sessions.length, rejected: model.rejected.length };
+  }
+  window.ScourgeMap = { load };
+  window.addEventListener('message', (e) => {
+    if (e.source === window.parent && e.data && e.data.type === 'scourge-map-load') load(e.data.input);
+  });
+
+  /* ----- events ----- */
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest ? e.target : null;
+    if (!el) return;
+    const menu = document.querySelector('details.menu[open]');
+    if (menu && !el.closest('details.menu')) menu.open = false;
+    let n;
+    if ((n = el.closest('[data-route]'))) return selectRoute(+n.dataset.route);
+    if ((n = el.closest('[data-session]'))) return selectSession(n.dataset.session);
+    if (el.closest('[data-clear]')) { if (state.session) selectSession(state.session); return; }
+    if ((n = el.closest('[data-view]'))) { state.view = n.dataset.view; last = view(); paintMap(last); keepFocus(() => put($('layers'), last.layers)); return; }
+    if ((n = el.closest('[data-layer]'))) { state.layers[n.dataset.layer] = !state.layers[n.dataset.layer]; last = view(); paintMap(last); keepFocus(() => put($('layers'), last.layers)); return; }
+    if ((n = el.closest('#speed [data-speed]'))) { state.speed = +n.dataset.speed; document.querySelectorAll('#speed button').forEach((b) => b.setAttribute('aria-pressed', String(b === n))); return; }
+    if ((n = el.closest('#map [data-step], #steps tr[data-step]'))) { const i = +n.dataset.step; if (i >= 0) selectStep(state.step === i ? null : i, true); return; }
+  });
+  // Remember which disclosures are open across repaints; only a real change gets the entrance.
+  document.addEventListener('toggle', (e) => {
+    const d = e.target, key = d.dataset ? d.dataset.keep : null;
+    if (!key || !!state.open[key] === d.open) return;
+    state.open[key] = d.open;
+    if (d.open) { d.classList.add('enter'); d.addEventListener('animationend', () => d.classList.remove('enter'), { once: true }); }
+  }, true);
+  svg.addEventListener('mouseover', (e) => { const n = e.target.closest('[data-step]'); const i = n ? +n.dataset.step : null; if (i !== state.hover) { state.hover = i; refreshHover(); } });
+  svg.addEventListener('mouseleave', () => { if (state.hover != null) { state.hover = null; refreshHover(); } });
+  $('steps').addEventListener('mouseover', (e) => { const n = e.target.closest('tr[data-step]'); const i = n && +n.dataset.step >= 0 ? +n.dataset.step : null; if (i !== state.hover) { state.hover = i; refreshHover(); } });
+  $('steps').addEventListener('mouseleave', () => { if (state.hover != null) { state.hover = null; refreshHover(); } });
+  $('btn-prev').addEventListener('click', () => stepBy(-1));
+  $('btn-next').addEventListener('click', () => stepBy(1));
+  $('btn-play').addEventListener('click', togglePlay);
+  $('scrub').addEventListener('input', (e) => {
+    const s = last.sel.scrub;
+    if (!s) return;
+    if (state.playing) stop();
+    state.t = (+e.target.value / 1000) * s.duration;
+    refreshPlay();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    const t = e.target, tag = t && t.tagName;
+    if (e.key === 'Escape') { const m = document.querySelector('details.menu[open]'); if (m) { m.open = false; m.querySelector('summary').focus(); } return; }
+    if (tag === 'SELECT' || tag === 'TEXTAREA') return;
+    if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && tag === 'INPUT' && t.type === 'range') return;
+    if (e.key === 'ArrowRight') { e.preventDefault(); stepBy(1); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); stepBy(-1); }
+    else if (e.key === ' ' || e.code === 'Space') {
+      if (tag === 'BUTTON' || tag === 'SUMMARY' || tag === 'INPUT') return; // a focused control keeps its own Space
+      e.preventDefault(); togglePlay();
+    }
+  });
+
+  /* ----- sizing: keep UI marks a fixed pixel size while the field scales ----- */
+  const box = svg.parentElement;
+  function measure() {
+    const w = box.clientWidth;
+    if (w && Math.abs(w - W) > 1) { W = w; last = view(); paintMap(last); }
+  }
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(measure).observe(box); else window.addEventListener('resize', measure);
+  // Side by side the list is always showing; stacked on a narrow screen it starts folded so the map comes first.
+  const mq = window.matchMedia ? window.matchMedia('(max-width: 719px)') : null;
+  const lists = $('lists');
+  function syncLists() { if (mq && !mq.matches) lists.open = true; else if (mq && mq.matches && !lists.dataset.touched) lists.open = false; }
+  $('listsum').addEventListener('click', () => { lists.dataset.touched = '1'; });
+  if (mq) { (mq.addEventListener ? mq.addEventListener.bind(mq, 'change') : mq.addListener.bind(mq))(syncLists); }
+  W = box.clientWidth || W;
+  syncLists();
+  refresh();
+
+  /* ----- embedded in an iframe: tell the host how tall the page is ----- */
+  if (EMBED && window.parent !== window) {
+    let sent = -1;
+    const report = () => {
+      const h = Math.ceil(app.getBoundingClientRect().height);
+      if (h !== sent) { sent = h; window.parent.postMessage({ type: 'scourge-map', height: h }, '*'); }
+    };
+    if (typeof ResizeObserver !== 'undefined') new ResizeObserver(report).observe(app); else window.addEventListener('resize', report);
+    report();
+  }
+})();
+</script>
+</body>
+</html>

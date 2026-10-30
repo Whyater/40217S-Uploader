@@ -1,16 +1,17 @@
 {
-  "tag": "build-67-072e488",
-  "title": "Build 67 (072e488)",
-  "notes": "Built from 072e488: Build 67",
-  "built_at": "2026-10-29T13:39:25Z",
+  "tag": "build-68-644a9d1",
+  "title": "Build 68 (644a9d1)",
+  "notes": "Built from 644a9d1: Build 68",
+  "built_at": "2026-10-30T20:54:58Z",
   "sha256": {
-    "hot.package.bin": "5419402d6b79f8c18a4a151466ebac58c159914dcca87026430a4300ad06e804",
+    "hot.package.bin": "930ce0eb756a43ff56024cbe90b3d5d7539f2b1a29f79a5bbf60a6ab4a282506",
     "cold.package.bin": "35644e49173874d33b94a3e830abd8057c5dd0b2cdcd8f4ad59c65b280e8c614",
     "project.pros": "3334ee11d05552c44076bd6a7b41db6058a44761af0fd01a6d67eedcc6868294",
-    "tester-hot.package.bin": "64d134688b63a6ee4ad7f34c51b732d291233da000e79dcecdc6b9aab73ef39f",
+    "tester-hot.package.bin": "49dff08bf1afeaabec8dd88cd75c44aaf0d0196437094d7890ff859f968882bd",
     "tester-cold.package.bin": "35644e49173874d33b94a3e830abd8057c5dd0b2cdcd8f4ad59c65b280e8c614",
     "tester-project.pros": "b3895679e64c30a5e99ed0787b4d8808ed263a8d706730221e6f7f5f9cc904da",
-    "auton-test-hot.package.bin": "39a95c96d59b29d13c749a33477a6ebe7d453378f81110b7a5d32ef1ef3a1a2c",
-    "drive-test-hot.package.bin": "6ea88630f9764202532a949bda0f34edc78e6183845a4514a16145b09263d69a"
+    "auton-test-hot.package.bin": "66035f6a1e786d5b0fcff7144a0daee810c797afa1b6c0c8e9cae6e46d4facf9",
+    "drive-test-hot.package.bin": "fbe2d2d1b10d8b127d177c15ad9bae56ed83c2578bf8103944484544b7358f3b",
+    "autopath-hot.package.bin": "fe1a2a275cc16ebd3128a63ca00594be8d5be104d5d6742cf75129be2f2f2411"
   }
 }

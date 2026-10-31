@@ -47,6 +47,8 @@
   --run: #7633C4;
   --plan: #C2570C;
   --on-plan: #FFFFFF;
+  --act: #4A3FB5;
+  --on-act: #FFFFFF;
   --goal-ally: #1E2126;
   --goal-neu: #6A6F78;
   --goal-opp: #B42318;
@@ -81,6 +83,8 @@
     --run: #BB90FF;
     --plan: #FF9F5A;
     --on-plan: #1E1E1E;
+    --act: #A99BFF;
+    --on-act: #1E1E1E;
     --goal-ally: #E8E8EA;
     --goal-neu: #9A9EA6;
     --goal-opp: #FF7060;
@@ -327,6 +331,13 @@ svg text { font-family: var(--font); }
 .plan-arrow { fill: var(--plan); stroke: var(--field); stroke-width: 1.5; stroke-linejoin: round; }
 .plan-tag rect { fill: var(--plan); }
 .plan-tag text { font-size: 10.5px; font-weight: 700; font-family: var(--mono); fill: var(--on-plan); text-anchor: middle; }
+.plan-act-stem { stroke: var(--act); stroke-width: 1.25; }
+.plan-act-pin { fill: var(--act); stroke: var(--field); stroke-width: 1.25; }
+.plan-act-m { fill: var(--act); stroke: var(--field); stroke-width: 1.5; }
+.plan-act text { font-size: 10px; font-weight: 700; fill: var(--on-act); text-anchor: middle; }
+.plan-act.hot .plan-act-m { stroke: var(--text); stroke-width: 2; }
+.plan-pick-ring { fill: var(--field); fill-opacity: 0.7; stroke: var(--act); stroke-width: 2; }
+.plan-pick-dot { fill: var(--act); }
 .target-x { stroke: var(--text-2); stroke-width: 1.2; fill: none; }
 .miss-line { stroke-width: 1.6; fill: none; }
 .miss-ring { fill: var(--field); stroke-width: 2; }
@@ -476,6 +487,47 @@ td .na { color: var(--text-2); }
 .drawmsg { font-size: var(--callout); align-items: flex-start; }
 .drawmsg i { margin-top: 4px; }
 .drawrow { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
+/* The picker floats over the map beside a tap (a full-width panel on a phone), so it shares the menu's one shadow. */
+.picker {
+  position: absolute; z-index: 6; display: flex; flex-direction: column; width: 372px; max-width: calc(100% - 16px); max-height: calc(100% - 16px);
+  background: var(--solid); border: 0.5px solid var(--sep); border-radius: 10px; box-shadow: 0 6px 22px rgba(0, 0, 0, 0.18);
+}
+.picker[data-dock] { left: 8px; right: 8px; width: auto; max-width: none; max-height: calc(50% - 12px); }
+.picker[data-dock="bottom"] { bottom: 8px; }
+.picker[data-dock="top"] { top: 8px; }
+.pick-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 4px 0 12px; border-bottom: 0.5px solid var(--sep); font-size: var(--callout); font-weight: 600; }
+.pick-title { padding: 6px 0; min-width: 0; overflow-wrap: anywhere; }
+.pick-x { flex: none; display: grid; place-items: center; width: var(--hit); height: var(--hit); border: 0; border-radius: 7px; background: transparent; color: var(--text-2); }
+.pick-x:hover { background: var(--hover); }
+.pick-x svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+.pick-body { overflow-y: auto; overscroll-behavior: contain; padding: 2px 4px 6px; }
+.pick-group { padding: 8px 8px 2px; color: var(--text-2); font-size: var(--callout); font-weight: 600; }
+.pick-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 2px; }
+.pick-row { display: flex; align-items: center; gap: 7px; min-width: 0; min-height: var(--hit); padding: 0 8px; border: 0; border-radius: 6px; background: transparent; text-align: left; font-size: var(--callout); }
+.pick-row:hover { background: var(--hover); }
+.pick-glyph { flex: none; display: grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: var(--act); color: var(--on-act); font-size: 9.5px; font-weight: 700; }
+.actbox { display: grid; gap: 6px; }
+.acthead { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.actlist { list-style: none; margin: 0; padding: 0; max-height: 264px; overflow-y: auto; overscroll-behavior: contain; border: 0.5px solid var(--sep); border-radius: 8px; }
+.actrow { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 2px 8px; padding: 5px 4px 5px 10px; border-top: 0.5px solid var(--sep); }
+.actrow:first-child { border-top: 0; }
+.actrow:hover, .actrow:focus-within { background: var(--hover); }
+.actn { color: var(--text-2); font-family: var(--mono); font-size: var(--callout); font-variant-numeric: tabular-nums; }
+.actt { display: grid; min-width: 0; line-height: 1.3; }
+.actt b { font-weight: 600; }
+.actt span { color: var(--text-2); font-size: var(--callout); overflow-wrap: anywhere; }
+.actin {
+  grid-column: 2 / 4; width: 100%; min-height: var(--hit); margin: 0; padding: 0 10px; font: inherit; font-size: var(--body); color: var(--text); background: var(--track);
+  border: 0.5px solid var(--control-line); border-radius: 8px;
+}
+.actin::placeholder { color: var(--text-2); opacity: 0.7; }
+.actrm { grid-column: 3; grid-row: 1; min-height: var(--hit); padding: 0 8px; }
+@media (min-width: 560px) {
+  .actrow { grid-template-columns: 20px minmax(0, 1.2fr) minmax(0, 1fr) auto; }
+  .actin { grid-column: 3; }
+  .actrm { grid-column: 4; }
+}
+@media (pointer: coarse) { .actin { font-size: 16px; } } /* under 16px, iOS zooms the page in when a field is focused */
 /* While drawing, the page is one calm column and a drag on the map draws instead of scrolling. */
 .app[data-draw="1"] { max-width: 700px; }
 .app[data-draw="1"] .stage { grid-template-columns: minmax(0, 1fr); }
@@ -511,7 +563,7 @@ td .na { color: var(--text-2); }
           <p><span><b>Proposed plan:</b> a sketch, not a recording. Nothing changes on the robot.</span></p>
           <button class="btn" id="draw-done" type="button">Done</button>
         </div>
-        <div class="mapbox">
+        <div class="mapbox" id="mapbox">
           <svg id="map" role="img" aria-label="Field map" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
             <g id="g-static"></g>
             <g id="g-sel"></g>
@@ -519,6 +571,7 @@ td .na { color: var(--text-2); }
             <g id="g-plan"></g>
           </svg>
           <div class="mapnote" id="mapnote"></div>
+          <div class="picker" id="picker" role="group" aria-label="What the robot does here" hidden></div>
         </div>
         <div class="keyrow" id="keyrow" aria-label="Key"></div>
         <div class="emptybox" id="emptybox" hidden></div>
@@ -529,6 +582,10 @@ td .na { color: var(--text-2); }
           </div>
           <p class="drawstat" id="drawcount"></p>
           <p class="drawmsg pill" id="drawmsg" role="status" hidden><i></i><span></span></p>
+          <div class="actbox" id="actbox" hidden>
+            <div class="acthead"><h3>Actions</h3><span class="drawstat" id="actcount"></span></div>
+            <ol class="actlist" id="actlist"></ol>
+          </div>
           <div class="drawrow">
             <div class="tb"><button class="btn" id="draw-undo" type="button">Undo</button><button class="btn" id="draw-clear" type="button">Clear</button></div>
             <div class="tb"><button class="btn primary" id="draw-send" type="button">Send plan</button></div>
@@ -1909,7 +1966,7 @@ function renderPlay(model, state, sel, ctx) {
 
 /* ---------- proposed plans: the draw tool's pure parts ---------- */
 // The limits are the shared contract's (ROUTE_SYNC_SPEC.md, Proposed auto plans); the relay checks them again.
-const PLAN_LIMITS = { name: 80, note: 2000, lines: 50, perLine: 500, total: 3000, coord: 100, minLen: 1, tol: 1 };
+const PLAN_LIMITS = { name: 80, note: 2000, lines: 50, perLine: 500, total: 3000, coord: 100, minLen: 1, tol: 1, actions: 200, detail: 120 };
 const round2 = (v) => Math.round(v * 100) / 100 + 0; // + 0 turns a -0 into 0
 const lineLength = (line) => { let d = 0; for (let i = 1; i < line.length; i++) d += Math.hypot(line[i][0] - line[i - 1][0], line[i][1] - line[i - 1][1]); return d; };
 const planLength = (lines) => lines.reduce((a, l) => a + lineLength(l), 0);
@@ -1951,14 +2008,83 @@ function addPlanLine(lines, line) {
   if (total + line.length > PLAN_LIMITS.total) return { lines, error: 'This plan has reached its limit of ' + PLAN_LIMITS.total + ' points. Undo or clear a line to draw more.' };
   return { lines: lines.concat([line]), error: null };
 }
-// The plan the host sends (schema 1). build is the shown prediction's tag or null.
+// What the robot can do along a line, in the spec's order (ROUTE_SYNC_SPEC.md, Plan actions). glyph is the letter on the map marker.
+const PLAN_ACTIONS = [
+  { type: 'score', label: 'Score on Goal', group: 'Score and grab', glyph: 'S' },
+  { type: 'grab_stack', label: 'Grab stack', group: 'Score and grab', glyph: 'G' },
+  { type: 'grab_pin', label: 'Grab Pin', group: 'Score and grab', glyph: 'G' },
+  { type: 'grab_wall', label: 'Grab from wall', group: 'Score and grab', glyph: 'G' },
+  { type: 'grab_loader', label: 'Grab from Loader', group: 'Score and grab', glyph: 'G' },
+  { type: 'toggle', label: 'Turn Toggle', group: 'Toggle and roller', glyph: 'T' },
+  { type: 'roller_on', label: 'Roller on', group: 'Toggle and roller', glyph: 'R' },
+  { type: 'roller_reverse', label: 'Roller reverse', group: 'Toggle and roller', glyph: 'R' },
+  { type: 'roller_off', label: 'Roller off', group: 'Toggle and roller', glyph: 'R' },
+  { type: 'intake_in', label: 'Intake in', group: 'Intake', glyph: 'I' },
+  { type: 'intake_out', label: 'Intake out', group: 'Intake', glyph: 'I' },
+  { type: 'intake_off', label: 'Intake off', group: 'Intake', glyph: 'I' },
+  { type: 'lift_floor', label: 'Lift to floor', group: 'Lift', glyph: 'L' },
+  { type: 'lift_alliance', label: 'Lift to Alliance Goal', group: 'Lift', glyph: 'L' },
+  { type: 'lift_neutral', label: 'Lift to Neutral Goal', group: 'Lift', glyph: 'L' },
+  { type: 'lift_cup_pin', label: 'Lift to Cup and Pin', group: 'Lift', glyph: 'L' },
+  { type: 'claw_open', label: 'Open claw', group: 'Claw', glyph: 'C' },
+  { type: 'claw_close', label: 'Close claw', group: 'Claw', glyph: 'C' },
+  { type: 'tilt_up', label: 'Tilt claw up', group: 'Claw', glyph: 'C' },
+  { type: 'tilt_down', label: 'Tilt claw down', group: 'Claw', glyph: 'C' },
+  { type: 'drive_backward', label: 'Back up along this line', group: 'Drive', glyph: 'D' },
+  { type: 'wait', label: 'Pause', group: 'Drive', glyph: 'P' },
+];
+const ACTION_BY_TYPE = Object.create(null); // no inherited keys: a damaged draft's "constructor" is not an action
+PLAN_ACTIONS.forEach((a) => { ACTION_BY_TYPE[a.type] = a; });
+
+// The spot on a plan line nearest to a tap, or null when no line is within reach inches. lines are arrays of [x, y]; line in the answer counts from 1.
+// along is inches from the line's start to the spot, at is the spot, and a spot within 3 in of an end snaps to that exact end (atEnd is true for the last point).
+// The nearest line wins; on a tie the earlier one does.
+const SNAP_END_IN = 3;
+function snapToLines(lines, x, y, reach) {
+  let best = null;
+  lines.forEach((l, li) => {
+    let run = 0;
+    for (let i = 1; i < l.length; i++) {
+      const a = l[i - 1], b = l[i], dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy), l2 = dx * dx + dy * dy;
+      const u = l2 ? Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / l2)) : 0;
+      const px = a[0] + u * dx, py = a[1] + u * dy, d = Math.hypot(x - px, y - py);
+      if (!best || d < best.d - 1e-9) best = { d, li, px, py, along: run + u * len };
+      run += len;
+    }
+  });
+  if (!best || !(best.d <= reach)) return null;
+  const l = lines[best.li], a = l[0], z = l[l.length - 1], total = lineLength(l);
+  // Measured along the line, not straight across: a line that doubles back can pass close to its own end much earlier in the route.
+  const toStart = best.along, toEnd = total - best.along;
+  if (toEnd <= SNAP_END_IN && toEnd < toStart) return { line: best.li + 1, along: round2(total), at: [round2(z[0]), round2(z[1])], atEnd: true };
+  if (toStart <= SNAP_END_IN) return { line: best.li + 1, along: 0, at: [round2(a[0]), round2(a[1])], atEnd: false };
+  return { line: best.li + 1, along: round2(best.along), at: [round2(best.px), round2(best.py)], atEnd: false };
+}
+// Route order: by line, then inches along, then the order they were placed (the array's own order).
+function sortActions(actions) {
+  return actions.map((a, i) => ({ a, i })).sort((p, q) => p.a.line - q.a.line || p.a.along - q.a.along || p.i - q.i).map((p) => p.a);
+}
+// Where an action sits, in words: "Line 2, at the end", "Line 2, 14 in along".
+function actionPlace(a, lines) {
+  const l = lines[a.line - 1], total = l ? lineLength(l) : 0;
+  return 'Line ' + a.line + ', ' + (a.along >= total - 0.005 ? 'at the end' : a.along <= 0.005 ? 'at the start' : fmtIn(a.along, a.along) + ' in along');
+}
+// The Goal nearest a point, by true field position. The map draws Goals at their true spots for either side, so a Right plan needs no mirroring here.
+function nearestGoal(field, x, y) {
+  let best = null, bd = Infinity;
+  arr(field && field.goals).forEach((g) => { const d = Math.hypot(g.x - x, g.y - y); if (d < bd) { bd = d; best = g; } });
+  return best;
+}
+// The plan the host sends (schema 1). build is the shown prediction's tag or null. actions is left out when there are none.
 function buildPlan(o) {
   const text = (v) => String(v == null ? '' : v).trim();
-  return {
+  const plan = {
     schema: 1, kind: 'proposed-auto-plan', name: text(o.name), side: o.side === 'R' ? 'R' : 'L', note: text(o.note),
     build: typeof o.build === 'string' && o.build ? o.build.slice(0, 100) : null,
     lines: arr(o.lines).map((l) => ({ points: arr(l).map((p) => [round2(p[0]), round2(p[1])]) })),
   };
+  if (arr(o.actions).length) plan.actions = arr(o.actions).map((a) => ({ type: a.type, line: a.line, along: round2(a.along), at: [round2(a.at[0]), round2(a.at[1])], detail: text(a.detail) }));
+  return plan;
 }
 // null when the plan keeps every limit, else the sentence to show. Checked again right before sending: a plan that breaks one never goes out.
 function validatePlan(plan) {
@@ -1977,20 +2103,43 @@ function validatePlan(plan) {
     total += pts.length;
     if (!pts.every((p) => Array.isArray(p) && p.length === 2 && isNum(p[0]) && isNum(p[1]) && Math.abs(p[0]) <= PLAN_LIMITS.coord && Math.abs(p[1]) <= PLAN_LIMITS.coord)) return 'A point is outside the field.';
   }
-  return total > PLAN_LIMITS.total ? 'A plan holds up to ' + PLAN_LIMITS.total + ' points in all.' : null;
+  if (total > PLAN_LIMITS.total) return 'A plan holds up to ' + PLAN_LIMITS.total + ' points in all.';
+  if (plan.actions === undefined) return null;
+  if (!Array.isArray(plan.actions) || plan.actions.length > PLAN_LIMITS.actions) return 'A plan holds up to ' + PLAN_LIMITS.actions + ' actions.';
+  for (const a of plan.actions) {
+    if (!a || typeof a.type !== 'string' || !/^[a-z_]{1,30}$/.test(a.type)) return 'An action has no usable type.';
+    const l = Number.isInteger(a.line) && a.line >= 1 && a.line <= plan.lines.length ? plan.lines[a.line - 1].points : null;
+    if (!l) return 'An action points at a line that is not in the plan.';
+    if (!isNum(a.along) || a.along < 0 || a.along > lineLength(l) + 1) return 'An action sits off the end of its line.';
+    if (!Array.isArray(a.at) || a.at.length !== 2 || !a.at.every((v) => isNum(v) && Math.abs(v) <= PLAN_LIMITS.coord)) return 'An action is outside the field.';
+    if (typeof a.detail !== 'string' || a.detail.length > PLAN_LIMITS.detail) return 'An action detail can be up to ' + PLAN_LIMITS.detail + ' characters.';
+  }
+  return null;
 }
 // A saved draft read back: anything that is not a clean line, name or note is dropped rather than trusted.
 function sanitizeDraft(raw) {
-  const d = raw && typeof raw === 'object' ? raw : {}, lines = [];
+  const d = raw && typeof raw === 'object' ? raw : {}, lines = [], kept = new Map(); // kept: a line's place in the saved draft -> its number now
   let total = 0;
-  arr(d.lines).forEach((l) => {
+  arr(d.lines).forEach((l, li) => {
     if (!Array.isArray(l) || l.length < 2 || l.length > PLAN_LIMITS.perLine || lines.length >= PLAN_LIMITS.lines || total + l.length > PLAN_LIMITS.total) return;
     const pts = l.map((p) => (Array.isArray(p) && isNum(p[0]) && isNum(p[1]) && Math.abs(p[0]) <= PLAN_LIMITS.coord && Math.abs(p[1]) <= PLAN_LIMITS.coord ? [round2(p[0]), round2(p[1])] : null));
     if (pts.some((p) => !p)) return;
-    lines.push(pts); total += pts.length;
+    lines.push(pts); total += pts.length; kept.set(li + 1, lines.length);
+  });
+  // An action stays only when it is whole: a known type, a line that is still there, a spot on that line, and text no longer than the limit.
+  const actions = [];
+  arr(d.actions).forEach((a) => {
+    if (actions.length >= PLAN_LIMITS.actions || !a || typeof a !== 'object' || !ACTION_BY_TYPE[a.type] || !kept.has(a.line)) return;
+    const n = kept.get(a.line), l = lines[n - 1];
+    if (!isNum(a.along) || a.along < 0 || a.along > lineLength(l) + 1) return;
+    if (!Array.isArray(a.at) || a.at.length !== 2 || !a.at.every((v) => isNum(v) && Math.abs(v) <= PLAN_LIMITS.coord)) return;
+    let off = Infinity;
+    for (let i = 1; i < l.length; i++) off = Math.min(off, distToSeg(a.at[0], a.at[1], { x: l[i - 1][0], y: l[i - 1][1] }, { x: l[i][0], y: l[i][1] }));
+    if (off > 0.5) return; // the spec says the point is always on the line
+    actions.push({ type: a.type, line: n, along: round2(a.along), at: [round2(a.at[0]), round2(a.at[1])], detail: typeof a.detail === 'string' ? a.detail.slice(0, PLAN_LIMITS.detail) : '' });
   });
   return {
-    lines, name: typeof d.name === 'string' ? d.name.slice(0, PLAN_LIMITS.name) : '', note: typeof d.note === 'string' ? d.note.slice(0, PLAN_LIMITS.note) : '',
+    lines, actions: sortActions(actions), name: typeof d.name === 'string' ? d.name.slice(0, PLAN_LIMITS.name) : '', note: typeof d.note === 'string' ? d.note.slice(0, PLAN_LIMITS.note) : '',
     side: lines.length ? (d.side === 'R' ? 'R' : 'L') : null,
   };
 }
@@ -2032,14 +2181,76 @@ function renderPlanLines(lines, k) {
   planMemo.set(lines, { k, html });
   return html;
 }
-// draw: { lines, stroke } or null. stroke is the line being dragged now ({x, y} points).
+// Where each action's marker sits, in px from its true point: one marker hangs 16 px below it, markers within 16 px of each other fan out
+// in rows of five, so none hides another and the true point never moves. Indexed like actions.
+const ACT_PX = { near: 16, drop: 16, step: 19, perRow: 5 };
+function actionMarkers(actions, k) {
+  const groups = [], out = [];
+  actions.forEach((a, i) => {
+    const g = groups.find((q) => Math.hypot(q.x - a.at[0], q.y - a.at[1]) < ACT_PX.near * k);
+    if (g) g.items.push(i); else groups.push({ x: a.at[0], y: a.at[1], items: [i] });
+  });
+  groups.forEach((g) => g.items.forEach((i, j) => {
+    const row = Math.floor(j / ACT_PX.perRow), cols = Math.min(ACT_PX.perRow, g.items.length - row * ACT_PX.perRow);
+    out[i] = { dx: ((j % ACT_PX.perRow) - (cols - 1) / 2) * ACT_PX.step, dy: ACT_PX.drop + row * ACT_PX.step };
+  }));
+  return out;
+}
+// A round badge with the action's letter, on a short stem to its true point. hot is the index the list is pointing at.
+function renderActions(actions, lines, k, hot) {
+  const spots = actionMarkers(actions, k);
+  return actions.map((a, i) => {
+    const t = ACTION_BY_TYPE[a.type], m = spots[i];
+    if (!t || !m) return '';
+    const inner = '<title>' + esc(t.label + ', ' + actionPlace(a, lines)) + '</title><line class="plan-act-stem" x1="0" y1="0" x2="' + f3(m.dx) + '" y2="' + f3(m.dy - 8) + '"/><circle class="plan-act-pin" r="2.5"/>' +
+      '<g transform="translate(' + f3(m.dx) + ' ' + f3(m.dy) + ')"><circle class="plan-act-m" r="8.5"/><text y="3.6">' + esc(t.glyph) + '</text></g>';
+    return at(a.at[0], a.at[1], k, inner, ' class="plan-act' + (hot === i ? ' hot' : '') + '"');
+  }).join('');
+}
+// draw: { lines, stroke, actions, pick, hot } or null. stroke is the line being dragged now ({x, y} points); pick is the spot the picker is open at ({ at: [x, y] }).
 function renderPlan(draw, ctx) {
   if (!draw) return '';
   const k = ctx.k, st = draw.stroke;
-  let out = renderPlanLines(draw.lines, k);
+  let out = renderPlanLines(draw.lines, k) + renderActions(arr(draw.actions), draw.lines, k, draw.hot);
+  if (draw.pick) out += at(draw.pick.at[0], draw.pick.at[1], k, '<circle class="plan-pick-ring" r="8"/><circle class="plan-pick-dot" r="3.5"/>');
   if (st && st.length > 1) out += '<path class="plan-path draft ns" d="' + linePath(thinPath(st, k * PATH_TOL_PX)) + '"/>';
   else if (st && st.length === 1) out += at(st[0].x, st[0].y, k, '<circle class="plan-start" r="4.5"/>');
   return out;
+}
+
+// The picker's contents: the action catalog in its groups, one button each. Fixed text, so it is written once.
+const PICK_X = '<svg viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7"/></svg>';
+function renderPicker() {
+  let h = '<div class="pick-head"><span class="pick-title" id="pick-title"></span><button type="button" class="pick-x" data-pickclose="1" aria-label="Close">' + PICK_X + '</button></div><div class="pick-body" id="pick-body">';
+  PLAN_ACTIONS.forEach((a, i) => {
+    if (!i || PLAN_ACTIONS[i - 1].group !== a.group) h += (i ? '</div>' : '') + '<p class="pick-group">' + esc(a.group) + '</p><div class="pick-grid">';
+    h += '<button type="button" class="pick-row" data-pickact="' + a.type + '"><span class="pick-glyph" aria-hidden="true">' + esc(a.glyph) + '</span><span>' + esc(a.label) + '</span></button>';
+  });
+  return h + '</div></div>';
+}
+// Where the picker goes. box and pop are { w, h } in px and tap is { x, y } in the box. A narrow box gets a full-width panel on the half away
+// from the tap; a wide one gets a popover beside the tap (right and below first, flipped when it will not fit), kept inside the box.
+const PICK = { dockBelow: 480, margin: 8, gap: 14 };
+function placePicker(box, tap, pop) {
+  if (box.w < PICK.dockBelow) return { dock: tap.y < box.h / 2 ? 'bottom' : 'top' };
+  const m = PICK.margin, w = Math.min(pop.w, box.w - 2 * m), h = Math.min(pop.h, box.h - 2 * m);
+  // The tap stays in view: beside it, whatever the height. With no room on either side the picker docks in the half away from it.
+  let left = tap.x + PICK.gap, top = tap.y + PICK.gap;
+  if (left + w > box.w - m) left = tap.x - PICK.gap - w;
+  if (left < m) return { dock: tap.y < box.h / 2 ? 'bottom' : 'top' };
+  if (top + h > box.h - m) top = tap.y - PICK.gap - h;
+  return { dock: null, left: Math.max(m, Math.min(box.w - m - w, left)), top: Math.max(m, Math.min(box.h - m - h, top)) };
+}
+// The Actions list under the map, in route order. Only fixed text and escaped Goal names go in; the detail a person types is set as the
+// input's value afterwards, so it is never markup. i is the action's place in the plan.
+function renderActionRows(actions, lines, field) {
+  return actions.map((a, i) => {
+    const t = ACTION_BY_TYPE[a.type], g = a.type === 'score' ? nearestGoal(field, a.at[0], a.at[1]) : null;
+    const place = actionPlace(a, lines) + (g && g.name ? ', Goal ' + shortName(g.name) : '');
+    return '<li class="actrow" data-row="' + i + '"><span class="actn">' + (i + 1) + '</span><span class="actt"><b>' + esc(t ? t.label : a.type) + '</b><span>' + esc(place) + '</span></span>' +
+      '<input class="actin" type="text" data-aid="' + i + '" data-key="act-' + i + '" maxlength="' + PLAN_LIMITS.detail + '" autocomplete="off" spellcheck="false" placeholder="Detail, optional" aria-label="Detail for action ' + (i + 1) + ', ' + esc(t ? t.label : a.type) + '">' +
+      '<button type="button" class="linkbtn actrm" data-actrm="' + i + '" aria-label="Remove action ' + (i + 1) + ', ' + esc(t ? t.label : a.type) + '">Remove</button></li>';
+  }).join('');
 }
 
 /* ---------- html panels (strings) ---------- */
@@ -2439,7 +2650,8 @@ function renderAll(model, state, W) {
 }
 
 const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normalize, resolveWaypoints, missRows, runSummary, pushDistances, footprintCorners, hull, areaOf, interpPose, circleHitsHull, sweepPoints, contacts, rawSessionFor, layoutTags, fitWindow, openingPoint, displayRoute, startPoseOf, frameCtx, resolveSel, renderAll, renderPlay, fmt, esc, activeEvent, shortName, parseWire, leftFrame, rejectionText, buildModel, sameSession, lastRun, pickSelection, slotFromBuild, runMatchesRoute, whenFine, openingLabel, hostAllowed, thinPath, drawnPath, DEFAULT_FIELD, mirroredSession, mirroredRoute, normSim, buildNum, routeEntries, pickView, simFor, belongs, fieldLabels, renderEmpty,
-  samplesUpTo, TRAVEL_DEG, TRAVEL_RATE, isHand, travelOf, inchesAt, fmtIn, readoutText, playRate, PLAN_LIMITS, fieldFromScreen, simplifyLine, strokeToLine, addPlanLine, buildPlan, validatePlan, sanitizeDraft, planLength, lineLength, renderPlan, drawState, renderLayers, endHeading };
+  samplesUpTo, TRAVEL_DEG, TRAVEL_RATE, isHand, travelOf, inchesAt, fmtIn, readoutText, playRate, PLAN_LIMITS, fieldFromScreen, simplifyLine, strokeToLine, addPlanLine, buildPlan, validatePlan, sanitizeDraft, planLength, lineLength, renderPlan, drawState, renderLayers, endHeading,
+  PLAN_ACTIONS, snapToLines, sortActions, actionPlace, nearestGoal, actionMarkers, renderActions, renderPicker, placePicker, renderActionRows };
 /*</pure>*/
 
 /* ---------- page shell (DOM) ---------- */
@@ -2464,13 +2676,14 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   if (model.generated) $('gen').textContent = 'Built ' + model.generated;
 
   // Draw tool state. It lives here, not in the model, so a load() (Refresh) repaints around a drawing in progress and never drops it.
-  const plan = { on: false, lines: [], side: null, name: '', note: '', undo: [], stroke: null, pointer: null, sending: false, sendId: null, timer: 0, msg: null };
+  const plan = { on: false, lines: [], actions: [], side: null, name: '', note: '', undo: [], stroke: null, pointer: null, sending: false, sendId: null, timer: 0, msg: null, pick: null, pickAt: 0, hot: null };
   const planHost = () => (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.scourgePlan) || null;
   // Draw is offered only with someone to hand the plan to: the web page's frame, or the Mac app's own handler. A page opened by hand has neither.
   const canDraw = () => EMBED && (window.parent !== window || !!planHost());
+  const drawNow = () => ({ lines: plan.lines, stroke: plan.stroke, actions: plan.actions, pick: plan.pick, hot: plan.hot });
   const view = () => {
     state.canDraw = canDraw(); state.draft = plan.lines.length;
-    state.draw = plan.on ? { lines: plan.lines, stroke: plan.stroke } : null;
+    state.draw = plan.on ? drawNow() : null;
     return renderAll(model, state, W);
   };
   // Writes only what changed, so a list keeps its scroll position and nothing repaints for no reason.
@@ -2639,10 +2852,10 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   /* ----- proposed plan: the draw tool ----- */
   const DRAFT_KEY = 'scourge-plan-draft', SEND_WAIT_MS = 100000, STROKE_CAP = 20000;
   const nameIn = $('plan-name'), noteIn = $('plan-note');
-  // The draft (lines, name, note, side) is kept where storage works; a blocked or full store just means it is not kept.
+  // The draft (lines, actions, name, note, side) is kept where storage works; a blocked or full store just means it is not kept.
   function saveDraft() {
     try {
-      if (plan.lines.length || plan.name || plan.note) localStorage.setItem(DRAFT_KEY, JSON.stringify({ lines: plan.lines, name: plan.name, note: plan.note, side: plan.side }));
+      if (plan.lines.length || plan.name || plan.note) localStorage.setItem(DRAFT_KEY, JSON.stringify({ lines: plan.lines, actions: plan.actions, name: plan.name, note: plan.note, side: plan.side }));
       else localStorage.removeItem(DRAFT_KEY);
     } catch (err) { /* no storage here */ }
   }
@@ -2650,7 +2863,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     if (!canDraw()) return;
     try {
       const raw = localStorage.getItem(DRAFT_KEY), d = raw ? sanitizeDraft(JSON.parse(raw)) : null;
-      if (d) { plan.lines = d.lines; plan.name = d.name; plan.note = d.note; plan.side = d.side; nameIn.value = d.name; noteIn.value = d.note; }
+      if (d) { plan.lines = d.lines; plan.actions = d.actions; plan.name = d.name; plan.note = d.note; plan.side = d.side; nameIn.value = d.name; noteIn.value = d.note; }
     } catch (err) { /* nothing saved, or not readable */ }
   }
   // Which side the lines belong to is the side showing when the first one was drawn; after that the page holds it.
@@ -2668,27 +2881,48 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     $('draw-send').disabled = busy || !n || !named;
     $('draw-send').textContent = busy ? 'Sending…' : 'Send plan';
     nameIn.readOnly = busy; noteIn.readOnly = busy;
-    $('drawcount').textContent = n ? plural(n, 'line') + ', ' + fmt(planLength(plan.lines), 0) + ' in total' : 'Drag on the field to draw a line. Each line runs from its dot to its arrow.';
+    paintActions();
+    $('drawcount').textContent = n ? plural(n, 'line') + ', ' + fmt(planLength(plan.lines), 0) + ' in total' + (plan.actions.length ? '' : '. Tap a line to add an action.') : 'Drag on the field to draw a line. Each line runs from its dot to its arrow.';
     const m = plan.msg || (n && !named ? { text: 'Name the plan to send it.', kind: 'idle' } : null), el = $('drawmsg');
     el.hidden = !m;
     if (m) { el.className = 'drawmsg pill ' + m.kind; el.firstChild.className = m.kind; el.firstChild.hidden = m.kind === 'idle'; el.lastChild.textContent = m.text; } // textContent: the host's words are never markup
   }
-  function paintStroke() { put($('g-plan'), renderPlan({ lines: plan.lines, stroke: plan.stroke }, last.ctx)); }
+  function paintStroke() { put($('g-plan'), renderPlan(drawNow(), last.ctx)); }
+  // The Actions list. Its rows are rewritten only when something but the typing changed; the detail text lives in each input's value, not in
+  // the markup, so a repaint puts the same text back and keeps the focus and the caret where they were.
+  function paintActions() {
+    const list = $('actlist'), a = plan.actions;
+    $('actbox').hidden = !a.length;
+    $('actcount').textContent = a.length ? plural(a.length, 'action') : '';
+    const was = document.activeElement, typing = was && was.dataset && was.dataset.aid !== undefined, from = typing ? was.selectionStart : null, to = typing ? was.selectionEnd : null;
+    keepFocus(() => put(list, renderActionRows(a, plan.lines, model.field)));
+    list.querySelectorAll('input[data-aid]').forEach((inp) => {
+      const x = a[+inp.dataset.aid];
+      if (x && inp.value !== x.detail) inp.value = x.detail;
+      inp.readOnly = plan.sending;
+    });
+    document.querySelectorAll('#actlist .actrm').forEach((b) => { b.disabled = plan.sending; });
+    const now = document.activeElement;
+    if (typing && now && now.dataset && now.dataset.aid === was.dataset.aid && now !== was && now.setSelectionRange) now.setSelectionRange(from, to);
+  }
   // Every change to the lines is one step Undo can take back, Clear included.
-  function commit(lines, side) {
-    plan.undo.push({ lines: plan.lines, side: plan.side });
+  // An action's detail is edited in place, so every snapshot shares it and Undo never brings back an older wording.
+  function commit(lines, side, actions) {
+    plan.undo.push({ lines: plan.lines, side: plan.side, actions: plan.actions });
     if (plan.undo.length > 100) plan.undo.shift();
-    plan.lines = lines; plan.side = lines.length ? side : null; plan.msg = null;
+    plan.lines = lines; plan.side = lines.length ? side : null; plan.actions = actions || plan.actions; plan.msg = null;
+    closePicker();
     saveDraft(); refresh();
   }
   function undoLine() {
     if (plan.sending || !plan.undo.length) return;
     const u = plan.undo.pop();
-    plan.lines = u.lines; plan.side = u.side; plan.msg = null;
+    plan.lines = u.lines; plan.side = u.side; plan.actions = u.actions; plan.msg = null;
+    closePicker();
     keepPlanSide();
     saveDraft(); refresh();
   }
-  function clearLines() { if (!plan.sending && plan.lines.length) commit([], null); }
+  function clearLines() { if (!plan.sending && plan.lines.length) commit([], null, []); }
   function enterDraw() {
     if (plan.on || !canDraw()) return;
     stop();
@@ -2699,7 +2933,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   }
   function leaveDraw() {
     if (!plan.on || plan.sending) return;
-    cancelStroke();
+    cancelStroke(); closePicker();
     plan.on = false;
     saveDraft(); refresh();
   }
@@ -2713,6 +2947,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   }
   function cancelStroke() { if (plan.stroke) { dropStroke(); paintStroke(); } }
   svg.addEventListener('pointerdown', (e) => {
+    if (plan.pick) closePicker(); // a touch on the map outside the picker closes it, then goes on to draw or to pick again
     if (!plan.on || plan.sending || plan.stroke || !e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
     const p = toField(e);
     if (!p) return;
@@ -2733,7 +2968,8 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     const p = toField(e), s = plan.stroke;
     if (p) s.push(p);
     dropStroke();
-    const line = strokeToLine(s); // null for a tap or a drag under 1 in: nothing is added
+    if (strokeMoved(s) < tapSlop()) { paintStroke(); tapAt(s[0], e); return; } // a tap: it picks a spot on a line, it never draws
+    const line = strokeToLine(s); // null for a drag under 1 in: nothing is added
     if (!line) { paintStroke(); return; }
     const r = addPlanLine(plan.lines, line);
     if (r.error) { setMsg(r.error, 'warn'); paintStroke(); paintDraw(); return; }
@@ -2741,6 +2977,45 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   });
   svg.addEventListener('pointercancel', (e) => { if (plan.stroke && e.pointerId === plan.pointer) cancelStroke(); }); // the browser took the gesture: the half-drawn line is thrown away
   svg.addEventListener('lostpointercapture', (e) => { if (plan.stroke && e.pointerId === plan.pointer) cancelStroke(); });
+
+  // A release with under 1 in of movement is a tap, but a finger rarely holds that still: on a phone 1 in is about 2 px, so up to 6 px of slop counts as a tap too.
+  const strokeMoved = (pts) => { let d = 0; for (let i = 1; i < pts.length; i++) d += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y); return d; };
+  const tapSlop = () => Math.max(PLAN_LIMITS.minLen, 6 * last.ctx.k);
+  const pickerEl = $('picker'), pickBox = $('mapbox');
+  pickerEl.innerHTML = renderPicker();
+  function closePicker() {
+    if (!plan.pick) return;
+    plan.pick = null; pickerEl.hidden = true;
+    paintStroke();
+  }
+  // A tap near a line opens the picker beside it; a tap near nothing says what to do. With no lines yet the hint under the map already says to drag.
+  function tapAt(p, e) {
+    if (plan.sending || !plan.lines.length) return;
+    const reach = Math.max(4, 24 * last.ctx.k); // 4 in, or 24 px when that is bigger, so a finger can hit a line
+    const hit = snapToLines(plan.lines, p.x, p.y, reach);
+    if (!hit) { setMsg('Tap on a line to add what the robot does there.', 'idle'); paintDraw(); return; }
+    plan.msg = null; plan.pick = hit; plan.pickAt = performance.now();
+    $('pick-title').textContent = actionPlace(hit, plan.lines);
+    const r = pickBox.getBoundingClientRect(), box = { w: r.width, h: r.height };
+    pickerEl.hidden = false; delete pickerEl.dataset.dock;
+    pickerEl.style.left = '0px'; pickerEl.style.top = '0px'; // measured where it is, then moved
+    const pr = pickerEl.getBoundingClientRect(), spot = placePicker(box, { x: e.clientX - (r.left || 0), y: e.clientY - (r.top || 0) }, { w: pr.width, h: pr.height });
+    if (spot.dock) { pickerEl.dataset.dock = spot.dock; pickerEl.style.left = ''; pickerEl.style.top = ''; } else { pickerEl.style.left = f3(spot.left) + 'px'; pickerEl.style.top = f3(spot.top) + 'px'; }
+    $('pick-body').scrollTop = 0;
+    paintStroke(); paintDraw();
+  }
+  function addAction(type) {
+    const hit = plan.pick;
+    if (!hit || !ACTION_BY_TYPE[type] || plan.sending) return;
+    if (plan.actions.length >= PLAN_LIMITS.actions) { closePicker(); setMsg('A plan holds up to ' + PLAN_LIMITS.actions + ' actions. Remove one to add another.', 'warn'); paintDraw(); return; }
+    commit(plan.lines, plan.side, sortActions(plan.actions.concat([{ type, line: hit.line, along: hit.along, at: hit.at, detail: '' }])));
+  }
+  function removeAction(i) {
+    if (plan.sending || !plan.actions[i]) return;
+    plan.hot = null;
+    commit(plan.lines, plan.side, plan.actions.filter((a, j) => j !== i));
+  }
+  function setHot(i) { if (plan.hot !== i) { plan.hot = i; paintStroke(); } }
 
   // Send: the host gets { id, plan } and answers with the same id. Nothing is sent that breaks a limit, and a failure never touches the drawing.
   const newId = () => (window.crypto && crypto.randomUUID ? crypto.randomUUID() : 'plan-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10));
@@ -2754,12 +3029,12 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   }
   function sendPlan() {
     if (!plan.on || plan.sending) return;
-    const body = buildPlan({ name: plan.name, note: plan.note, side: plan.side, build: last.msel.sim && model.sim ? model.sim.tag : null, lines: plan.lines });
+    const body = buildPlan({ name: plan.name, note: plan.note, side: plan.side, build: last.msel.sim && model.sim ? model.sim.tag : null, lines: plan.lines, actions: plan.actions });
     const bad = validatePlan(body);
     if (bad) { setMsg(bad, 'warn'); paintDraw(); return; }
     const id = newId();
     if (!postPlan(id, body)) { setMsg('This page has no app to send the plan to. Your drawing is still here.', 'warn'); paintDraw(); return; }
-    plan.sending = true; plan.sendId = id; plan.msg = null;
+    plan.sending = true; plan.sendId = id; plan.msg = null; closePicker();
     clearTimeout(plan.timer);
     plan.timer = setTimeout(() => {
       if (!plan.sending || plan.sendId !== id) return;
@@ -2777,7 +3052,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     const ok = r.ok === true || r.ok === 1;
     const text = (typeof r.message === 'string' && r.message ? r.message : ok ? 'Sent as a proposed plan. No robot code changed.' : 'The plan did not send. Your drawing is still here.').slice(0, 300);
     if (ok) {
-      plan.lines = []; plan.side = null; plan.undo = []; plan.name = ''; plan.note = ''; nameIn.value = ''; noteIn.value = '';
+      plan.lines = []; plan.actions = []; plan.side = null; plan.undo = []; plan.hot = null; plan.name = ''; plan.note = ''; nameIn.value = ''; noteIn.value = '';
       saveDraft();
     }
     setMsg(text, ok ? 'good' : 'warn');
@@ -2788,6 +3063,19 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   $('draw-undo').addEventListener('click', undoLine);
   $('draw-clear').addEventListener('click', clearLines);
   $('draw-send').addEventListener('click', sendPlan);
+  // The detail box is typing, not an Undo step: it only changes the action and the saved draft, and the list is not repainted under the caret.
+  $('actlist').addEventListener('input', (e) => {
+    const n = e.target && e.target.closest ? e.target.closest('[data-aid]') : null, a = n ? plan.actions[+n.dataset.aid] : null;
+    if (!a || plan.sending) return;
+    a.detail = String(n.value).slice(0, PLAN_LIMITS.detail);
+    saveDraft();
+  });
+  // Pointing at a row (or tabbing to its box) lights that action's marker on the map.
+  const rowOf = (e) => { const n = e.target && e.target.closest ? e.target.closest('[data-row]') : null; return n ? +n.dataset.row : null; };
+  $('actlist').addEventListener('mouseover', (e) => setHot(rowOf(e)));
+  $('actlist').addEventListener('mouseleave', () => setHot(null));
+  $('actlist').addEventListener('focusin', (e) => setHot(rowOf(e)));
+  $('actlist').addEventListener('focusout', () => setHot(null));
   nameIn.addEventListener('input', () => { plan.name = nameIn.value; if (!plan.sending) plan.msg = null; saveDraft(); paintDraw(); });
   noteIn.addEventListener('input', () => { plan.note = noteIn.value; if (!plan.sending) plan.msg = null; saveDraft(); paintDraw(); });
   loadDraft();
@@ -2825,6 +3113,10 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     if (menu && !el.closest('details.menu')) menu.open = false;
     let n;
     if ((n = el.closest('[data-more]'))) { state.more[n.dataset.more] = !state.more[n.dataset.more]; keepFocus(() => put($('listbody'), renderLists(model, state, last.sel))); return; }
+    if ((n = el.closest('[data-actrm]'))) return removeAction(+n.dataset.actrm);
+    if ((n = el.closest('[data-pickact]'))) { if (performance.now() - plan.pickAt > 250) addAction(n.dataset.pickact); return; } // not a touch's own click, still on its way
+    if (el.closest('[data-pickclose]')) return closePicker();
+    if (plan.pick && !el.closest('#picker') && !el.closest('#map')) closePicker();
     if (el.closest('[data-opendraw]')) return enterDraw();
     if ((n = el.closest('[data-pick]'))) return selectEntry(n.dataset.pick);
     if ((n = el.closest('[data-side]'))) return selectSide(n.dataset.side);
@@ -2862,7 +3154,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     const t = e.target, tag = t && t.tagName;
     if (e.key === 'Escape') {
       const m = document.querySelector('details.menu[open]');
-      if (m) { m.open = false; m.querySelector('summary').focus(); } else if (plan.stroke) cancelStroke(); else if (plan.on && (tag === 'INPUT' || tag === 'TEXTAREA')) t.blur(); // never clears the drawing
+      if (m) { m.open = false; m.querySelector('summary').focus(); } else if (plan.stroke) cancelStroke(); else if (plan.pick) closePicker(); else if (plan.on && (tag === 'INPUT' || tag === 'TEXTAREA')) t.blur(); // never clears the drawing
       return;
     }
     if (tag === 'SELECT' || tag === 'TEXTAREA' || (tag === 'INPUT' && t.type !== 'range')) return; // typing in a field is not playback
@@ -2879,7 +3171,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   /* ----- sizing: keep UI marks a fixed pixel size while the field scales ----- */
   function measure() {
     const w = svg.getBoundingClientRect().width;
-    if (w && Math.abs(w - W) > 1) { W = w; last = view(); paintMap(last); }
+    if (w && Math.abs(w - W) > 1) { W = w; closePicker(); last = view(); paintMap(last); } // a picker placed for the old size would be in the wrong spot
   }
   if (typeof ResizeObserver !== 'undefined') new ResizeObserver(measure).observe(svg); else window.addEventListener('resize', measure);
   // Side by side the list is always showing; stacked on a narrow screen it starts folded so the map comes first.

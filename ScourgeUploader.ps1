@@ -4409,7 +4409,7 @@ function Start-App {
         # First launch: grab the code automatically.
         Start-Download -SkipUploaderUpdate
     } elseif (-not $AfterUpdate) {
-        Set-Status 'Ready. Plug the USB cable into the brain, then click Upload to robot.' 'info'
+        Set-Status 'Ready. Plug USB into the controller, or the brain as a backup, then click Upload to robot.' 'info'
         Start-ReleaseCheck
     }
     Start-UploaderCheck -ForClick:$false

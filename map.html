@@ -231,6 +231,8 @@ code { background: var(--track); padding: 1px 4px; border-radius: 4px; }
   width: min(100%, max(280px, calc(100vh - 330px)));
   width: min(100%, max(280px, calc(100dvh - 330px)));
 }
+/* Embedded, the card's width decides: an iframe's height follows the page, so a height cap would shrink the field to nothing. */
+.embed #map { width: 100%; }
 .keyrow { display: flex; flex-wrap: wrap; gap: 4px 16px; padding: 8px var(--inset) 0; color: var(--text-2); font-size: var(--callout); }
 .keyrow:empty { display: none; }
 .key { display: inline-flex; align-items: center; gap: 7px; }
@@ -1371,7 +1373,16 @@ function frameCtx(model, sel, W, fit, layers) {
   const span = win.x1 - win.x0;
   const k = span / (wide - 2 * mgPx), mg = mgPx * k;
   const pins = sel && sel.route && sel.route.checks ? sel.route.checks.pins : {};
-  return { frame: 'field', k, span, win, fit: span < 2 * wall - 0.01, vb: [win.x0 - mg, -win.y1 - mg, span + 2 * mg, span + 2 * mg], grid: 24, wall, W: wide, pins };
+  // The predicted line in px, so no name is printed on it.
+  const predSegs = [];
+  if (sel && sel.sim && (!layers || layers.pred !== false)) {
+    const pts = thinPath(sel.sim.samples.map((q) => ({ x: q.x / k, y: -q.y / k })), 0.75);
+    for (let i = 0; i + 1 < pts.length; i++) predSegs.push([pts[i], pts[i + 1]]);
+    // and the robot standing at its start, which the playback draws there until it is played
+    const a = sel.sim.samples[0], c = footprintCorners(a.x, a.y, a.h, model.field.robot.length, model.field.robot.width).map((q) => ({ x: q.x / k, y: -q.y / k })), b = extent(c);
+    predSegs.start = { x: b.x0, y: b.y0, w: b.x1 - b.x0, h: b.y1 - b.y0 };
+  }
+  return { predSegs, frame: 'field', k, span, win, fit: span < 2 * wall - 0.01, vb: [win.x0 - mg, -win.y1 - mg, span + 2 * mg, span + 2 * mg], grid: 24, wall, W: wide, pins };
 }
 
 function resolveSel(model, state) {
@@ -1426,8 +1437,11 @@ function renderBase(model, sel, ctx) {
   }
   if (win.y0 <= -w + 0.01) p.push(at((win.x0 + win.x1) / 2, win.y0, k, '<text class="station" y="27" text-anchor="middle">OUR STATION</text>'));
   if (win.y1 >= w - 0.01) p.push(at((win.x0 + win.x1) / 2, win.y1, k, '<text class="station" y="-18" text-anchor="middle">FAR WALL</text>'));
-  p.push(at(win.x1, win.y0, k, '<text class="axis" y="27" text-anchor="end">+X right, in</text>'));
-  p.push(at(win.x0, win.y1, k, '<text class="axis" y="-18" text-anchor="start">+Y up, in</text>'));
+  // OUR STATION (about 82 px) and FAR WALL sit at the middle; the unit words sit at the corners and are left out when the field is too narrow to hold both.
+  if ((win.x1 - win.x0) / k >= 300) {
+    p.push(at(win.x1, win.y0, k, '<text class="axis" y="27" text-anchor="end">+X right, in</text>'));
+    p.push(at(win.x0, win.y1, k, '<text class="axis" y="-18" text-anchor="start">+Y up, in</text>'));
+  }
   p.push('<line class="aline ns" x1="' + f3(-w) + '" y1="' + f3(w) + '" x2="' + f3(w) + '" y2="' + f3(-w) + '"/>');
   // Our side is below the line, the other alliance's side above. A caption is left out when no stretch of the line in view is clear.
   fieldLabels(F, ctx).caps.forEach((c) => p.push(at(c.t, c.t, k, '<g transform="rotate(-45)"><text class="lbl halo' + (c.muted ? ' muted' : '') + '" y="' + c.off + '" text-anchor="middle">' + c.text + '</text></g>')));
@@ -1444,10 +1458,22 @@ const CAPTIONS = [
 ];
 const NAME_H = 14, NAME_CW = 6.9; // a little over the real text width, so a name keeps a gap to what is beside it
 const boxHitsBox = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+// Does the segment a to b touch the box, grown by pad on every side? (Liang-Barsky)
+function segHitsBox(a, b, box, pad) {
+  let t0 = 0, t1 = 1;
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const clip = (p, q) => {
+    if (p === 0) return q >= 0;
+    const r = q / p;
+    if (p < 0) { if (r > t1) return false; if (r > t0) t0 = r; } else { if (r < t0) return false; if (r < t1) t1 = r; }
+    return true;
+  };
+  return clip(-dx, a.x - (box.x - pad)) && clip(dx, box.x + box.w + pad - a.x) && clip(-dy, a.y - (box.y - pad)) && clip(dy, box.y + box.h + pad - a.y);
+}
 const boxHitsDisc = (b, d) => Math.hypot(d.x - Math.max(b.x, Math.min(d.x, b.x + b.w)), d.y - Math.max(b.y, Math.min(d.y, b.y + b.h))) < d.r;
 function fieldLabels(F, ctx) {
   if (ctx.labels) return ctx.labels;
-  const k = ctx.k, win = ctx.win, vb = ctx.vb, pins = ctx.pins || {};
+  const k = ctx.k, win = ctx.win, vb = ctx.vb, pins = ctx.pins || {}, segs = ctx.predSegs || [];
   const geo = F.goals.map((g) => {
     const R = Math.max(F.goalRadius / k, 4), ring = g.kind === 'neutral' ? R : R + 4;
     return { g, R, ring, x: g.x / k, y: -g.y / k, w: shortName(g.name || 'Goal').length * NAME_CW, disc: { x: g.x / k, y: -g.y / k, r: R + 6 } };
@@ -1476,7 +1502,7 @@ function fieldLabels(F, ctx) {
       for (let t = lo + half + 2; t <= hi - half - 2 + 1e-9; t += 2) {
         const cx = t / k + 0.7071 * (c.off - 3.5), cy = -t / k + 0.7071 * (c.off - 3.5), pts = [];
         for (let u = -len / 2; u <= len / 2 + 0.01; u += 8) pts.push({ x: cx + 0.7071 * u, y: cy - 0.7071 * u });
-        const clash = pts.some((q) => geo.some((o) => Math.hypot(q.x - o.x, q.y - o.y) < o.R + 13 || boxHitsDisc(boxAt(o, spots(o)[0]), { x: q.x, y: q.y, r: 6 })) || things.some((d) => Math.hypot(q.x - d.x, q.y - d.y) < d.r + 6));
+        const clash = pts.some((q) => geo.some((o) => Math.hypot(q.x - o.x, q.y - o.y) < o.R + 13 || boxHitsDisc(boxAt(o, spots(o)[0]), { x: q.x, y: q.y, r: 6 })) || things.some((d) => Math.hypot(q.x - d.x, q.y - d.y) < d.r + 6) || segs.some((sg) => distToSeg(q.x, q.y, sg[0], sg[1]) < 9));
         const dist = Math.abs(t - (lo + (hi - lo) * c.want));
         if (!clash && (!best || dist < best.dist)) best = { t, dist, pts };
       }
@@ -1496,11 +1522,13 @@ function fieldLabels(F, ctx) {
       placed.concat(axes).forEach((q) => { if (boxHitsBox(b, q)) hard++; });
       const onLine = b.x + b.y < 0 && b.x + b.w + b.y + b.h > 0 ? 1 : 0; // the line is x + y = 0 in px with y down
       const seen = b.x * k >= vb[0] && (b.x + b.w) * k <= vb[0] + vb[2] && b.y * k >= vb[1] && (b.y + b.h) * k <= vb[1] + vb[3];
-      const score = hard * 10 + (seen ? 0 : 3) + onLine;
-      if (!best || score < best.score) best = { score, c, b, seen };
+      const onPred = segs.some((sg) => segHitsBox(sg[0], sg[1], b, 3)) || (!!segs.start && boxHitsBox(b, { x: segs.start.x - 2, y: segs.start.y - 2, w: segs.start.w + 4, h: segs.start.h + 4 }));
+      const score = (hard + (onPred ? 1 : 0)) * 10 + (seen ? 0 : 3) + onLine;
+      if (!best || score < best.score) best = { score, c, b, seen, onPred };
     });
     placed.push(best.b);
-    goals.set(o.g, { dx: best.c.dx, dy: best.c.dy, anchor: best.c.a, box: best.b, seen: best.seen }); // a name that would be cut by the edge of the view is not printed
+    // A name that would be cut by the edge of the view, or would sit on the predicted line wherever it goes, is not printed.
+    goals.set(o.g, { dx: best.c.dx, dy: best.c.dy, anchor: best.c.a, box: best.b, seen: best.seen && !best.onPred });
   });
   ctx.labels = { goals, caps };
   return ctx.labels;
@@ -1804,7 +1832,9 @@ function renderSummary(model, state, sel) {
     else if (model.sessions.length && !sel.sim) sub = 'Pick a session to see it on the field.';
     const latest = lastRun(model, r), run = sel.runSession || (sel.mirror ? mirroredSession(latest) : latest);
     if (!r && !s && sel.sim) {
-      stats = [stat('Predicted time', fmtS(sel.sim.total)), stat('Steps', sel.sim.events.length ? String(sel.sim.events.length) : 'n/a'), stat('Side', sel.sim.side === 'R' ? 'Right' : 'Left')];
+      stats = [stat('Predicted time', fmtS(sel.sim.total))];
+      if (sel.sim.events.length > 1) stats.push(stat('Steps', String(sel.sim.events.length))); // one event is just the opening, not a list of steps
+      stats.push(stat('Side', sel.sim.side === 'R' ? 'Right' : 'Left'));
     } else if (run) {
       const sm = runSummary(sel.runSession ? sel.rows : missRows(r, run), run), label = latest && run.id === latest.id ? 'Last run' : 'This run';
       if (sm.worstIn !== null) {

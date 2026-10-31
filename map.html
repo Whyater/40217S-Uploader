@@ -45,6 +45,8 @@
   --pred: #0E7C86;
   --raw: #7B818C;
   --run: #7633C4;
+  --plan: #C2570C;
+  --on-plan: #FFFFFF;
   --goal-ally: #1E2126;
   --goal-neu: #6A6F78;
   --goal-opp: #B42318;
@@ -77,6 +79,8 @@
     --pred: #5CC8D6;
     --raw: #8F95A0;
     --run: #BB90FF;
+    --plan: #FF9F5A;
+    --on-plan: #1E1E1E;
     --goal-ally: #E8E8EA;
     --goal-neu: #9A9EA6;
     --goal-opp: #FF7060;
@@ -203,6 +207,8 @@ code { background: var(--track); padding: 1px 4px; border-radius: 4px; }
   font-size: var(--callout); font-weight: 500; transition: background-color 0.15s ease-out, color 0.15s ease-out;
 }
 .seg button:hover { background: var(--hover); }
+.seg button:disabled { opacity: 0.4; cursor: default; }
+.seg button:disabled:not([aria-pressed="true"]):hover { background: transparent; }
 .seg button[aria-pressed="true"] { background: var(--accent-fill); color: var(--on-accent); }
 .menu { position: relative; }
 .menu > summary {
@@ -315,6 +321,12 @@ svg text { font-family: var(--font); }
 .play-front.pred { stroke: var(--pred); }
 .play-dot.pred { fill: var(--pred); }
 .pred-trail { fill: none; stroke: var(--pred); stroke-width: 3.5; stroke-linejoin: round; stroke-linecap: round; }
+.plan-path { fill: none; stroke: var(--plan); stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; }
+.plan-path.draft { opacity: 0.7; }
+.plan-start { fill: var(--plan); stroke: var(--field); stroke-width: 1.5; }
+.plan-arrow { fill: var(--plan); stroke: var(--field); stroke-width: 1.5; stroke-linejoin: round; }
+.plan-tag rect { fill: var(--plan); }
+.plan-tag text { font-size: 10.5px; font-weight: 700; font-family: var(--mono); fill: var(--on-plan); text-anchor: middle; }
 .target-x { stroke: var(--text-2); stroke-width: 1.2; fill: none; }
 .miss-line { stroke-width: 1.6; fill: none; }
 .miss-ring { fill: var(--field); stroke-width: 2; }
@@ -433,6 +445,44 @@ td .na { color: var(--text-2); }
 .app[data-empty="1"] #map { opacity: 0.62; }
 .embed .standalone-only { display: none; }
 
+/* ---------- draw a proposed plan ---------- */
+.drawbtn {
+  display: inline-flex; align-items: center; gap: 6px; min-height: var(--hit); padding: 0 8px; border: 0; border-radius: 7px; background: transparent;
+  color: var(--text-2); font-size: var(--callout); transition: background-color 0.15s ease-out;
+}
+.drawbtn:hover { background: var(--hover); }
+.drawbtn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linejoin: round; stroke-linecap: round; }
+.btn { min-height: var(--hit); padding: 0 14px; border: 0; border-radius: 8px; background: var(--track); font-size: var(--callout); font-weight: 500; transition: background-color 0.15s ease-out; }
+.btn:hover:not(:disabled) { background: var(--sep); }
+.btn.primary { background: var(--accent-fill); color: var(--on-accent); }
+.btn.primary:hover:not(:disabled) { background: var(--accent-fill); filter: brightness(1.08); }
+.btn.primary:active:not(:disabled) { filter: brightness(0.92); }
+.btn:disabled { opacity: 0.4; cursor: default; }
+.drawmode { display: flex; align-items: center; justify-content: space-between; gap: 6px 12px; padding: 8px 10px 8px var(--inset); border-top: 0.5px solid var(--sep); background: var(--track); }
+.drawmode p { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.drawmode p::before { content: ""; flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--plan); }
+.drawbar { display: flex; flex-direction: column; gap: 10px; padding: 10px var(--inset) 12px; }
+.drawfields { display: grid; gap: 8px; }
+.fieldlbl { display: grid; gap: 4px; color: var(--text-2); font-size: var(--callout); }
+.fieldlbl input, .fieldlbl textarea {
+  width: 100%; margin: 0; padding: 0 10px; font: inherit; font-size: var(--body); color: var(--text); background: var(--track);
+  border: 0.5px solid var(--control-line); border-radius: 8px;
+}
+.fieldlbl input { min-height: var(--hit); }
+.fieldlbl textarea { min-height: calc(var(--hit) * 1.8); padding: 6px 10px; resize: none; }
+.fieldlbl input::placeholder, .fieldlbl textarea::placeholder { color: var(--text-2); opacity: 0.7; }
+@media (pointer: coarse) { .fieldlbl input, .fieldlbl textarea { font-size: 16px; } } /* under 16px, iOS zooms the page in when a field is focused */
+.drawstat { color: var(--text-2); font-size: var(--callout); }
+.drawmsg { font-size: var(--callout); align-items: flex-start; }
+.drawmsg i { margin-top: 4px; }
+.drawrow { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
+/* While drawing, the page is one calm column and a drag on the map draws instead of scrolling. */
+.app[data-draw="1"] { max-width: 700px; }
+.app[data-draw="1"] .stage { grid-template-columns: minmax(0, 1fr); }
+.app[data-draw="1"] .rail, .app[data-draw="1"] #steps, .app[data-draw="1"] #summary, .app[data-draw="1"] #emptybox,
+.app[data-draw="1"] .transport, .app[data-draw="1"] .playrow { display: none; }
+.app[data-draw="1"] #map { opacity: 1; cursor: crosshair; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
@@ -457,16 +507,33 @@ td .na { color: var(--text-2); }
     <section class="mapcol" aria-label="Field map">
       <div class="panel mapcard">
         <div class="toolbar" id="layers"></div>
+        <div class="drawmode" id="drawmode" hidden>
+          <p><span><b>Proposed plan:</b> a sketch, not a recording. Nothing changes on the robot.</span></p>
+          <button class="btn" id="draw-done" type="button">Done</button>
+        </div>
         <div class="mapbox">
           <svg id="map" role="img" aria-label="Field map" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
             <g id="g-static"></g>
             <g id="g-sel"></g>
             <g id="g-play"></g>
+            <g id="g-plan"></g>
           </svg>
           <div class="mapnote" id="mapnote"></div>
         </div>
         <div class="keyrow" id="keyrow" aria-label="Key"></div>
         <div class="emptybox" id="emptybox" hidden></div>
+        <div class="drawbar" id="drawbar" hidden>
+          <div class="drawfields">
+            <label class="fieldlbl"><span>Name</span><input id="plan-name" type="text" maxlength="80" autocomplete="off" autocapitalize="sentences" spellcheck="false" placeholder="For example: Left 2 goal"></label>
+            <label class="fieldlbl"><span>Note, optional</span><textarea id="plan-note" rows="2" maxlength="2000" placeholder="What the robot should do, in your words"></textarea></label>
+          </div>
+          <p class="drawstat" id="drawcount"></p>
+          <p class="drawmsg pill" id="drawmsg" role="status" hidden><i></i><span></span></p>
+          <div class="drawrow">
+            <div class="tb"><button class="btn" id="draw-undo" type="button">Undo</button><button class="btn" id="draw-clear" type="button">Clear</button></div>
+            <div class="tb"><button class="btn primary" id="draw-send" type="button">Send plan</button></div>
+          </div>
+        </div>
         <div class="transport" id="transport">
           <button class="icbtn" id="btn-prev" type="button" aria-label="Previous step (left arrow)" title="Previous step (left arrow)">
             <svg viewBox="0 0 14 14" aria-hidden="true"><path d="M9.5 1.5 3.5 7l6 5.5v-3L7 7l2.5-2.5z"/></svg>
@@ -818,6 +885,61 @@ function samplesUpTo(samples, t) {
   const p = interpPose(samples, t);
   if (p && (!out.length || out[out.length - 1].t < t)) out.push({ t, x: p.x, y: p.y, h: p.h });
   return out;
+}
+
+/* ---------- hand recordings play on a travel axis, not a clock ---------- */
+// How fast a route was pushed, and how long the robot sat still, must not change what the map shows, so a teach or push recording has no
+// time axis here. Travel = inches moved + degrees turned / TRAVEL_DEG, added up along the samples: standing still adds nothing, and a spin
+// in place is still a stretch of playback. Sample times only keep the rows in order and say which samples a mark falls between.
+const TRAVEL_DEG = 10, TRAVEL_RATE = 20; // TRAVEL_RATE: travel units per second of playback at 1x, about a robot at 20 in/s
+const isHand = (s) => !!s && (s.kind === 'push' || String(s.kind).indexOf('teach') === 0);
+// A copy of the session with every t replaced by travel, so interpPose, samplesUpTo, drawnPath and activeEvent work on it unchanged.
+// Samples and marks also carry d, the inches moved so far (turning left out), which is what the page shows; duration is the whole travel.
+function buildTravel(s) {
+  const sm = s.samples, cum = [], dist = [];
+  let tr = 0, d = 0;
+  sm.forEach((p, i) => {
+    if (i) { const q = sm[i - 1], mv = Math.hypot(p.x - q.x, p.y - q.y); d += mv; tr += mv + Math.abs(wrap180(p.h - q.h)) / TRAVEL_DEG; }
+    cum.push(tr); dist.push(d);
+  });
+  const place = (t) => {
+    const n = sm.length;
+    if (!n) return { t: 0, d: 0 };
+    if (t <= sm[0].t) return { t: cum[0], d: dist[0] };
+    if (t >= sm[n - 1].t) return { t: cum[n - 1], d: dist[n - 1] };
+    let lo = 0, hi = n - 1;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (sm[m].t <= t) lo = m; else hi = m; }
+    const u = sm[hi].t > sm[lo].t ? (t - sm[lo].t) / (sm[hi].t - sm[lo].t) : 0;
+    return { t: cum[lo] + (cum[hi] - cum[lo]) * u, d: dist[lo] + (dist[hi] - dist[lo]) * u };
+  };
+  const placed = (o) => Object.assign({}, o, place(o.t));
+  return Object.assign({}, s, { samples: sm.map((p, i) => Object.assign({}, p, { t: cum[i], d: dist[i] })), marks: s.marks.map(placed), events: s.events.map(placed), duration: tr, inches: d, axis: 'travel' });
+}
+// Memoized, so the copy keeps its identity (the mirror memo and the path thinning rely on that). Marks keep their order and count.
+const travelMemo = new WeakMap();
+function travelOf(s) {
+  if (!s || s.axis === 'travel') return s;
+  if (!travelMemo.has(s)) travelMemo.set(s, buildTravel(s));
+  return travelMemo.get(s);
+}
+// Inches moved at a point on the travel axis, for the readout.
+function inchesAt(s, t) {
+  const a = s.samples, n = a.length;
+  if (!n) return 0;
+  if (t <= a[0].t) return a[0].d;
+  if (t >= a[n - 1].t) return a[n - 1].d;
+  let lo = 0, hi = n - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (a[m].t <= t) lo = m; else hi = m; }
+  return a[hi].t > a[lo].t ? a[lo].d + (a[hi].d - a[lo].d) * ((t - a[lo].t) / (a[hi].t - a[lo].t)) : a[lo].d;
+}
+// Whole inches, or one decimal while the whole recording is under 10 in.
+const fmtIn = (v, total) => (isNum(v) ? v.toFixed(isNum(total) && total < 10 ? 1 : 0) : 'n/a');
+const handLength = (s) => { const v = travelOf(s).inches; return fmtIn(v, v) + ' in'; };
+const playRate = (s) => (s && s.axis === 'travel' ? TRAVEL_RATE : 1);
+// The two readout strings: inches for a hand recording, seconds for a run or the prediction.
+function readoutText(s, t) {
+  if (s && s.axis === 'travel') return { time: fmtIn(inchesAt(s, t || 0), s.inches) + ' in', dur: '/ ' + fmtIn(s.inches, s.inches) + ' in' };
+  return { time: (t || 0).toFixed(2) + ' s', dur: s ? '/ ' + s.duration.toFixed(2) + ' s' : '' };
 }
 
 /* ---------- route logic: raw session, miss table, contacts, pushes ---------- */
@@ -1401,7 +1523,7 @@ function resolveSel(model, state) {
   // The transport plays the prediction unless the recording was asked for (and has a path to play).
   const hasPath = !!(session && session.samples.length);
   const playSim = !!sim && state.layers.pred !== false && !(state.play === 'rec' && hasPath);
-  const scrub0 = playSim ? sim : hasPath ? session : null;
+  const scrub0 = playSim ? sim : hasPath ? (isHand(session) ? travelOf(session) : session) : null; // a hand recording plays on travel, never on its clock
   // Right shows true field position: the prediction and every recorded layer are mirrored together, so they always share a frame.
   const mirror = frame === 'field' && (sim ? sim.side : state.side || 'L') === 'R';
   const M = (x) => (mirror ? mirroredSession(x) : x), mroute = mirror ? mirroredRoute(route, model.field) : route;
@@ -1664,9 +1786,10 @@ function renderRaw(model, sel, ctx) {
   const s = sel.rawSession, k = ctx.k, p = [];
   if (!s) return '';
   if (s.samples.length > 1) p.push('<path class="raw-line ns" d="' + linePath(drawnPath(s.samples, k)) + '"/>');
-  s.marks.forEach((m) => {
+  const tv = travelOf(s);
+  s.marks.forEach((m, i) => {
     if (m.x === null || m.y === null || !MARK_KINDS.has(m.kind)) return;
-    p.push(at(m.x, m.y, k, sym(m.kind, 5.2, 'sym raw') + '<title>Hand mark: ' + esc(KIND_LABEL[m.kind] || m.kind) + ' at ' + fmt(m.t, 1) + ' s</title>'));
+    p.push(at(m.x, m.y, k, sym(m.kind, 5.2, 'sym raw') + '<title>Hand mark: ' + esc(KIND_LABEL[m.kind] || m.kind) + ' after ' + fmtIn(tv.marks[i].d, tv.inches) + ' in</title>'));
   });
   return p.join('');
 }
@@ -1721,10 +1844,11 @@ function renderPushLayer(sel, ctx) {
   const s = sel.session, k = ctx.k, p = [];
   if (s.samples.length > 1) p.push('<path class="run-line ns" d="' + linePath(drawnPath(s.samples, k)) + '"/>');
   let n = 0;
-  s.marks.forEach((m) => {
+  const tv = travelOf(s);
+  s.marks.forEach((m, i) => {
     if (m.x === null || m.y === null || m.type !== 'push') return;
     n++;
-    p.push(at(m.x, m.y, k, sym('push', 6, 'sym') + '<g transform="translate(12 -11)">' + tagSvg(n, n, false) + '</g><title>Push ' + n + ' marked at ' + fmt(m.t, 1) + ' s</title>'));
+    p.push(at(m.x, m.y, k, sym('push', 6, 'sym') + '<g transform="translate(12 -11)">' + tagSvg(n, n, false) + '</g><title>Push ' + n + ' marked after ' + fmtIn(tv.marks[i].d, tv.inches) + ' in</title>'));
   });
   return p.join('');
 }
@@ -1781,6 +1905,141 @@ function renderPlay(model, state, sel, ctx) {
   out.push(robotAt(pose, F.robot.length, F.robot.width, k, 'play-fp' + pr, 'play-front' + pr));
   out.push(at(pose.x, pose.y, k, '<circle class="play-dot' + pr + '" r="3"/>'));
   return out.join('');
+}
+
+/* ---------- proposed plans: the draw tool's pure parts ---------- */
+// The limits are the shared contract's (ROUTE_SYNC_SPEC.md, Proposed auto plans); the relay checks them again.
+const PLAN_LIMITS = { name: 80, note: 2000, lines: 50, perLine: 500, total: 3000, coord: 100, minLen: 1, tol: 1 };
+const round2 = (v) => Math.round(v * 100) / 100 + 0; // + 0 turns a -0 into 0
+const lineLength = (line) => { let d = 0; for (let i = 1; i < line.length; i++) d += Math.hypot(line[i][0] - line[i - 1][0], line[i][1] - line[i - 1][1]); return d; };
+const planLength = (lines) => lines.reduce((a, l) => a + lineLength(l), 0);
+
+// A screen point to field inches. inv is svg.getScreenCTM().inverse() (a to f); the svg's y runs down and the field's runs up, so y flips.
+// Clamped to the wall. The + 0 keeps a -0 from reaching the plan.
+function fieldFromScreen(inv, cx, cy, wall) {
+  const x = inv.a * cx + inv.c * cy + inv.e, y = -(inv.b * cx + inv.d * cy + inv.f);
+  if (!isNum(x) || !isNum(y)) return null;
+  const c = (v) => Math.max(-wall, Math.min(wall, v)) + 0;
+  return { x: c(x), y: c(y) };
+}
+
+// Ramer-Douglas-Peucker: keep the points that bend the line by more than tol, drop the rest. Iterative, so a long scribble cannot overflow the stack.
+function simplifyLine(pts, tol) {
+  const n = pts.length;
+  if (n < 3) return pts.slice();
+  const keep = new Array(n).fill(false), stack = [[0, n - 1]];
+  keep[0] = keep[n - 1] = true;
+  while (stack.length) {
+    const ab = stack.pop(), a = ab[0], b = ab[1];
+    let far = -1, fd = tol;
+    for (let i = a + 1; i < b; i++) { const d = distToSeg(pts[i].x, pts[i].y, pts[a], pts[b]); if (d > fd) { fd = d; far = i; } }
+    if (far >= 0) { keep[far] = true; stack.push([a, far], [far, b]); }
+  }
+  return pts.filter((p, i) => keep[i]);
+}
+// A drawn stroke ({x, y} points) becomes a plan line ([x, y] pairs): simplified at 1 in, rounded to 2 places, null when it is under 1 in long.
+function strokeToLine(stroke) {
+  if (stroke.length < 2) return null;
+  const line = simplifyLine(stroke, PLAN_LIMITS.tol).map((p) => [round2(p.x), round2(p.y)]);
+  return line.length < 2 || lineLength(line) < PLAN_LIMITS.minLen ? null : line;
+}
+// One more line, or the plain sentence for the limit that stops it. The plan is never changed when it says no.
+function addPlanLine(lines, line) {
+  const total = lines.reduce((a, l) => a + l.length, 0);
+  if (lines.length >= PLAN_LIMITS.lines) return { lines, error: 'A plan holds up to ' + PLAN_LIMITS.lines + ' lines. Undo or clear a line to draw another.' };
+  if (line.length > PLAN_LIMITS.perLine) return { lines, error: 'That line has too many bends to keep (over ' + PLAN_LIMITS.perLine + ' points). Draw it with fewer turns.' };
+  if (total + line.length > PLAN_LIMITS.total) return { lines, error: 'This plan has reached its limit of ' + PLAN_LIMITS.total + ' points. Undo or clear a line to draw more.' };
+  return { lines: lines.concat([line]), error: null };
+}
+// The plan the host sends (schema 1). build is the shown prediction's tag or null.
+function buildPlan(o) {
+  const text = (v) => String(v == null ? '' : v).trim();
+  return {
+    schema: 1, kind: 'proposed-auto-plan', name: text(o.name), side: o.side === 'R' ? 'R' : 'L', note: text(o.note),
+    build: typeof o.build === 'string' && o.build ? o.build.slice(0, 100) : null,
+    lines: arr(o.lines).map((l) => ({ points: arr(l).map((p) => [round2(p[0]), round2(p[1])]) })),
+  };
+}
+// null when the plan keeps every limit, else the sentence to show. Checked again right before sending: a plan that breaks one never goes out.
+function validatePlan(plan) {
+  if (!plan || plan.schema !== 1 || plan.kind !== 'proposed-auto-plan') return 'This is not a plan this page can send.';
+  if (typeof plan.name !== 'string' || !plan.name.length) return 'Give the plan a name before sending it.';
+  if (plan.name.length > PLAN_LIMITS.name) return 'The name can be up to ' + PLAN_LIMITS.name + ' characters.';
+  if (typeof plan.note !== 'string' || plan.note.length > PLAN_LIMITS.note) return 'The note can be up to ' + PLAN_LIMITS.note + ' characters.';
+  if (plan.side !== 'L' && plan.side !== 'R') return 'The plan needs a side.';
+  if (plan.build !== null && (typeof plan.build !== 'string' || plan.build.length > 100)) return 'The build name is too long.';
+  if (!Array.isArray(plan.lines) || !plan.lines.length) return 'Draw at least one line before sending.';
+  if (plan.lines.length > PLAN_LIMITS.lines) return 'A plan holds up to ' + PLAN_LIMITS.lines + ' lines.';
+  let total = 0;
+  for (const l of plan.lines) {
+    const pts = l && l.points;
+    if (!Array.isArray(pts) || pts.length < 2 || pts.length > PLAN_LIMITS.perLine) return 'Each line needs 2 to ' + PLAN_LIMITS.perLine + ' points.';
+    total += pts.length;
+    if (!pts.every((p) => Array.isArray(p) && p.length === 2 && isNum(p[0]) && isNum(p[1]) && Math.abs(p[0]) <= PLAN_LIMITS.coord && Math.abs(p[1]) <= PLAN_LIMITS.coord)) return 'A point is outside the field.';
+  }
+  return total > PLAN_LIMITS.total ? 'A plan holds up to ' + PLAN_LIMITS.total + ' points in all.' : null;
+}
+// A saved draft read back: anything that is not a clean line, name or note is dropped rather than trusted.
+function sanitizeDraft(raw) {
+  const d = raw && typeof raw === 'object' ? raw : {}, lines = [];
+  let total = 0;
+  arr(d.lines).forEach((l) => {
+    if (!Array.isArray(l) || l.length < 2 || l.length > PLAN_LIMITS.perLine || lines.length >= PLAN_LIMITS.lines || total + l.length > PLAN_LIMITS.total) return;
+    const pts = l.map((p) => (Array.isArray(p) && isNum(p[0]) && isNum(p[1]) && Math.abs(p[0]) <= PLAN_LIMITS.coord && Math.abs(p[1]) <= PLAN_LIMITS.coord ? [round2(p[0]), round2(p[1])] : null));
+    if (pts.some((p) => !p)) return;
+    lines.push(pts); total += pts.length;
+  });
+  return {
+    lines, name: typeof d.name === 'string' ? d.name.slice(0, PLAN_LIMITS.name) : '', note: typeof d.note === 'string' ? d.note.slice(0, PLAN_LIMITS.note) : '',
+    side: lines.length ? (d.side === 'R' ? 'R' : 'L') : null,
+  };
+}
+// What the map draws while drawing: the whole field with only the prediction under the lines, so no route, recording or step mark is mistaken for one.
+function drawState(state) {
+  return Object.assign({}, state, { route: null, session: null, step: null, hover: null, view: 'field', layers: Object.assign({}, state.layers, { pred: true }) });
+}
+// Each line: its path, a dot where it starts, an arrow where it ends, and its order number. Sized in px through ctx.k like every other mark.
+function planTag(n) {
+  const w = Math.max(15, String(n).length * 6.6 + 8);
+  return '<g class="plan-tag"><rect x="' + f3(-w / 2) + '" y="-7.5" width="' + f3(w) + '" height="15" rx="3.5"/><text y="3.8">' + esc(n) + '</text></g>';
+}
+// Which way a line is heading at its end, in degrees on the page (y down), read over its last len inches so a hook of finger jitter
+// where the drag stopped does not turn the arrow around.
+function endHeading(line, len) {
+  const z = line[line.length - 1];
+  let acc = 0, a = z;
+  const ang = (b) => (Math.atan2(-(z[1] - b[1]), z[0] - b[0]) * 180) / Math.PI;
+  for (let i = line.length - 2; i >= 0; i--) {
+    const p = line[i], d = Math.hypot(a[0] - p[0], a[1] - p[1]);
+    if (acc + d >= len) { const u = d ? (len - acc) / d : 0; return ang([a[0] + (p[0] - a[0]) * u, a[1] + (p[1] - a[1]) * u]); }
+    acc += d; a = p;
+  }
+  return ang(line[0]);
+}
+const planMemo = new WeakMap();
+function renderPlanLines(lines, k) {
+  const hit = planMemo.get(lines);
+  if (hit && hit.k === k) return hit.html;
+  const xy = lines.map((l) => l.map((p) => ({ x: p[0], y: p[1] })));
+  const p = xy.map((l, i) => '<path class="plan-path ns" d="' + linePath(l) + '"><title>Line ' + (i + 1) + ', ' + fmt(lineLength(lines[i]), 0) + ' in</title></path>');
+  lines.forEach((l, i) => {
+    const a = l[0], z = l[l.length - 1], ang = endHeading(l, 14 * k);
+    p.push(at(a[0], a[1], k, '<circle class="plan-start" r="4.5"/>'));
+    p.push(at(z[0], z[1], k, '<path class="plan-arrow" d="M0 0L-13 7L-13 -7Z" transform="rotate(' + f3(ang) + ')"/>'));
+  });
+  lines.forEach((l, i) => p.push(at(l[0][0], l[0][1], k, '<g transform="translate(12 -12)">' + planTag(i + 1) + '</g>')));
+  const html = p.join('');
+  planMemo.set(lines, { k, html });
+  return html;
+}
+// draw: { lines, stroke } or null. stroke is the line being dragged now ({x, y} points).
+function renderPlan(draw, ctx) {
+  if (!draw) return '';
+  const k = ctx.k, st = draw.stroke;
+  let out = renderPlanLines(draw.lines, k);
+  if (st && st.length > 1) out += '<path class="plan-path draft ns" d="' + linePath(thinPath(st, k * PATH_TOL_PX)) + '"/>';
+  else if (st && st.length === 1) out += at(st[0].x, st[0].y, k, '<circle class="plan-start" r="4.5"/>');
+  return out;
 }
 
 /* ---------- html panels (strings) ---------- */
@@ -1897,7 +2156,7 @@ function renderLists(model, state, sel) {
       } else if (s.kind === 'push') {
         extra = '<span class="row-x txt">' + plural(s.marks.filter((m) => m.type === 'push').length, 'push', 'pushes') + '</span>';
       }
-      const bits = [when2(s), s.side ? 'side ' + s.side : '', s.samples.length ? fmt(s.duration, 1) + ' s' : 'no samples', s.kind !== 'run' && s.for_slot ? 'route ' + s.for_slot : '', note].filter(Boolean);
+      const bits = [when2(s), s.side ? 'side ' + s.side : '', s.samples.length ? (isHand(s) ? handLength(s) : fmt(s.duration, 1) + ' s') : 'no samples', s.kind !== 'run' && s.for_slot ? 'route ' + s.for_slot : '', note].filter(Boolean);
       p.push('<li><button type="button" class="row" title="' + esc(s.id) + '" data-key="ses-' + esc(s.id) + '" data-session="' + esc(s.id) + '" aria-pressed="' + (state.session === s.id) + '"><span class="row-t">' + esc(title) + '</span>' + extra + '<span class="row-m">' + esc(bits.join(' · ')) + '</span></button></li>');
     });
     p.push('</ul>');
@@ -1912,6 +2171,7 @@ function layerSwatch(id) {
     route: '<line x1="1" y1="6" x2="21" y2="6" stroke="var(--route)" stroke-width="2.5" stroke-linecap="round"/>',
     raw: '<path d="M1 8 C5 2,8 10,12 5 S18 7,21 4" fill="none" stroke="var(--raw)" stroke-width="1.4"/>',
     run: '<line x1="1" y1="6" x2="21" y2="6" stroke="var(--run)" stroke-width="2.2" stroke-linecap="round"/>',
+    plan: '<line x1="1" y1="6" x2="21" y2="6" stroke="var(--plan)" stroke-width="3" stroke-linecap="round"/>',
     foot: '<rect x="4" y="0.5" width="14" height="11" fill="none" stroke="var(--route)" stroke-width="1" opacity="0.7"/><line x1="4" y1="0.5" x2="18" y2="0.5" stroke="var(--route)" stroke-width="2.5"/>',
     sweep: '<rect x="1" y="1" width="20" height="10" fill="var(--route)" fill-opacity="0.12" stroke="var(--route)" stroke-dasharray="3 2"/>',
     tags: '<rect x="3" y="-1" width="16" height="14" rx="3.5" fill="var(--solid)" stroke="var(--text-2)"/><text x="11" y="9.5" font-size="10" font-weight="600" text-anchor="middle" fill="var(--text)">3</text>',
@@ -1928,12 +2188,16 @@ function renderLayers(model, state, sel) {
   const seg = (v, label, on) => '<button type="button" data-key="view-' + v + '" data-view="' + v + '" aria-pressed="' + on + '">' + label + '</button>';
   const entries = routeEntries(model), sides = sel.entry ? ['L', 'R'].filter((sd) => sel.entry.sim[sd]) : [];
   const pick = entries.length > 1 ? '<div class="seg" role="group" aria-label="Route">' + entries.map((x) => '<button type="button" data-key="pick-' + esc(x.key) + '" data-pick="' + esc(x.key) + '" aria-pressed="' + (sel.entry === x) + '">' + esc(x.label) + '</button>').join('') + '</div>' : '';
-  const side = sides.length > 1 ? '<div class="seg" role="group" aria-label="Side">' + sides.map((sd) => '<button type="button" data-key="side-' + sd + '" data-side="' + sd + '" aria-pressed="' + (!!sel.sim && sel.sim.side === sd) + '">' + (sd === 'L' ? 'Left' : 'Right') + '</button>').join('') + '</div>' : '';
+  // Drawing with nothing predicted still needs a side to pick; a plan has one side, so the control locks once there is a line.
+  const drawing = !!state.draw, locked = drawing && state.draft > 0;
+  const side = sides.length > 1 || (drawing && !sides.length) ? '<div class="seg" role="group" aria-label="Side">' + ['L', 'R'].map((sd) => '<button type="button" data-key="side-' + sd + '" data-side="' + sd + '" aria-pressed="' + (sel.sim ? sel.sim.side === sd : (state.side || 'L') === sd) + '"' + (locked ? ' disabled' : '') + '>' + (sd === 'L' ? 'Left' : 'Right') + '</button>').join('') + '</div>' : '';
   const view = '<div class="seg" role="group" aria-label="Map view">' + seg('fit', 'Fit route', sel.viewMode !== 'field') + seg('field', 'Whole field', sel.viewMode === 'field') + '</div>';
   const av = layerAvail(sel), defs = LAYER_DEFS.filter((d) => av[d[0]]);
   const rows = defs.map((d) => '<button type="button" class="menu-row" data-key="layer-' + d[0] + '" data-layer="' + d[0] + '" aria-pressed="' + !!state.layers[d[0]] + '"><svg class="chk" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6.5 5 9.5 10 3"/></svg>' + layerSwatch(d[0]) + '<span>' + esc(d[1]) + '</span></button>').join('');
   const menu = defs.length > 1 ? '<details class="menu" data-keep="layers"' + isOpen(state, 'layers') + '><summary><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.5 13 4.7 7 8 1 4.7z"/><path d="M1 7.6 7 10.9 13 7.6"/></svg>Layers</summary><div class="menu-pop" role="group" aria-label="Map layers">' + rows + '</div></details>' : '';
-  return '<div class="tb tb-left">' + pick + side + '</div><div class="tb tb-right">' + view + menu + '</div>';
+  const draw = state.canDraw ? '<button type="button" class="drawbtn" data-key="draw" data-opendraw="1"><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M2.2 11.8 2.8 9 9.6 2.2a1.1 1.1 0 0 1 1.6 0l.6.6a1.1 1.1 0 0 1 0 1.6L5 11.2z"/><path d="M8.4 3.4l2.2 2.2"/></svg>' + (state.draft ? 'Continue plan' : 'Draw a plan') + '</button>' : '';
+  if (drawing) return pick + side ? '<div class="tb tb-left">' + pick + side + '</div>' : '';
+  return '<div class="tb tb-left">' + pick + side + '</div><div class="tb tb-right">' + view + menu + draw + '</div>';
 }
 // One chip per line that is drawn, under the map, so the dashed line always has its own entry.
 function renderKey(state, sel) {
@@ -1944,12 +2208,13 @@ function renderKey(state, sel) {
   if (sel.route && on('route')) items.push(['route', 'Cleaned route']);
   if (sel.rawSession && on('raw')) items.push(['raw', 'Raw hand path']);
   if (sel.runSession && on('run')) items.push(['run', 'Run path']);
+  if (state.draw) items.push(['plan', 'Proposed plan']);
   return items.map((d) => '<span class="key">' + layerSwatch(d[0]) + d[1] + '</span>').join('');
 }
 // Which of the two paths the transport plays, offered only when both are on the map.
 function renderPlaySrc(state, sel) {
   if (!sel.sim || state.layers.pred === false || !sel.session || !sel.session.samples.length) return '';
-  const b = (v, label) => '<button type="button" data-key="play-' + v + '" data-play="' + v + '" aria-pressed="' + (v === 'pred' ? sel.scrub === sel.sim : sel.scrub === sel.session) + '">' + label + '</button>';
+  const b = (v, label) => '<button type="button" data-key="play-' + v + '" data-play="' + v + '" aria-pressed="' + (v === 'pred' ? sel.scrub === sel.sim : sel.scrub !== sel.sim) + '">' + label + '</button>';
   return b('pred', 'Predicted') + b('rec', 'Recorded');
 }
 
@@ -2015,7 +2280,7 @@ function pushPanel(sel) {
   if (!pd.hasSamples) return h + '<p class="hint">' + pd.rows.length + ' push mark' + (pd.rows.length === 1 ? '' : 's') + ' found, but this session has no samples, so no distances are shown.</p>';
   const mx = pd.max || 1;
   h += '<p class="hint" style="margin-bottom:8px">Straight-line distance from the first sample (the start pose) to each push mark. This assumes the robot was dragged back to the start each time. The pass or fail verdict comes from the laptop tool.</p>';
-  h += pd.rows.map((r) => '<div class="pinrow"><span>Push ' + r.n + ' <span class="muted">at ' + fmt(r.t, 1) + ' s</span></span><span>' + fmt(r.dist, 2) + ' in</span></div>' + (r.dist !== null ? '<span class="minibar" style="width:' + Math.max(2, (r.dist / mx) * 100).toFixed(1) + '%"></span>' : '')).join('');
+  h += pd.rows.map((r) => '<div class="pinrow"><span>Push ' + r.n + '</span><span>' + fmt(r.dist, 2) + ' in</span></div>' + (r.dist !== null ? '<span class="minibar" style="width:' + Math.max(2, (r.dist / mx) * 100).toFixed(1) + '%"></span>' : '')).join('');
   h += '<dl class="kv" style="margin-top:10px"><dt>Mean</dt><dd>' + fmt(pd.mean, 2) + ' in</dd><dt>Spread</dt><dd>' + (pd.spread !== null ? fmt(pd.spread, 2) + ' in (max minus min)' : 'needs 2 or more pushes') + '</dd></dl>';
   return h;
 }
@@ -2040,7 +2305,7 @@ function renderInspector(model, state, sel) {
     p.push('<div class="panel pad">' + h + '</div>');
   } else {
     const s = sel.session;
-    p.push('<div class="panel pad">' + (s ? '<h3>' + esc(sessionLabel(s)) + '</h3><dl class="kv"><dt>Recorded</dt><dd>' + esc(when2(s)) + '</dd><dt>Samples</dt><dd class="num">' + s.samples.length + '</dd><dt>Marks</dt><dd class="num">' + s.marks.length + '</dd><dt>Length</dt><dd class="num">' + fmt(s.duration, 1) + ' s</dd><dt>Source</dt><dd class="id">' + esc(s.id) + '</dd></dl>' : '<h3>Nothing selected</h3><p class="hint">Pick a session to draw it on the field.</p>') + '</div>');
+    p.push('<div class="panel pad">' + (s ? '<h3>' + esc(sessionLabel(s)) + '</h3><dl class="kv"><dt>Recorded</dt><dd>' + esc(when2(s)) + '</dd><dt>Samples</dt><dd class="num">' + s.samples.length + '</dd><dt>Marks</dt><dd class="num">' + s.marks.length + '</dd><dt>Length</dt><dd class="num">' + (isHand(s) ? handLength(s) : fmt(s.duration, 1) + ' s') + '</dd><dt>Source</dt><dd class="id">' + esc(s.id) + '</dd></dl>' : '<h3>Nothing selected</h3><p class="hint">Pick a session to draw it on the field.</p>') + '</div>');
   }
   p.push(renderLegend(state, sel));
   return p.join('');
@@ -2125,7 +2390,7 @@ function renderTicks(sel) {
   } else if (sel.rows && sel.runSession === s) {
     sel.rows.forEach((r) => { if (r.reached && isNum(r.t)) out.push('<span class="' + (r.ok === false ? 'bad' : r.rating || '') + '" style="left:' + ((r.t / s.duration) * 100).toFixed(2) + '%" title="Step ' + r.idx + ' done at ' + fmt(r.t, 2) + ' s"></span>'); });
   } else {
-    s.marks.forEach((m) => out.push('<span style="left:' + ((m.t / s.duration) * 100).toFixed(2) + '%" title="' + esc(KIND_LABEL[m.kind] || m.kind) + ' mark at ' + fmt(m.t, 2) + ' s"></span>'));
+    s.marks.forEach((m) => out.push('<span style="left:' + ((m.t / s.duration) * 100).toFixed(2) + '%" title="' + esc(KIND_LABEL[m.kind] || m.kind) + ' mark' + (s.axis === 'travel' ? ' after ' + fmtIn(m.d, s.inches) + ' in' : ' at ' + fmt(m.t, 2) + ' s') + '"></span>'));
   }
   return out.join('');
 }
@@ -2141,8 +2406,8 @@ function playInfoText(sel, t) {
     return 'Last result: ' + (e.step !== null && e.step < 0 ? 'opening' : 'step ' + e.step) + ' (' + (KIND_LABEL[e.type] || e.type || 'step') + ') at ' + fmt(e.t, 2) + ' s' + (r && r.missIn !== null ? ', miss ' + fmt(r.missIn, 2) + ' in' : '') + '.';
   }
   const mk = s.marks.filter((m) => m.t <= t + 1e-9);
-  if (!rows && mk.length) { const m = mk[mk.length - 1]; return 'Last mark: ' + (KIND_LABEL[m.kind] || m.kind) + ' at ' + fmt(m.t, 2) + ' s.'; }
-  return 'No step result yet at this time.';
+  if (!rows && mk.length) { const m = mk[mk.length - 1]; return 'Last mark: ' + (KIND_LABEL[m.kind] || m.kind) + (s.axis === 'travel' ? ' after ' + fmtIn(m.d, s.inches) + ' in.' : ' at ' + fmt(m.t, 2) + ' s.'); }
+  return s.axis === 'travel' ? 'No mark yet at this point.' : 'No step result yet at this time.';
 }
 function currentStepAt(sel, t) {
   if (!sel.runSession || sel.scrub !== sel.runSession) return null;
@@ -2151,25 +2416,30 @@ function currentStepAt(sel, t) {
 }
 
 // Nothing predicted, nothing recorded: the quiet field and the one thing to do.
-function renderEmpty(model) {
+function renderEmpty(model, state) {
   if (model.sim || model.routes.length || model.sessions.length || model.rejected.length) return '';
-  return '<h2>No prediction for this build yet</h2><p>Get the latest build, then Refresh.</p><p class="standalone-only">The laptop tool builds this page from your data.</p>' + (model.note ? '<p class="notel">' + esc(model.note) + '</p>' : '');
+  // Drawing needs only the field, so a build with no prediction can still propose a plan.
+  const draw = state && state.canDraw ? '<p><button type="button" class="drawbtn" data-key="draw" data-opendraw="1">' + (state.draft ? 'Continue plan' : 'Draw a plan') + '</button></p>' : '';
+  return '<h2>No prediction for this build yet</h2><p>Get the latest build, then Refresh.</p><p class="standalone-only">The laptop tool builds this page from your data.</p>' + (model.note ? '<p class="notel">' + esc(model.note) + '</p>' : '') + draw;
 }
 
+// state.draw ({ lines, stroke }) is set while the draw tool is open; then the map layers come from the draw view and the rest of the page is left as it was.
 function renderAll(model, state, W) {
-  const sel = resolveSel(model, state);
-  const ctx = frameCtx(model, sel, W, sel.viewMode !== 'field', state.layers);
+  const sel = resolveSel(model, state), drawing = !!state.draw;
+  const mst = drawing ? drawState(state) : state, msel = drawing ? resolveSel(model, mst) : sel;
+  const ctx = frameCtx(model, msel, W, msel.viewMode !== 'field', mst.layers);
   const cur = currentStepAt(sel, state.t || 0);
   return {
-    sel, ctx, viewBox: ctx.vb.map(f3).join(' '),
-    static: renderStatic(model, state, sel, ctx), selLayer: renderSel(model, state, sel, ctx), play: renderPlay(model, state, sel, ctx),
-    summary: renderSummary(model, state, sel), warn: renderWarn(model, sel, state), lists: renderLists(model, state, sel), layers: renderLayers(model, state, sel), inspector: renderInspector(model, state, sel),
+    sel, msel, ctx, viewBox: ctx.vb.map(f3).join(' '),
+    static: renderStatic(model, mst, msel, ctx), selLayer: renderSel(model, mst, msel, ctx), play: drawing ? '' : renderPlay(model, state, sel, ctx), plan: renderPlan(state.draw, ctx),
+    summary: renderSummary(model, state, sel), warn: renderWarn(model, sel, state), lists: renderLists(model, state, sel), layers: renderLayers(model, state, msel), inspector: renderInspector(model, state, sel),
     steps: renderSteps(model, state, sel, cur), ticks: renderTicks(sel), playinfo: playInfoText(sel, state.t || 0),
-    key: renderKey(state, sel), playsrc: renderPlaySrc(state, sel), empty: renderEmpty(model), listed: listedSessions(model, sel.entry).length,
+    key: renderKey(mst, msel), playsrc: renderPlaySrc(state, sel), empty: state.draw ? '' : renderEmpty(model, state), listed: listedSessions(model, sel.entry).length,
   };
 }
 
-const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normalize, resolveWaypoints, missRows, runSummary, pushDistances, footprintCorners, hull, areaOf, interpPose, circleHitsHull, sweepPoints, contacts, rawSessionFor, layoutTags, fitWindow, openingPoint, displayRoute, startPoseOf, frameCtx, resolveSel, renderAll, renderPlay, fmt, esc, activeEvent, shortName, parseWire, leftFrame, rejectionText, buildModel, sameSession, lastRun, pickSelection, slotFromBuild, runMatchesRoute, whenFine, openingLabel, hostAllowed, thinPath, drawnPath, DEFAULT_FIELD, mirroredSession, mirroredRoute, normSim, buildNum, routeEntries, pickView, simFor, belongs, fieldLabels, renderEmpty };
+const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normalize, resolveWaypoints, missRows, runSummary, pushDistances, footprintCorners, hull, areaOf, interpPose, circleHitsHull, sweepPoints, contacts, rawSessionFor, layoutTags, fitWindow, openingPoint, displayRoute, startPoseOf, frameCtx, resolveSel, renderAll, renderPlay, fmt, esc, activeEvent, shortName, parseWire, leftFrame, rejectionText, buildModel, sameSession, lastRun, pickSelection, slotFromBuild, runMatchesRoute, whenFine, openingLabel, hostAllowed, thinPath, drawnPath, DEFAULT_FIELD, mirroredSession, mirroredRoute, normSim, buildNum, routeEntries, pickView, simFor, belongs, fieldLabels, renderEmpty,
+  samplesUpTo, TRAVEL_DEG, TRAVEL_RATE, isHand, travelOf, inchesAt, fmtIn, readoutText, playRate, PLAN_LIMITS, fieldFromScreen, simplifyLine, strokeToLine, addPlanLine, buildPlan, validatePlan, sanitizeDraft, planLength, lineLength, renderPlan, drawState, renderLayers, endHeading };
 /*</pure>*/
 
 /* ---------- page shell (DOM) ---------- */
@@ -2193,7 +2463,16 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   if (model.illustrative) $('samplebadge').hidden = false;
   if (model.generated) $('gen').textContent = 'Built ' + model.generated;
 
-  const view = () => renderAll(model, state, W);
+  // Draw tool state. It lives here, not in the model, so a load() (Refresh) repaints around a drawing in progress and never drops it.
+  const plan = { on: false, lines: [], side: null, name: '', note: '', undo: [], stroke: null, pointer: null, sending: false, sendId: null, timer: 0, msg: null };
+  const planHost = () => (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.scourgePlan) || null;
+  // Draw is offered only with someone to hand the plan to: the web page's frame, or the Mac app's own handler. A page opened by hand has neither.
+  const canDraw = () => EMBED && (window.parent !== window || !!planHost());
+  const view = () => {
+    state.canDraw = canDraw(); state.draft = plan.lines.length;
+    state.draw = plan.on ? { lines: plan.lines, stroke: plan.stroke } : null;
+    return renderAll(model, state, W);
+  };
   // Writes only what changed, so a list keeps its scroll position and nothing repaints for no reason.
   const painted = new Map();
   function put(el, html) { if (painted.get(el) !== html) { painted.set(el, html); el.innerHTML = html; } }
@@ -2205,7 +2484,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   function setMapNote(v) {
     let t = '';
     if (model.illustrative) t += '<b>ILLUSTRATIVE SAMPLE.</b> Hand-written route, made-up lines and run. Not robot data. ';
-    if (v.sel.frame === 'local') t += 'Local frame: the origin is the push test start pose, not a field position.';
+    if (v.msel.frame === 'local') t += 'Local frame: the origin is the push test start pose, not a field position.';
     put($('mapnote'), t ? '<span>' + t + '</span>' : '');
   }
   function paintMap(v) {
@@ -2213,14 +2492,17 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     put($('g-static'), v.static);
     put($('g-sel'), v.selLayer);
     put($('g-play'), v.play);
+    put($('g-plan'), v.plan);
     const r = v.sel.route, ses = v.sel.session;
+    if (plan.on) { svg.setAttribute('aria-label', 'Field map, drawing a proposed plan, with the predicted route shown for reference'); return; }
     svg.setAttribute('aria-label', 'Field map, ' + (v.sel.frame === 'local' ? 'push test frame' : r ? 'route ' + r.slot + ' with ' + r.steps.length + ' steps' : 'no cleaned route') + (v.sel.sim ? ', predicted route' : '') + (ses ? ', session ' + ses.id : ''));
   }
   function paintTransport(v) {
     const s = v.sel.scrub, dur = s ? s.duration : 0, can = !!s && dur > 0;
     $('scrub').disabled = !can;
+    $('scrub').setAttribute('aria-label', s && s.axis === 'travel' ? 'Playback position' : 'Playback time');
     put($('ticks'), v.ticks);
-    $('dur').textContent = s ? '/ ' + dur.toFixed(2) + ' s' : '';
+    $('dur').textContent = readoutText(s, 0).dur;
     $('btn-play').disabled = !can;
     app.dataset.noplay = can ? '0' : '1';
     const hasRoute = !!v.sel.route && v.sel.frame === 'field';
@@ -2230,7 +2512,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   }
   function paintTime(sel) {
     const s = sel.scrub, dur = s ? s.duration : 0;
-    $('time').textContent = (state.t || 0).toFixed(2) + ' s';
+    $('time').textContent = readoutText(s, state.t || 0).time;
     $('scrub').value = dur > 0 ? Math.round((state.t / dur) * 1000) : 0;
     $('playinfo').textContent = playInfoText(sel, state.t || 0);
     $('play-txt').textContent = state.playing ? 'Pause' : 'Play';
@@ -2257,9 +2539,9 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     $('emptybox').hidden = !v.empty;
     app.dataset.empty = v.empty ? '1' : '0';
     app.dataset.rail = listed || v.inspector ? '1' : '0';
-    app.dataset.frame = v.sel.frame;
+    app.dataset.frame = v.msel.frame;
   }
-  function refresh() { last = view(); paintMap(last); setMapNote(last); paintChrome(last); paintTransport(last); }
+  function refresh() { last = view(); paintMap(last); setMapNote(last); paintChrome(last); paintTransport(last); paintDraw(); }
   // Hover and playback run often, so they redraw only their own layer from the selection already worked out.
   function refreshHover() {
     put($('g-sel'), renderSel(model, state, last.sel, last.ctx));
@@ -2289,10 +2571,12 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     stop();
     state.picked = true; state.playPicked = false;
     Object.assign(state, pickView(model, { pick: key, side: state.side, sideSet: state.sideSet }));
+    keepPlanSide();
     state.hover = null; state.t = 0; state.cleared = false; state.play = defaultPlay();
     refresh();
   }
   function selectSide(side) {
+    if (plan.on && plan.lines.length) return; // a plan has one side
     stop();
     state.side = side; state.sideSet = true; state.t = 0;
     refresh();
@@ -2338,7 +2622,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     if (!state.playing) return;
     const dt = Math.min(0.1, (ts - lastTs) / 1000); lastTs = ts;
     const s = last.sel.scrub;
-    state.t += dt * state.speed;
+    state.t += dt * state.speed * playRate(s); // a hand recording plays on travel, so its units per second differ from a clock's
     if (s && state.t >= s.duration) { state.t = s.duration; state.playing = false; }
     refreshPlay();
     if (state.playing) raf = requestAnimationFrame(tick);
@@ -2352,6 +2636,162 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     refreshPlay();
   }
 
+  /* ----- proposed plan: the draw tool ----- */
+  const DRAFT_KEY = 'scourge-plan-draft', SEND_WAIT_MS = 100000, STROKE_CAP = 20000;
+  const nameIn = $('plan-name'), noteIn = $('plan-note');
+  // The draft (lines, name, note, side) is kept where storage works; a blocked or full store just means it is not kept.
+  function saveDraft() {
+    try {
+      if (plan.lines.length || plan.name || plan.note) localStorage.setItem(DRAFT_KEY, JSON.stringify({ lines: plan.lines, name: plan.name, note: plan.note, side: plan.side }));
+      else localStorage.removeItem(DRAFT_KEY);
+    } catch (err) { /* no storage here */ }
+  }
+  function loadDraft() {
+    if (!canDraw()) return;
+    try {
+      const raw = localStorage.getItem(DRAFT_KEY), d = raw ? sanitizeDraft(JSON.parse(raw)) : null;
+      if (d) { plan.lines = d.lines; plan.name = d.name; plan.note = d.note; plan.side = d.side; nameIn.value = d.name; noteIn.value = d.note; }
+    } catch (err) { /* nothing saved, or not readable */ }
+  }
+  // Which side the lines belong to is the side showing when the first one was drawn; after that the page holds it.
+  const showingSide = () => (last.msel.mirror ? 'R' : 'L');
+  function keepPlanSide() { if (plan.on && plan.lines.length && plan.side) { state.side = plan.side; state.sideSet = true; } }
+  function setMsg(text, kind) { plan.msg = text ? { text, kind } : null; }
+  function paintDraw() {
+    app.dataset.draw = plan.on ? '1' : '0';
+    $('drawmode').hidden = !plan.on; $('drawbar').hidden = !plan.on;
+    if (!plan.on) return;
+    const n = plan.lines.length, busy = plan.sending, named = plan.name.trim().length > 0;
+    $('draw-undo').disabled = busy || !plan.undo.length;
+    $('draw-clear').disabled = busy || !n;
+    $('draw-done').disabled = busy;
+    $('draw-send').disabled = busy || !n || !named;
+    $('draw-send').textContent = busy ? 'Sending…' : 'Send plan';
+    nameIn.readOnly = busy; noteIn.readOnly = busy;
+    $('drawcount').textContent = n ? plural(n, 'line') + ', ' + fmt(planLength(plan.lines), 0) + ' in total' : 'Drag on the field to draw a line. Each line runs from its dot to its arrow.';
+    const m = plan.msg || (n && !named ? { text: 'Name the plan to send it.', kind: 'idle' } : null), el = $('drawmsg');
+    el.hidden = !m;
+    if (m) { el.className = 'drawmsg pill ' + m.kind; el.firstChild.className = m.kind; el.firstChild.hidden = m.kind === 'idle'; el.lastChild.textContent = m.text; } // textContent: the host's words are never markup
+  }
+  function paintStroke() { put($('g-plan'), renderPlan({ lines: plan.lines, stroke: plan.stroke }, last.ctx)); }
+  // Every change to the lines is one step Undo can take back, Clear included.
+  function commit(lines, side) {
+    plan.undo.push({ lines: plan.lines, side: plan.side });
+    if (plan.undo.length > 100) plan.undo.shift();
+    plan.lines = lines; plan.side = lines.length ? side : null; plan.msg = null;
+    saveDraft(); refresh();
+  }
+  function undoLine() {
+    if (plan.sending || !plan.undo.length) return;
+    const u = plan.undo.pop();
+    plan.lines = u.lines; plan.side = u.side; plan.msg = null;
+    keepPlanSide();
+    saveDraft(); refresh();
+  }
+  function clearLines() { if (!plan.sending && plan.lines.length) commit([], null); }
+  function enterDraw() {
+    if (plan.on || !canDraw()) return;
+    stop();
+    plan.on = true; plan.msg = null;
+    keepPlanSide();
+    state.hover = null;
+    refresh();
+  }
+  function leaveDraw() {
+    if (!plan.on || plan.sending) return;
+    cancelStroke();
+    plan.on = false;
+    saveDraft(); refresh();
+  }
+
+  // Pointer events with capture, so a mouse, a trackpad and a finger all draw, and a drag that leaves the map still ends cleanly.
+  const toField = (e) => { const m = svg.getScreenCTM(); return m ? fieldFromScreen(m.inverse(), e.clientX, e.clientY, model.field.wall) : null; };
+  function dropStroke() {
+    const id = plan.pointer;
+    plan.stroke = null; plan.pointer = null;
+    try { if (id !== null && svg.hasPointerCapture(id)) svg.releasePointerCapture(id); } catch (err) { /* already released */ }
+  }
+  function cancelStroke() { if (plan.stroke) { dropStroke(); paintStroke(); } }
+  svg.addEventListener('pointerdown', (e) => {
+    if (!plan.on || plan.sending || plan.stroke || !e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    const p = toField(e);
+    if (!p) return;
+    e.preventDefault();
+    plan.stroke = [p]; plan.pointer = e.pointerId;
+    try { svg.setPointerCapture(e.pointerId); } catch (err) { /* the stroke still follows the pointer over the map */ }
+    paintStroke();
+  });
+  svg.addEventListener('pointermove', (e) => {
+    if (!plan.stroke || e.pointerId !== plan.pointer) return;
+    const p = toField(e), q = plan.stroke[plan.stroke.length - 1];
+    if (!p || plan.stroke.length >= STROKE_CAP || Math.hypot(p.x - q.x, p.y - q.y) < last.ctx.k * 1.5) return; // under 1.5 px apart adds nothing
+    plan.stroke.push(p);
+    paintStroke();
+  });
+  svg.addEventListener('pointerup', (e) => {
+    if (!plan.stroke || e.pointerId !== plan.pointer) return;
+    const p = toField(e), s = plan.stroke;
+    if (p) s.push(p);
+    dropStroke();
+    const line = strokeToLine(s); // null for a tap or a drag under 1 in: nothing is added
+    if (!line) { paintStroke(); return; }
+    const r = addPlanLine(plan.lines, line);
+    if (r.error) { setMsg(r.error, 'warn'); paintStroke(); paintDraw(); return; }
+    commit(r.lines, plan.lines.length ? plan.side : showingSide());
+  });
+  svg.addEventListener('pointercancel', (e) => { if (plan.stroke && e.pointerId === plan.pointer) cancelStroke(); }); // the browser took the gesture: the half-drawn line is thrown away
+  svg.addEventListener('lostpointercapture', (e) => { if (plan.stroke && e.pointerId === plan.pointer) cancelStroke(); });
+
+  // Send: the host gets { id, plan } and answers with the same id. Nothing is sent that breaks a limit, and a failure never touches the drawing.
+  const newId = () => (window.crypto && crypto.randomUUID ? crypto.randomUUID() : 'plan-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10));
+  function postPlan(id, body) {
+    try {
+      const h = planHost();
+      if (h) { h.postMessage({ id, plan: body }); return true; }
+      if (window.parent !== window) { window.parent.postMessage({ type: 'scourge-plan-send', id, plan: body }, /^https?:/.test(location.origin) ? location.origin : '*'); return true; }
+    } catch (err) { /* handled below */ }
+    return false;
+  }
+  function sendPlan() {
+    if (!plan.on || plan.sending) return;
+    const body = buildPlan({ name: plan.name, note: plan.note, side: plan.side, build: last.msel.sim && model.sim ? model.sim.tag : null, lines: plan.lines });
+    const bad = validatePlan(body);
+    if (bad) { setMsg(bad, 'warn'); paintDraw(); return; }
+    const id = newId();
+    if (!postPlan(id, body)) { setMsg('This page has no app to send the plan to. Your drawing is still here.', 'warn'); paintDraw(); return; }
+    plan.sending = true; plan.sendId = id; plan.msg = null;
+    clearTimeout(plan.timer);
+    plan.timer = setTimeout(() => {
+      if (!plan.sending || plan.sendId !== id) return;
+      plan.sending = false; plan.sendId = null;
+      setMsg('No answer after 100 seconds. Your drawing is still here, so you can send it again.', 'warn');
+      paintDraw();
+    }, SEND_WAIT_MS);
+    paintDraw();
+  }
+  // The host's answer. Anything that is not for the send being waited on is ignored.
+  function planResult(r) {
+    if (!r || typeof r !== 'object' || !plan.sending || r.id !== plan.sendId) return false;
+    clearTimeout(plan.timer);
+    plan.sending = false; plan.sendId = null;
+    const ok = r.ok === true || r.ok === 1;
+    const text = (typeof r.message === 'string' && r.message ? r.message : ok ? 'Sent as a proposed plan. No robot code changed.' : 'The plan did not send. Your drawing is still here.').slice(0, 300);
+    if (ok) {
+      plan.lines = []; plan.side = null; plan.undo = []; plan.name = ''; plan.note = ''; nameIn.value = ''; noteIn.value = '';
+      saveDraft();
+    }
+    setMsg(text, ok ? 'good' : 'warn');
+    refresh();
+    return true;
+  }
+  $('draw-done').addEventListener('click', leaveDraw);
+  $('draw-undo').addEventListener('click', undoLine);
+  $('draw-clear').addEventListener('click', clearLines);
+  $('draw-send').addEventListener('click', sendPlan);
+  nameIn.addEventListener('input', () => { plan.name = nameIn.value; if (!plan.sending) plan.msg = null; saveDraft(); paintDraw(); });
+  noteIn.addEventListener('input', () => { plan.note = noteIn.value; if (!plan.sending) plan.msg = null; saveDraft(); paintDraw(); });
+  loadDraft();
+
   /* ----- host ----- */
   function load(input) {
     stop();
@@ -2361,6 +2801,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     $('gen').textContent = '';
     // A pick, a side or a playing choice the person made is kept; anything else is chosen again from what arrived.
     Object.assign(state, pickView(model, { pick: state.picked ? state.pick : null, side: state.side, sideSet: state.sideSet, session: state.session, step: state.step, cleared: state.cleared }));
+    keepPlanSide();
     if (!state.playPicked) state.play = defaultPlay();
     state.hover = null; state.t = 0;
     W = svg.getBoundingClientRect().width || W;
@@ -2368,9 +2809,12 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     syncLists();
     return { routes: model.routes.length, sessions: model.sessions.length, rejected: model.rejected.length };
   }
-  window.ScourgeMap = { load };
+  window.ScourgeMap = { load, planResult };
   window.addEventListener('message', (e) => {
-    if (e.source === window.parent && hostAllowed(location.origin, e.origin) && e.data && e.data.type === 'scourge-map-load') load(e.data.input);
+    if (e.source === window.parent && hostAllowed(location.origin, e.origin) && e.data) {
+      if (e.data.type === 'scourge-map-load') load(e.data.input);
+      else if (e.data.type === 'scourge-plan-result') planResult(e.data);
+    }
   });
 
   /* ----- events ----- */
@@ -2381,6 +2825,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     if (menu && !el.closest('details.menu')) menu.open = false;
     let n;
     if ((n = el.closest('[data-more]'))) { state.more[n.dataset.more] = !state.more[n.dataset.more]; keepFocus(() => put($('listbody'), renderLists(model, state, last.sel))); return; }
+    if (el.closest('[data-opendraw]')) return enterDraw();
     if ((n = el.closest('[data-pick]'))) return selectEntry(n.dataset.pick);
     if ((n = el.closest('[data-side]'))) return selectSide(n.dataset.side);
     if ((n = el.closest('[data-play]'))) return setPlay(n.dataset.play);
@@ -2415,8 +2860,13 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   document.addEventListener('keydown', (e) => {
     if (e.altKey || e.ctrlKey || e.metaKey) return;
     const t = e.target, tag = t && t.tagName;
-    if (e.key === 'Escape') { const m = document.querySelector('details.menu[open]'); if (m) { m.open = false; m.querySelector('summary').focus(); } return; }
-    if (tag === 'SELECT' || tag === 'TEXTAREA') return;
+    if (e.key === 'Escape') {
+      const m = document.querySelector('details.menu[open]');
+      if (m) { m.open = false; m.querySelector('summary').focus(); } else if (plan.stroke) cancelStroke(); else if (plan.on && (tag === 'INPUT' || tag === 'TEXTAREA')) t.blur(); // never clears the drawing
+      return;
+    }
+    if (tag === 'SELECT' || tag === 'TEXTAREA' || (tag === 'INPUT' && t.type !== 'range')) return; // typing in a field is not playback
+    if (plan.on) return; // the transport is hidden while drawing, so its keys do nothing
     if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && tag === 'INPUT' && t.type === 'range') return;
     if (e.key === 'ArrowRight') { e.preventDefault(); stepBy(1); }
     else if (e.key === 'ArrowLeft') { e.preventDefault(); stepBy(-1); }

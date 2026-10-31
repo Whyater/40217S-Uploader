@@ -1,7 +1,7 @@
 // The Upload / Route Map switch and the Route Map tab. app.js owns the Upload tab and is not touched.
 import { readTab, planAdd, buildInput, summaryText, formatBytes, acceptHeight, MAX_BYTES } from './mapdata.js';
 import { listFiles, putFiles, removeFile, loadCloud, saveCloud, clearCloud, state as storeState } from './mapstore.js';
-import { checkCode, cleanResponse, describe, syncCloud } from './mapcloud.js';
+import { acceptPlanSend, checkCode, cleanResponse, describe, replyToPlanPage, sendPlan, syncCloud } from './mapcloud.js';
 import { storedTag } from './releases.js';
 
 const $ = (id) => document.getElementById(id);
@@ -329,6 +329,26 @@ window.addEventListener('message', (e) => {
   if (h === null || Math.abs(h - appliedHeight) < 2) return;
   appliedHeight = h;
   el.frame.style.height = h + 'px';
+});
+
+/* ---------- proposed auto plans ---------- */
+
+async function onPlanSend({ id, plan }) {
+  let rec = null;
+  try { rec = await loadCloud(); } catch { /* unreadable storage: sendPlan asks for the code */ }
+  const r = await sendPlan({ plan, code: rec && rec.code, relay: rec && rec.relay, fetchFn: (u, init) => fetch(u, init) });
+  if (r.unauthorized) {
+    try { await clearCloud(); } catch { /* the answer is still no */ }
+    applyResult({ status: 'bad-code', reason: null, response: null, fetched: null });
+    M.cloud.hint = r.message;
+    renderCloud(); // the page keeps its drawing: nothing is pushed to it until the new code downloads
+  }
+  replyToPlanPage(el.frame.contentWindow, location.origin, { id, ok: r.ok, message: r.message });
+}
+
+window.addEventListener('message', (e) => {
+  const send = acceptPlanSend(e, el.frame.contentWindow, location.origin);
+  if (send) onPlanSend(send);
 });
 
 /* ---------- start ---------- */

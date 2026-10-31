@@ -37,7 +37,14 @@ self.addEventListener('install', (event) => {
     const cache = await caches.open(CACHE);
     // All or nothing: if any file fails, install fails and the previous worker
     // (with its complete cache) keeps serving. activate only runs after a full install.
-    await cache.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' })));
+    // The query gets past the CDN, which can still hold the last deploy's copy of a file
+    // for minutes after this worker went live, and a stale file would stay until the next deploy.
+    const files = await Promise.all(SHELL.map(async (u) => {
+      const res = await fetch(new Request(`${u}?v=${VERSION}`, { cache: 'reload' }));
+      if (!res.ok) throw new Error(`${u} answered ${res.status}`);
+      return [u, res];
+    }));
+    await Promise.all(files.map(([u, res]) => cache.put(u, res)));
     await self.skipWaiting();
   })());
 });

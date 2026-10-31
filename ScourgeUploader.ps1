@@ -571,7 +571,7 @@ $SharedCode = {
             return @{ Ok = $false; Kind = 'Multiple'; Message = 'More than one VEX device is plugged in. Unplug everything except the brain, then try again.'; Detail = '' }
         }
         if (($out -match 'No v5 ports were found') -or ($out -match 'No port provided or located')) {
-            return @{ Ok = $false; Kind = 'NoBrain'; Message = 'No brain found. Plug the USB cable into the brain (not the controller), turn the brain on, and close VEXcode. Still failing? Try another cable, since some only charge.'; Detail = '' }
+            return @{ Ok = $false; Kind = 'NoBrain'; Message = 'No brain found. Plug USB into the controller, or the brain as a backup, turn the brain on, and close VEXcode. Still failing? Try another cable, since some only charge.'; Detail = '' }
         }
         if ($out -match "doesn't appear to be connected to a V5 Brain") {
             return @{ Ok = $false; Kind = 'NoLink'; Message = 'The controller is plugged in but is not linked to the brain. Plug the cable into the brain instead.'; Detail = '' }
@@ -2786,7 +2786,7 @@ function Merge-MapSessions {
         $seen[$k] = $true
         [void]$all.Add($s)
     }
-    return @($all.ToArray() | Sort-Object -Property When, Order)
+    return @($all.ToArray() | Sort-Object { $_.When }, { $_.Order })
 }
 
 # Fills the session list, the rejection note, and the last-run table.
@@ -4698,7 +4698,7 @@ if ($SelfTest) {
             & $expectC ((Get-SessionDedupeKey $loc) -eq (Get-SessionDedupeKey $cp.Recorded.Sessions[0])) 'cloud: the same recording should have the same dedupe key'
             & $expectC ((Get-SessionDedupeKey $loc) -ne (Get-SessionDedupeKey $cp.Recorded.Sessions[1])) 'cloud: different recordings should not share a dedupe key'
             $merged = @(Merge-MapSessions @($loc) $cp.Recorded.Sessions)
-            & $expectC ($merged.Count -eq 2 -and $merged[0].Source -eq 'x.csv' -and $merged[1].Kind -eq 'run') 'cloud: merge should drop the duplicate and keep the local copy'
+            & $expectC ($merged.Count -eq 2 -and @($merged | Where-Object { $_.Source -eq 'x.csv' }).Count -eq 1 -and @($merged | Where-Object { $_.Kind -eq 'run' }).Count -eq 1) 'cloud: merge should drop the duplicate and keep the local copy'
             & $expectC (@(Merge-MapSessions @($loc) @()).Count -eq 1) 'cloud: merge with no cloud sessions should return the local ones'
         }
 

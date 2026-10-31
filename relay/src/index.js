@@ -211,21 +211,48 @@ function cleanPlan(payload) {
     if (!points.every((p) => Array.isArray(p) && p.length === 2 && p.every(isCoordinate))) return null;
     lines.push({ points: points.map((p) => p.map(roundCoordinate)) });
   }
-  return { schema: 1, kind: PLAN_KIND, name, side: payload.side, note: payload.note, build: payload.build, lines };
+  const actions = cleanActions(payload.actions, lines);
+  if (!actions) return null;
+  return { schema: 1, kind: PLAN_KIND, name, side: payload.side, note: payload.note, build: payload.build, lines, actions };
+}
+
+function lineInches(points) {
+  let inches = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    inches += Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]);
+  }
+  return inches;
+}
+
+// Optional, so a page from before actions still sends. The type is only shape-checked: a new one needs no deploy.
+function cleanActions(actions, lines) {
+  if (actions === undefined) return [];
+  if (!Array.isArray(actions) || actions.length > 200) return null;
+  const cleaned = [];
+  for (const action of actions) {
+    if (!action || typeof action !== "object" || Array.isArray(action)) return null;
+    const { type, line, along, at, detail } = action;
+    if (typeof type !== "string" || !/^[a-z_]{1,30}$/.test(type)) return null;
+    if (!Number.isInteger(line) || line < 1 || line > lines.length) return null;
+    if (typeof along !== "number" || !Number.isFinite(along)) return null;
+    const rounded = roundCoordinate(along); // checked as stored, so the reader's same check can't refuse what this one let through
+    if (rounded < 0 || rounded > lineInches(lines[line - 1].points) + 1) return null;
+    if (!Array.isArray(at) || at.length !== 2 || !at.every(isCoordinate)) return null;
+    if (typeof detail !== "string" || charCount(detail) > 120) return null;
+    cleaned.push({ type, line, along: rounded, at: at.map(roundCoordinate), detail });
+  }
+  return cleaned;
 }
 
 function planIssueBody(plan) {
   let inches = 0;
-  for (const { points } of plan.lines) {
-    for (let i = 1; i < points.length; i += 1) {
-      inches += Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]);
-    }
-  }
+  for (const { points } of plan.lines) inches += lineInches(points);
   const count = plan.lines.length;
+  const acted = plan.actions.length;
   // JSON only holds a backtick inside a string, where \u0060 reads back the same and can't close the fence.
   const json = JSON.stringify(plan).replace(/`/g, "\\u0060");
   return `Proposal only, not run on a robot. Side ${plan.side}, ${count} ${count === 1 ? "line" : "lines"}, ` +
-    `${inches.toFixed(1)} in total.\n\n\`\`\`json\n${json}\n\`\`\`\n`;
+    `${acted} ${acted === 1 ? "action" : "actions"}, ${inches.toFixed(1)} in total.\n\n\`\`\`json\n${json}\n\`\`\`\n`;
 }
 
 async function handlePlans(request, env) {
@@ -264,7 +291,7 @@ async function handlePlans(request, env) {
   const fields = { title: PLAN_TITLE + titleName(plan.name), body: planIssueBody(plan) };
   // GitHub refuses a body this long, so say so here. Plans can't be split the way results are.
   if (fields.body.length > MAX_ISSUE_CHARS) {
-    return plansResponse({ ok: false, error: "plan too long for one issue, use fewer points" }, 413);
+    return plansResponse({ ok: false, error: "plan too long for one issue, use fewer points or actions, or shorter details" }, 413);
   }
 
   let response;

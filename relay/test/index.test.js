@@ -406,7 +406,7 @@ test("POST /plans files one labelled issue and answers with its number", async (
   assert.equal(sent.length, 1);
   assert.equal(sent[0].title, "Proposed auto plan: Left 2 goal");
   assert.deepEqual(sent[0].labels, ["proposed-auto-plan"]);
-  assert.deepEqual(fencedPlan(sent[0].body), goodPlan);
+  assert.deepEqual(fencedPlan(sent[0].body), { ...goodPlan, actions: [] });
 });
 
 test("POST /plans summary says it is a proposal and gives side, line count, and inches", async () => {
@@ -414,7 +414,7 @@ test("POST /plans summary says it is a proposal and gives side, line count, and 
   const lines = [{ points: [[0, 0], [3, 4], [3, 10]] }, { points: [[-6, -8], [0, 0]] }];
   const { sent } = await sendPlanWith(plansPost({ ...goodPlan, side: "R", lines }));
   const summary = sent[0].body.split("\n")[0];
-  assert.equal(summary, "Proposal only, not run on a robot. Side R, 2 lines, 21.0 in total.");
+  assert.equal(summary, "Proposal only, not run on a robot. Side R, 2 lines, 0 actions, 21.0 in total.");
 });
 
 test("POST /plans drops unknown fields, trims the name, and rounds to 2 places", async () => {
@@ -431,7 +431,7 @@ test("POST /plans drops unknown fields, trims the name, and rounds to 2 places",
   assert.equal(sent[0].title, "Proposed auto plan: Left 2 goal");
   assert.doesNotMatch(sent[0].body, /team|someone|Robot data|red/);
   const plan = fencedPlan(sent[0].body);
-  assert.deepEqual(Object.keys(plan), ["schema", "kind", "name", "side", "note", "build", "lines"]);
+  assert.deepEqual(Object.keys(plan), ["schema", "kind", "name", "side", "note", "build", "lines", "actions"]);
   assert.equal(plan.name, "Left 2 goal");
   assert.deepEqual(plan.lines, [{ points: [[-52.13, 18], [0.01, 0]] }]);
 });
@@ -610,6 +610,47 @@ test("POST /plans: the most points allowed, with the longest ordinary note, fits
   lines.push({ points: [[0, 0], [1, 1]] });
   const over = await sendPlanWith(plansPost({ ...goodPlan, lines }));
   assert.equal(over.response.status, 400);
+});
+
+const onePlanLine = [{ points: [[0, 0], [10, 0]] }];
+const planFence = (body) => JSON.parse(/```json\n(.*)\n```/s.exec(body)[1]);
+
+test("POST /plans keeps actions in order and says how many; a plan from before actions still files", async () => {
+  const actions = [
+    { type: "roller_on", line: 1, along: 2.345, at: [2.345, 0], detail: "", junk: "dropped" },
+    { type: "score", line: 1, along: 10, at: [10, 0], detail: "second `Pin`" },
+  ];
+  const { response, sent } = await sendPlanWith(plansPost({ ...goodPlan, lines: onePlanLine, actions }));
+  assert.equal(response.status, 201);
+  assert.match(sent[0].body, /1 line, 2 actions, 10\.0 in total/);
+  assert.deepEqual(planFence(sent[0].body).actions, [
+    { type: "roller_on", line: 1, along: 2.35, at: [2.35, 0], detail: "" },
+    { type: "score", line: 1, along: 10, at: [10, 0], detail: "second `Pin`" },
+  ]);
+  assert.ok(!sent[0].body.split("```json")[1].includes("`Pin"), "a backtick in a detail can't close the fence");
+  const old = await sendPlanWith(plansPost({ ...goodPlan, lines: onePlanLine }));
+  assert.equal(old.response.status, 201);
+  assert.deepEqual(planFence(old.sent[0].body).actions, []);
+});
+
+test("POST /plans refuses a bad action", async () => {
+  const good = { type: "score", line: 1, along: 5, at: [5, 0], detail: "" };
+  const bad = [
+    "nope", [good, null], [{ ...good, type: "Score!" }], [{ ...good, line: 0 }], [{ ...good, line: 2 }], [{ ...good, line: 1.5 }],
+    [{ ...good, along: -1 }], [{ ...good, along: 11.5 }], [{ ...good, along: "5" }], [{ ...good, at: [5] }], [{ ...good, at: [5, 101] }],
+    [{ ...good, detail: "x".repeat(121) }], [{ ...good, detail: undefined }], Array.from({ length: 201 }, () => good),
+  ];
+  for (const actions of bad) {
+    const { response, sent } = await sendPlanWith(plansPost({ ...goodPlan, lines: onePlanLine, actions }));
+    assert.equal(response.status, 400, JSON.stringify(actions).slice(0, 80));
+    assert.equal(sent.length, 0);
+  }
+  const rounds = await sendPlanWith(plansPost({ ...goodPlan, lines: [{ points: [[0, 0], [5.01, 0]] }], actions: [{ ...good, along: 6.014 }] }));
+  assert.equal(rounds.response.status, 201);
+  const roundsOver = await sendPlanWith(plansPost({ ...goodPlan, lines: [{ points: [[0, 0], [5, 0]] }], actions: [{ ...good, along: 6.006 }] }));
+  assert.equal(roundsOver.response.status, 400, "checked after rounding, as the reader sees it");
+  const edge = await sendPlanWith(plansPost({ ...goodPlan, lines: onePlanLine, actions: [{ ...good, along: 11 }] }));
+  assert.equal(edge.response.status, 201, "the line's length plus 1 in is allowed");
 });
 
 test("POST /plans is limited per address before the code is checked or GitHub is asked", async () => {

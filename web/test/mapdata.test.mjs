@@ -162,3 +162,40 @@ test('acceptHeight clamps absurd sizes', () => {
   assert.equal(acceptHeight(msg(10), frame, o), 240);
   assert.equal(acceptHeight(msg(1e9), frame, o), 20000);
 });
+
+// The simulated shape from the route sync contract.
+const SIM = { schema: 1, tag: 'build-70-abc1234', build: 70, routes: [{ id: 'awp-L', slot: null, name: 'AWP', side: 'L', total_ms: 14800, samples: [{ t: 0, x: -52.1, y: -18.0, h: 90.0 }], events: [] }] };
+
+test('buildInput always carries simulated, null when there is none', () => {
+  assert.equal(buildInput([]).simulated, null);
+  assert.equal(buildInput([], { simulated: undefined }).simulated, null);
+  assert.equal(buildInput([], { simulated: [] }).simulated, null);
+  assert.deepEqual(buildInput([], {}).csvTexts, []);
+});
+
+test('buildInput passes simulated, the downloaded recording, and hand-added results together', () => {
+  const rec = { generated: '2026-10-30T23:00:00Z', routes: [{ slot: 'cloud' }], sessions: [] };
+  const input = buildInput([{ name: 'a.csv', kind: 'csv', size: 1, text: CSV, added: 1 }], { simulated: SIM, recorded: rec });
+  assert.equal(input.simulated, SIM);
+  assert.equal(input.mapData, rec);
+  assert.deepEqual(input.csvTexts.map((c) => c.name), ['a.csv']);
+  assert.equal('note' in input, false);
+});
+
+test('buildInput with a downloaded recording only has no mapData when the recording is missing', () => {
+  assert.equal(buildInput([], { simulated: SIM, recorded: null }).mapData, null);
+});
+
+test('buildInput takes whichever route data is newer, hand-added or downloaded', () => {
+  const rec = { generated: '2026-10-30T23:00:00Z', routes: [{ slot: 'cloud' }] };
+  const older = { name: 'm.json', kind: 'json', size: 1, text: '{"generated":"2026-10-29T00:00:00Z","routes":[{"slot":"hand"}]}', added: 9 };
+  const newer = { name: 'm.json', kind: 'json', size: 1, text: '{"generated":"2026-10-31T00:00:00Z","routes":[{"slot":"hand"}]}', added: 1 };
+  assert.equal(buildInput([older], { recorded: rec }).mapData.routes[0].slot, 'cloud');
+  assert.equal(buildInput([newer], { recorded: rec }).mapData.routes[0].slot, 'hand');
+  // no date inside the file: the time it was added to this device counts
+  const undated = { name: 'm.json', kind: 'json', size: 1, text: '{"routes":[{"slot":"hand"}]}', added: Date.parse('2026-11-01') };
+  assert.equal(buildInput([undated], { recorded: rec }).mapData.routes[0].slot, 'hand');
+  // a recording with no date falls back to recorded_updated
+  const undatedRec = { routes: [{ slot: 'cloud' }] };
+  assert.equal(buildInput([older], { recorded: undatedRec, recordedUpdated: '2026-11-02T00:00:00Z' }).mapData.routes[0].slot, 'cloud');
+});

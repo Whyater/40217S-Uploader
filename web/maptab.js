@@ -1,6 +1,8 @@
 // The Upload / Route Map switch and the Route Map tab. app.js owns the Upload tab and is not touched.
 import { readTab, planAdd, buildInput, summaryText, formatBytes, acceptHeight, MAX_BYTES } from './mapdata.js';
-import { listFiles, putFiles, removeFile, state as storeState } from './mapstore.js';
+import { listFiles, putFiles, removeFile, loadCloud, saveCloud, clearCloud, state as storeState } from './mapstore.js';
+import { checkCode, cleanResponse, describe, syncCloud } from './mapcloud.js';
+import { storedTag } from './releases.js';
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -11,10 +13,18 @@ const el = {
   empty: $('map-empty'), bar: $('map-bar'), summary: $('map-summary'),
   manage: $('map-manage'), list: $('map-list'), volatile: $('map-volatile'),
   msgs: $('map-msgs'), card: $('map-card'), frame: $('map-frame'),
+  codePanel: $('map-code-panel'), codeForm: $('map-code-form'), code: $('map-code'), codeGo: $('map-code-go'),
+  codeHint: $('map-code-hint'), cloud: $('map-cloud'), cloudDetail: $('map-cloud-detail'),
+  cloudMsgs: $('map-cloud-msgs'), refresh: $('map-refresh'),
 };
 
 const TAB_KEY = 'scourge-tab';
-const M = { tab: 'upload', files: [], busy: false, frameLoaded: false, frameStarted: false };
+const M = {
+  tab: 'upload', files: [], busy: false, frameLoaded: false, frameStarted: false,
+  // The downloaded map. settled: there is something to draw from (saved data or a first answer).
+  cloud: { loaded: false, hasCode: false, settled: false, syncing: false, response: null, result: null, hint: '', tag: null, last: 0 },
+};
+const RECHECK_MS = 20000; // flipping between tabs shouldn't ask the relay every time
 
 /* ---------- tabs ---------- */
 
@@ -38,7 +48,7 @@ function showTab(tab, { focus = false, save = true } = {}) {
   el.viewUpload.hidden = tab !== 'upload';
   el.viewMap.hidden = tab !== 'map';
   if (save) saveTab(tab);
-  if (tab === 'map') syncMap();
+  if (tab === 'map') { syncMap(); openCloud({ force: false }); }
   window.scrollTo(0, 0);
 }
 
@@ -60,8 +70,8 @@ el.tabs.addEventListener('keydown', (e) => {
 
 const MSG_ICON = { good: 'i-check', bad: 'i-warn', warn: 'i-warn' };
 
-function showMessages(items) {
-  el.msgs.textContent = '';
+function showMessages(items, target = el.msgs) {
+  target.textContent = '';
   for (const { kind, text } of items) {
     const li = document.createElement('li');
     li.className = 'line';
@@ -75,7 +85,7 @@ function showMessages(items) {
     const span = document.createElement('span');
     span.textContent = text;
     li.append(svg, span);
-    el.msgs.appendChild(li);
+    target.appendChild(li);
   }
 }
 
@@ -86,9 +96,10 @@ const KIND_LABEL = { csv: 'Results', json: 'Route data' };
 function renderFiles() {
   const has = M.files.length > 0;
   el.empty.hidden = has;
+  el.addEmpty.hidden = has;
   el.bar.hidden = !has;
   el.manage.hidden = !has;
-  el.card.hidden = !has;
+  renderCard();
   el.volatile.hidden = storeState.persistent;
   if (!has) { el.list.textContent = ''; return; }
 
@@ -184,11 +195,108 @@ async function onRemove(name) {
   (target || el.addEmpty).focus({ preventScroll: true });
 }
 
+/* ---------- the downloaded map ---------- */
+
+const cloudStore = { loadCloud, saveCloud, clearCloud };
+
+function renderCloud() {
+  const c = M.cloud;
+  el.codePanel.hidden = c.hasCode || !c.loaded; // not before the saved code has been looked up
+  el.cloud.hidden = !c.hasCode;
+  el.codeGo.disabled = c.syncing;
+  el.codeHint.hidden = !c.hint;
+  el.codeHint.textContent = c.hint;
+  el.refresh.disabled = c.syncing;
+  el.refresh.textContent = c.syncing ? 'Refreshing…' : 'Refresh';
+  if (!c.hasCode) { showMessages([], el.cloudMsgs); el.cloudDetail.textContent = ''; return; }
+  if (c.result) {
+    const d = describe(c.result, c.tag);
+    el.cloudDetail.textContent = d.detail;
+    showMessages(d.notices, el.cloudMsgs);
+  } else {
+    el.cloudDetail.textContent = 'Checking for the latest map…';
+    showMessages([], el.cloudMsgs);
+  }
+  renderCard();
+}
+
+// The map is drawn for hand-added files, or once there is a download (or a first
+// answer, even an empty one, so the page can say there is no prediction yet).
+function showCard() {
+  return M.files.length > 0 || (M.cloud.hasCode && M.cloud.settled);
+}
+function renderCard() { el.card.hidden = !showCard(); }
+
+function applyResult(r) {
+  const c = M.cloud;
+  c.result = r;
+  c.hasCode = r.status !== 'need-code' && r.status !== 'bad-code';
+  c.response = r.response;
+  c.settled = c.hasCode;
+  c.hint = r.status === 'bad-code' ? describe(r, c.tag).notices[0].text : '';
+}
+
+// Show what is saved right away, then ask the relay. The map never waits on the network.
+async function openCloud({ force = true } = {}) {
+  const c = M.cloud;
+  if (c.syncing || (!force && Date.now() - c.last < RECHECK_MS)) return;
+  c.syncing = true;
+  renderCloud();
+  try {
+    let rec = null;
+    try { rec = await loadCloud(); } catch { /* unreadable storage: ask for the code again */ }
+    c.hasCode = !!(rec && rec.code);
+    c.loaded = true;
+    if (c.hasCode && rec.response && !c.response) {
+      c.response = cleanResponse(rec.response);
+      c.settled = true;
+      c.result = { status: 'cached', fetched: rec.fetched, response: c.response };
+    }
+    renderCloud();
+    pushData();
+    if (!c.hasCode) return;
+    try { c.tag = await storedTag(); } catch { c.tag = null; }
+    applyResult(await syncCloud({ store: cloudStore, fetchFn: (u, init) => fetch(u, init), tag: c.tag }));
+    c.last = Date.now();
+  } finally {
+    c.syncing = false;
+    renderCloud();
+    syncMap();
+    pushData();
+  }
+}
+
+el.codeForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (M.cloud.syncing) return;
+  const check = checkCode(el.code.value);
+  M.cloud.hint = check.message;
+  if (!check.ok) { renderCloud(); el.code.focus(); return; }
+  try {
+    await saveCloud({ code: check.value });
+  } catch {
+    M.cloud.hint = 'This device could not save the code.';
+    renderCloud();
+    return;
+  }
+  el.code.value = '';
+  M.cloud.response = null;
+  M.cloud.result = null;
+  M.cloud.settled = false;
+  await openCloud();
+});
+el.refresh.addEventListener('click', () => openCloud());
+
 /* ---------- the map frame ---------- */
 
 function pushData() {
-  if (!M.frameLoaded || !M.files.length) return;
-  const input = buildInput(M.files);
+  if (!M.frameLoaded || !showCard()) return;
+  const r = M.cloud.response;
+  const input = buildInput(M.files, {
+    simulated: r && r.sim,
+    recorded: r && r.recorded,
+    recordedUpdated: r && r.recorded_updated,
+  });
   const win = el.frame.contentWindow;
   try {
     const api = win && win.ScourgeMap;
@@ -199,9 +307,9 @@ function pushData() {
   }
 }
 
-// Load the page the first time the tab is opened with files, then keep it fed.
+// Load the page the first time the tab is opened with something to draw, then keep it fed.
 function syncMap() {
-  if (M.tab !== 'map' || !M.files.length) return;
+  if (M.tab !== 'map' || !showCard()) return;
   if (!M.frameStarted) {
     M.frameStarted = true;
     el.frame.src = 'map.html?embed=1';

@@ -14,6 +14,7 @@ const SHELL = [
   './mapdata.js',
   './mapstore.js',
   './maptab.js',
+  './mapcloud.js',
   './manifest.webmanifest',
   './protocol/index.js',
   './protocol/connection.js',
@@ -57,6 +58,10 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin) return;
   // Release data belongs to releases.js; let the network (or its own cache) answer.
   if (url.pathname.includes('/build/')) return;
+  // The map download is team data fetched from another origin, so it already
+  // bypasses this worker. This keeps it that way if the relay is ever proxied
+  // under this origin: it is never cached here.
+  if (url.pathname.endsWith('/map')) return;
   event.respondWith((async () => {
     const shell = await caches.open(CACHE);
     const hit = await shell.match(req, { ignoreSearch: true });

@@ -115,30 +115,52 @@
     </div>
 
     <div class="view" id="view-map" role="tabpanel" aria-labelledby="tab-map" hidden>
+      <section class="panel" id="map-code-panel" aria-label="Team code" hidden>
+        <div class="empty">
+          <svg class="ico-lg" aria-hidden="true"><use href="#i-route"/></svg>
+          <p class="headline">Route Map</p>
+          <p class="callout secondary">Enter the team code to load the latest predicted route and recorded runs.</p>
+        </div>
+        <form class="code-row" id="map-code-form" autocomplete="off">
+          <label class="sr-only" for="map-code">Team code</label>
+          <input id="map-code" name="team-code" type="text" placeholder="Team code" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go" aria-describedby="map-code-hint">
+          <button type="submit" class="btn prominent" id="map-code-go">Load Map</button>
+        </form>
+        <p class="hint" id="map-code-hint" data-kind="bad" role="alert" hidden></p>
+      </section>
+
+      <section class="panel" id="map-cloud" aria-label="Route map download" hidden>
+        <div class="build">
+          <div class="build-text">
+            <p class="headline">Route Map</p>
+            <p class="callout secondary" id="map-cloud-detail"></p>
+          </div>
+          <button type="button" class="btn bordered accent-text" id="map-refresh">Refresh</button>
+        </div>
+        <ul class="msgs" id="map-cloud-msgs" role="status" aria-live="polite"></ul>
+      </section>
+
       <section class="panel" aria-label="Route data">
         <input id="map-file" type="file" multiple accept=".csv,.json,text/csv,application/json,text/plain" hidden>
 
-        <div class="empty" id="map-empty">
-          <svg class="ico-lg" aria-hidden="true"><use href="#i-route"/></svg>
-          <p class="headline">No route data yet</p>
-          <p class="callout secondary">The laptop app records test results to the Scourge Robot Data folder in Documents. Move those files to this phone with AirDrop, a cloud drive, or a cable, then choose Add Files.</p>
-          <p class="callout secondary">Pick results .csv files, a map-data.json file, or both. They stay on this device and are never uploaded.</p>
-          <button type="button" class="btn prominent" id="map-add-empty"><span>Add Files</span></button>
-        </div>
-
-        <div class="build" id="map-bar" hidden>
-          <div class="build-text">
-            <p class="headline">Route data</p>
-            <p class="callout secondary" id="map-summary"></p>
-          </div>
-          <button type="button" class="btn bordered accent-text" id="map-add">Add Files</button>
-        </div>
-
-        <details class="disc" id="map-manage" hidden>
-          <summary>Manage Files</summary>
+        <details class="disc" id="map-hand">
+          <summary>Add Files by Hand</summary>
           <div class="disc-body">
-            <ul class="files" id="map-list"></ul>
-            <p class="caption secondary" id="map-volatile" hidden>This browser can't keep files after you close the page.</p>
+            <p class="caption secondary" id="map-empty">Pick results .csv files or a map-data.json file from the Scourge Robot Data folder the laptop app keeps in Documents. They stay on this device and are never uploaded.</p>
+            <button type="button" class="btn bordered accent-text" id="map-add-empty">Add Files</button>
+
+            <div class="build" id="map-bar" hidden>
+              <div class="build-text">
+                <p class="headline">Route data</p>
+                <p class="callout secondary" id="map-summary"></p>
+              </div>
+              <button type="button" class="btn bordered accent-text" id="map-add">Add Files</button>
+            </div>
+
+            <div id="map-manage" hidden>
+              <ul class="files" id="map-list"></ul>
+              <p class="caption secondary" id="map-volatile" hidden>This browser can't keep files after you close the page.</p>
+            </div>
           </div>
         </details>
 

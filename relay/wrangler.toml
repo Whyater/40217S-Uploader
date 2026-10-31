@@ -2,7 +2,12 @@ name = "scourge-results"
 main = "src/index.js"
 compatibility_date = "2025-01-01"
 
-# Add the GitHub token with: npx wrangler secret put GITHUB_TOKEN
+# Add the secrets with: npx wrangler secret put GITHUB_TOKEN (and TEAM_CODE, INGEST_TOKEN)
+
+# Route map data. Create it with: npx wrangler kv namespace create MAP, then put its id here.
+[[kv_namespaces]]
+binding = "MAP"
+id = "3df4257dc93d420c919cefa7704b93f6"
 
 # About 10 sends per minute per address (Workers rate limiting binding; Cloudflare counts per location, so it is approximate).
 [[ratelimits]]
@@ -11,4 +16,13 @@ namespace_id = "1001"
 
   [ratelimits.simple]
   limit = 10
+  period = 60
+
+# About 30 map reads per minute per address, to slow guessing the team code.
+[[ratelimits]]
+name = "LIMITER_READ"
+namespace_id = "1002"
+
+  [ratelimits.simple]
+  limit = 30
   period = 60

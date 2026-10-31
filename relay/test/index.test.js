@@ -357,3 +357,324 @@ test("every part of a long send gets the label", async () => {
   assert.ok(sent.length > 1);
   for (const issue of sent) assert.deepEqual(issue.labels, ["team"]);
 });
+
+const plansUrl = "https://relay.example/plans";
+const plansEnv = { GITHUB_TOKEN: "test-token", TEAM_CODE: "code-1234" };
+const goodPlan = {
+  schema: 1,
+  kind: "proposed-auto-plan",
+  name: "Left 2 goal",
+  side: "L",
+  note: "grab stack at the end of line 1",
+  build: "build-70-e2fdfc5",
+  lines: [{ points: [[-52.1, -18], [-30.25, -18]] }],
+};
+
+function plansPost(payload = goodPlan, headers = {}) {
+  return new Request(plansUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Team-Code": "code-1234", "X-Scourge-Client": "web-uploader", ...headers },
+    body: typeof payload === "string" ? payload : JSON.stringify(payload),
+  });
+}
+
+async function sendPlanWith(req, testEnv = plansEnv, answer = (fields, sent) => Response.json({ number: sent.length }, { status: 201 })) {
+  const sent = [];
+  const response = await withGitHub(async (url, options) => {
+    assert.equal(url, "https://api.github.com/repos/Whyater/40217S-Robot-Data/issues");
+    assert.equal(options.headers.Authorization, "Bearer test-token");
+    const fields = JSON.parse(options.body);
+    sent.push(fields);
+    return answer(fields, sent);
+  }, () => worker.fetch(req, testEnv));
+  return { response, sent };
+}
+
+// The text between the only pair of fences, which is what `autopath.py plans` has to read back.
+function fencedPlan(issueBody) {
+  const fences = issueBody.split("```");
+  assert.equal(fences.length, 3, "exactly one opening and one closing fence");
+  assert.ok(fences[1].startsWith("json\n"));
+  return JSON.parse(fences[1].slice("json\n".length));
+}
+
+test("POST /plans files one labelled issue and answers with its number", async () => {
+  const { response, sent } = await sendPlanWith(plansPost());
+  assert.equal(response.status, 201);
+  assert.equal(response.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+  assert.deepEqual(await response.json(), { ok: true, issue: 1 });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].title, "Proposed auto plan: Left 2 goal");
+  assert.deepEqual(sent[0].labels, ["proposed-auto-plan"]);
+  assert.deepEqual(fencedPlan(sent[0].body), goodPlan);
+});
+
+test("POST /plans summary says it is a proposal and gives side, line count, and inches", async () => {
+  // Worked by hand: a 3-4-5 leg, then 6 straight up, then a 6-8-10 line. 5 + 6 + 10 = 21 inches.
+  const lines = [{ points: [[0, 0], [3, 4], [3, 10]] }, { points: [[-6, -8], [0, 0]] }];
+  const { sent } = await sendPlanWith(plansPost({ ...goodPlan, side: "R", lines }));
+  const summary = sent[0].body.split("\n")[0];
+  assert.equal(summary, "Proposal only, not run on a robot. Side R, 2 lines, 21.0 in total.");
+});
+
+test("POST /plans drops unknown fields, trims the name, and rounds to 2 places", async () => {
+  const { sent } = await sendPlanWith(plansPost({
+    ...goodPlan,
+    name: "  Left 2 goal  ",
+    labels: ["team"],
+    assignees: ["someone"],
+    title: "Robot data 2026-10-26",
+    lines: [{ color: "red", points: [[-52.126, 18.004], [0.005, -0.001]] }],
+  }));
+  assert.deepEqual(Object.keys(sent[0]).sort(), ["body", "labels", "title"]);
+  assert.deepEqual(sent[0].labels, ["proposed-auto-plan"]);
+  assert.equal(sent[0].title, "Proposed auto plan: Left 2 goal");
+  assert.doesNotMatch(sent[0].body, /team|someone|Robot data|red/);
+  const plan = fencedPlan(sent[0].body);
+  assert.deepEqual(Object.keys(plan), ["schema", "kind", "name", "side", "note", "build", "lines"]);
+  assert.equal(plan.name, "Left 2 goal");
+  assert.deepEqual(plan.lines, [{ points: [[-52.13, 18], [0.01, 0]] }]);
+});
+
+test("POST /plans: backticks in a note or name cannot close the fence, and read back unchanged", async () => {
+  const note = "before\n```\n@everyone ` ``` after";
+  const name = "a```b";
+  const build = "`build`";
+  const { sent } = await sendPlanWith(plansPost({ ...goodPlan, name, note, build }));
+  const fence = sent[0].body.split("```json\n")[1];
+  const inside = fence.slice(0, fence.lastIndexOf("\n```"));
+  assert.doesNotMatch(inside, /`/);
+  assert.match(inside, /\\u0060/);
+  assert.doesNotMatch(inside, /\n/, "a line break in the note stays escaped, so it can't start a fence line");
+  const plan = fencedPlan(sent[0].body);
+  assert.equal(plan.note, note);
+  assert.equal(plan.name, name);
+  assert.equal(plan.build, build);
+});
+
+test("POST /plans: name and note appear only in the title and the fence", async () => {
+  const { sent } = await sendPlanWith(plansPost({ ...goodPlan, name: "@name-handle", note: "@note-handle" }));
+  const outside = sent[0].body.replace(/```json\n[^\n]*\n```/, "");
+  assert.doesNotMatch(outside, /name-handle|note-handle|@/);
+});
+
+test("POST /plans removes control characters from the title and keeps them escaped in the fence", async () => {
+  const name = "Left\u0000 2\u0007\n\r\t goal\u007f\u0085";
+  const { response, sent } = await sendPlanWith(plansPost({ ...goodPlan, name }));
+  assert.equal(response.status, 201);
+  assert.equal(sent[0].title, "Proposed auto plan: Left 2 goal");
+  assert.equal(fencedPlan(sent[0].body).name, name);
+});
+
+test("POST /plans accepts everything at its limit", async () => {
+  const point = [100, -100];
+  const longest = { points: Array.from({ length: 500 }, () => point) };
+  const cases = [
+    { name: "n".repeat(80) },
+    { name: `  ${"n".repeat(80)}  ` },
+    { name: "\u{1F600}".repeat(80) },
+    { note: "" },
+    { note: "n".repeat(2000) },
+    { build: null },
+    { build: "b".repeat(100) },
+    { side: "R" },
+    { lines: Array.from({ length: 50 }, () => ({ points: [[0, 0], [1, 1]] })) },
+    { lines: [longest] },
+  ];
+  for (const fields of cases) {
+    const { response } = await sendPlanWith(plansPost({ ...goodPlan, ...fields }));
+    assert.equal(response.status, 201, JSON.stringify(fields).slice(0, 60));
+  }
+});
+
+const badPlans = [
+  ["an array", []],
+  ["null", null],
+  ["a number", 3],
+  ["the wrong schema", { ...goodPlan, schema: 2 }],
+  ["a string schema", { ...goodPlan, schema: "1" }],
+  ["the wrong kind", { ...goodPlan, kind: "route" }],
+  ["no name", { ...goodPlan, name: undefined }],
+  ["a number name", { ...goodPlan, name: 7 }],
+  ["a blank name", { ...goodPlan, name: "   " }],
+  ["a name of only control characters", { ...goodPlan, name: "\u0000\u0001" }],
+  ["a name over 80", { ...goodPlan, name: "n".repeat(81) }],
+  ["no note", { ...goodPlan, note: undefined }],
+  ["a null note", { ...goodPlan, note: null }],
+  ["a note over 2000", { ...goodPlan, note: "n".repeat(2001) }],
+  ["a bad side", { ...goodPlan, side: "left" }],
+  ["no side", { ...goodPlan, side: undefined }],
+  ["no build", { ...goodPlan, build: undefined }],
+  ["a number build", { ...goodPlan, build: 70 }],
+  ["a build over 100", { ...goodPlan, build: "b".repeat(101) }],
+  ["lines that are not an array", { ...goodPlan, lines: { points: [[0, 0], [1, 1]] } }],
+  ["no lines", { ...goodPlan, lines: [] }],
+  ["51 lines", { ...goodPlan, lines: Array.from({ length: 51 }, () => ({ points: [[0, 0], [1, 1]] })) }],
+  ["a line that is an array", { ...goodPlan, lines: [[[0, 0], [1, 1]]] }],
+  ["a null line", { ...goodPlan, lines: [null] }],
+  ["a line of one point", { ...goodPlan, lines: [{ points: [[0, 0]] }] }],
+  ["a line of 501 points", { ...goodPlan, lines: [{ points: Array.from({ length: 501 }, () => [0, 0]) }] }],
+  ["5001 points in total", { ...goodPlan, lines: Array.from({ length: 11 }, (_, i) => ({ points: Array.from({ length: i === 10 ? 1 : 500 }, () => [0, 0]) })) }],
+  ["a point of one number", { ...goodPlan, lines: [{ points: [[0], [1, 1]] }] }],
+  ["a point of three numbers", { ...goodPlan, lines: [{ points: [[0, 0, 0], [1, 1]] }] }],
+  ["a point object", { ...goodPlan, lines: [{ points: [{ x: 0, y: 0 }, [1, 1]] }] }],
+  ["a string coordinate", { ...goodPlan, lines: [{ points: [["1", 0], [1, 1]] }] }],
+  ["a null coordinate", { ...goodPlan, lines: [{ points: [[null, 0], [1, 1]] }] }],
+  ["a coordinate over 100", { ...goodPlan, lines: [{ points: [[100.01, 0], [1, 1]] }] }],
+  ["a coordinate under -100", { ...goodPlan, lines: [{ points: [[0, -100.01], [1, 1]] }] }],
+];
+
+for (const [name, payload] of badPlans) {
+  test(`POST /plans refuses ${name} and files nothing`, async () => {
+    const { response, sent } = await sendPlanWith(plansPost(payload));
+    assert.equal(response.status, 400);
+    assert.equal(response.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+    assert.equal((await response.json()).ok, false);
+    assert.equal(sent.length, 0);
+  });
+}
+
+test("POST /plans refuses invalid JSON and a coordinate that parses to infinity", async () => {
+  const infinite = JSON.stringify(goodPlan).replace("-52.1", "1e999");
+  assert.equal(JSON.parse(infinite).lines[0].points[0][0], Infinity);
+  for (const text of ["{", infinite]) {
+    const { response, sent } = await sendPlanWith(plansPost(text));
+    assert.equal(response.status, 400, text.slice(0, 20));
+    assert.equal(sent.length, 0);
+  }
+});
+
+test("POST /plans with a wrong or missing team code is 401 and files nothing", async () => {
+  for (const code of [null, "", "code-1235", "code-12345"]) {
+    const req = plansPost();
+    if (code === null) req.headers.delete("X-Team-Code");
+    else req.headers.set("X-Team-Code", code);
+    const { response, sent } = await sendPlanWith(req);
+    assert.equal(response.status, 401);
+    assert.equal(response.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+    assert.deepEqual(await response.json(), { ok: false, error: "wrong team code" });
+    assert.equal(sent.length, 0);
+  }
+});
+
+test("POST /plans with no TEAM_CODE or GITHUB_TOKEN secret is 500, never open", async () => {
+  for (const testEnv of [{ GITHUB_TOKEN: "test-token" }, { TEAM_CODE: "code-1234" }]) {
+    const { response, sent } = await sendPlanWith(plansPost(goodPlan, { "X-Team-Code": "" }), testEnv);
+    assert.equal(response.status, 500);
+    assert.equal(sent.length, 0);
+  }
+});
+
+test("POST /plans without a client header is 403", async () => {
+  const req = plansPost();
+  req.headers.delete("X-Scourge-Client");
+  const { response, sent } = await sendPlanWith(req);
+  assert.equal(response.status, 403);
+  assert.equal(response.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+  assert.equal(sent.length, 0);
+});
+
+test("POST /plans over 200 KB is 413, by header or by actual size, and the browser can read it", async () => {
+  const claimed = plansPost();
+  claimed.headers.set("Content-Length", "200001");
+  const padded = plansPost({ ...goodPlan, junk: "x".repeat(200_000) });
+  for (const req of [claimed, padded]) {
+    const { response, sent } = await sendPlanWith(req);
+    assert.equal(response.status, 413);
+    assert.equal(response.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+    assert.equal(sent.length, 0);
+  }
+});
+
+test("POST /plans: junk that fits under 200 KB is still dropped", async () => {
+  const { response, sent } = await sendPlanWith(plansPost({ ...goodPlan, junk: "x".repeat(190_000) }));
+  assert.equal(response.status, 201);
+  assert.ok(sent[0].body.length < 1000);
+});
+
+test("POST /plans: a plan too long for one issue is 413 before GitHub is asked", async () => {
+  // The longest points are inside the limits and fit, but a note of backticks costs 6 characters each once escaped.
+  const lines = Array.from({ length: 6 }, () => ({ points: Array.from({ length: 500 }, () => [-99.25, -98.75]) }));
+  const { response, sent } = await sendPlanWith(plansPost({ ...goodPlan, lines, note: "`".repeat(2000) }));
+  assert.equal(response.status, 413);
+  assert.match((await response.json()).error, /fewer points/);
+  assert.equal(sent.length, 0);
+});
+
+test("POST /plans: the most points allowed, with the longest ordinary note, fits one issue; one more point is 400", async () => {
+  const lines = Array.from({ length: 6 }, () => ({ points: Array.from({ length: 500 }, () => [-99.25, -98.75]) }));
+  const { response, sent } = await sendPlanWith(plansPost({ ...goodPlan, lines, name: "n".repeat(80), note: "x".repeat(2000) }));
+  assert.equal(response.status, 201);
+  assert.ok(sent[0].body.length <= 60_000);
+  lines[0].points.pop();
+  lines.push({ points: [[0, 0], [1, 1]] });
+  const over = await sendPlanWith(plansPost({ ...goodPlan, lines }));
+  assert.equal(over.response.status, 400);
+});
+
+test("POST /plans is limited per address before the code is checked or GitHub is asked", async () => {
+  const keys = [];
+  const testEnv = { ...plansEnv, LIMITER: { limit: async ({ key }) => { keys.push(key); return { success: false }; } } };
+  const { response, sent } = await sendPlanWith(plansPost(goodPlan, { "X-Team-Code": "wrong", "CF-Connecting-IP": "203.0.113.9" }), testEnv);
+  assert.equal(response.status, 429);
+  assert.equal(response.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+  assert.deepEqual(keys, ["203.0.113.9"]);
+  assert.equal(sent.length, 0);
+});
+
+test("POST /plans: GitHub refusing the label retries unlabelled and still succeeds", async () => {
+  const { response, sent } = await sendPlanWith(plansPost(), plansEnv, (fields, all) => (
+    fields.labels ? new Response("{}", { status: 422 }) : Response.json({ number: 77 + all.length }, { status: 201 })
+  ));
+  assert.equal(response.status, 201);
+  assert.deepEqual(await response.json(), { ok: true, issue: 79 });
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent[0].labels, ["proposed-auto-plan"]);
+  assert.equal(sent[1].labels, undefined);
+  assert.equal(sent[1].title, sent[0].title);
+  assert.equal(sent[1].body, sent[0].body);
+});
+
+test("POST /plans: a 422 on the unlabelled retry too is a 502", async () => {
+  const { response, sent } = await sendPlanWith(plansPost(), plansEnv, () => new Response("{}", { status: 422 }));
+  assert.equal(response.status, 502);
+  assert.equal(sent.length, 2);
+});
+
+test("POST /plans: GitHub failures are 502 without exposing the token or the code", async () => {
+  const answers = [
+    () => Response.json({ message: "secret details" }, { status: 500 }),
+    () => { throw new TypeError("network down"); },
+    () => new Response("<html>", { status: 201 }),
+    () => Response.json({ number: "42" }, { status: 201 }),
+  ];
+  for (const answer of answers) {
+    const { response } = await sendPlanWith(plansPost(), plansEnv, answer);
+    assert.equal(response.status, 502);
+    assert.equal(response.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+    const text = await response.text();
+    assert.doesNotMatch(text, /test-token|code-1234|secret details/);
+    assert.equal(JSON.parse(text).ok, false);
+  }
+});
+
+test("OPTIONS /plans allows the Pages origin, POST, and the three headers, with no code", async () => {
+  const response = await worker.fetch(new Request(plansUrl, { method: "OPTIONS", headers: { Origin: "https://evil.example" } }), {});
+  assert.equal(response.status, 204);
+  assert.equal(response.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+  assert.equal(response.headers.get("Access-Control-Allow-Methods"), "POST, OPTIONS");
+  assert.equal(response.headers.get("Access-Control-Allow-Headers"), "X-Team-Code, X-Scourge-Client, Content-Type");
+});
+
+test("other methods on /plans are refused", async () => {
+  const response = await worker.fetch(new Request(plansUrl, { headers: { "X-Team-Code": "code-1234" } }), plansEnv);
+  assert.equal(response.status, 405);
+});
+
+test("adding /plans leaves /map's CORS and /results' lack of it alone", async () => {
+  const map = await worker.fetch(new Request(mapUrl, { method: "OPTIONS" }), {});
+  assert.equal(map.headers.get("Access-Control-Allow-Methods"), "GET, OPTIONS");
+  assert.equal(map.headers.get("Access-Control-Allow-Headers"), "X-Team-Code");
+  const { response } = await sendWith({}, env);
+  assert.equal(response.headers.get("Access-Control-Allow-Origin"), null);
+});

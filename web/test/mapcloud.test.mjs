@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { relayBase, mapUrl, checkCode, cleanResponse, syncCloud, describe, buildLabel, whenText, MANIFEST_URL } from '../mapcloud.js';
+import { relayBase, mapUrl, checkCode, cleanResponse, syncCloud, describe, buildLabel, whenText, MANIFEST_URL, sendPlan, acceptPlanSend, replyToPlanPage } from '../mapcloud.js';
 
 const RELAY = 'https://relay.example.workers.dev';
 const MANIFEST = { version: '2.4.0', results_url: `${RELAY}/results` };
@@ -175,4 +175,139 @@ test('words: build label, fresh and saved lines', () => {
   assert.match(describe({ status: 'cached', fetched: 1000 }, null).detail, /^Latest build, saved /);
   assert.deepEqual(describe({ status: 'need-code' }).notices, []);
   assert.match(describe({ status: 'offline-empty', reason: 'network' }).notices[0].text, /^Offline, and nothing is saved/);
+});
+
+/* ---------- proposed auto plans ---------- */
+
+const PLAN = { schema: 1, kind: 'proposed-auto-plan', name: 'Left 2 goal', side: 'L', note: '', build: null, lines: [{ points: [[0, 0], [3, 4]] }] };
+const SENT = 'Sent as a proposed plan. No robot code changed.';
+const NEW_CODE = 'The team code changed. Enter the new one, then send again.';
+const OFFLINE = "Couldn't reach the internet. Your drawing is still here, send it when you're online.";
+const planCalls = (f) => f.calls.filter((c) => c.url.endsWith('/plans'));
+
+test('sendPlan posts the plan to the relay beside results_url, with the code only in a header', async () => {
+  const f = fakeFetch({ map: () => new Response('{"ok":true,"issue":12}', { status: 201 }) });
+  const r = await sendPlan({ plan: PLAN, code: 'sekret-code', fetchFn: f });
+  assert.deepEqual(r, { ok: true, message: SENT, unauthorized: false });
+  const [call] = planCalls(f);
+  assert.equal(call.url, `${RELAY}/plans`);
+  assert.equal(call.init.method, 'POST');
+  assert.equal(call.init.headers['X-Team-Code'], 'sekret-code');
+  assert.ok(call.init.headers['X-Scourge-Client']);
+  assert.equal(call.init.headers['Content-Type'], 'application/json');
+  assert.deepEqual(JSON.parse(call.init.body), PLAN);
+  for (const c of f.calls) assert.equal(c.url.includes('sekret-code'), false, 'never in a URL');
+  assert.equal(call.init.body.includes('sekret-code'), false, 'never in the body');
+});
+
+test('sendPlan: a 401 says unauthorized with the exact text', async () => {
+  const f = fakeFetch({ map: () => new Response('{"ok":false,"error":"wrong team code"}', { status: 401 }) });
+  const r = await sendPlan({ plan: PLAN, code: 'old', fetchFn: f });
+  assert.deepEqual(r, { ok: false, message: NEW_CODE, unauthorized: true });
+});
+
+test('sendPlan: no connection keeps the drawing, and nothing else is unauthorized', async () => {
+  const f = async () => { throw new TypeError('Failed to fetch'); };
+  assert.deepEqual(await sendPlan({ plan: PLAN, code: 'c', fetchFn: f }), { ok: false, message: OFFLINE, unauthorized: false });
+  assert.deepEqual(await sendPlan({ plan: PLAN, code: 'c', relay: RELAY, fetchFn: f }), { ok: false, message: OFFLINE, unauthorized: false });
+});
+
+test('sendPlan: a request that hangs counts as no connection', async () => {
+  const f = (url, init) => new Promise((_, reject) => { init.signal.addEventListener('abort', () => reject(new Error('aborted'))); });
+  const r = await sendPlan({ plan: PLAN, code: 'c', relay: RELAY, fetchFn: f, timeoutMs: 10 });
+  assert.equal(r.message, OFFLINE);
+});
+
+test('sendPlan uses the saved relay address when the manifest cannot be reached', async () => {
+  const f = fakeFetch({
+    manifest: () => { throw new TypeError('Failed to fetch'); },
+    map: () => new Response('{"ok":true,"issue":1}', { status: 201 }),
+  });
+  const r = await sendPlan({ plan: PLAN, code: 'c', relay: RELAY, fetchFn: f });
+  assert.equal(r.ok, true);
+  assert.equal(planCalls(f)[0].url, `${RELAY}/plans`);
+});
+
+test('sendPlan: anything else names the problem and keeps the drawing', async () => {
+  const cases = [
+    [() => new Response('{"ok":false,"error":"too many sends, try again in a minute"}', { status: 429 }), 'too many sends, try again in a minute'],
+    [() => new Response('{"ok":false,"error":"GitHub answered 500"}', { status: 502 }), 'GitHub answered 500'],
+    [() => new Response('{"ok":false,"error":"invalid plan"}', { status: 400 }), 'invalid plan'],
+    [() => new Response('<html>Bad gateway</html>', { status: 503 }), 'the relay answered 503'],
+    [() => new Response('<html>Sign in</html>', { status: 200 }), 'the relay gave an unexpected answer'],
+    [() => new Response('{"ok":false}', { status: 200 }), 'the relay gave an unexpected answer'],
+  ];
+  for (const [map, detail] of cases) {
+    const r = await sendPlan({ plan: PLAN, code: 'sekret-code', fetchFn: fakeFetch({ map }) });
+    assert.deepEqual(r, { ok: false, message: `The plan didn't send (${detail}). Your drawing is still here.`, unauthorized: false });
+    assert.equal(r.message.includes('sekret-code'), false);
+  }
+});
+
+test('sendPlan with no saved code asks for it and sends nothing', async () => {
+  const f = fakeFetch();
+  const r = await sendPlan({ plan: PLAN, code: null, fetchFn: f });
+  assert.equal(r.ok, false);
+  assert.equal(r.unauthorized, false);
+  assert.match(r.message, /^The plan didn't send \(enter the team code first\)\. Your drawing is still here\.$/);
+  assert.equal(f.calls.length, 0);
+});
+
+test('sendPlan: a manifest with no good address, and none saved, says so instead of blaming the internet', async () => {
+  const f = fakeFetch({ manifest: () => new Response('{"results_url":"http://nope"}') });
+  const r = await sendPlan({ plan: PLAN, code: 'c', fetchFn: f });
+  assert.match(r.message, /\(no relay address\)/);
+  assert.equal(planCalls(f).length, 0);
+});
+
+test('sendPlan: a plan that cannot be turned into JSON does not throw', async () => {
+  const loop = {};
+  loop.self = loop;
+  const f = fakeFetch();
+  const r = await sendPlan({ plan: loop, code: 'c', fetchFn: f });
+  assert.equal(r.ok, false);
+  assert.equal(f.calls.length, 0);
+});
+
+test('acceptPlanSend takes only our own frame and origin, and the right shape', () => {
+  const frame = {};
+  const data = { type: 'scourge-plan-send', id: 'p1', plan: PLAN };
+  const origin = 'https://whyater.github.io';
+  assert.deepEqual(acceptPlanSend({ source: frame, origin, data }, frame, origin), { id: 'p1', plan: PLAN });
+  assert.deepEqual(acceptPlanSend({ source: frame, origin, data: { ...data, id: 3 } }, frame, origin), { id: 3, plan: PLAN });
+  assert.equal(acceptPlanSend({ source: {}, origin, data }, frame, origin), null, 'another window');
+  assert.equal(acceptPlanSend({ source: frame, origin: 'https://evil.example', data }, frame, origin), null, 'another origin');
+  assert.equal(acceptPlanSend({ source: null, origin, data }, null, origin), null, 'no frame yet, no source');
+  assert.equal(acceptPlanSend({ source: frame, origin, data: { ...data, type: 'scourge-map' } }, frame, origin), null);
+  assert.equal(acceptPlanSend({ source: frame, origin, data: { ...data, plan: 'x' } }, frame, origin), null);
+  assert.equal(acceptPlanSend({ source: frame, origin, data: { ...data, id: {} } }, frame, origin), null);
+  assert.equal(acceptPlanSend({ source: frame, origin, data: null }, frame, origin), null);
+});
+
+test('replyToPlanPage uses the page API, and a message when the API is missing or fails', () => {
+  const origin = 'https://whyater.github.io';
+  const reply = { id: 'p1', ok: true, message: SENT };
+  const posted = [];
+  const postMessage = (msg, to) => posted.push({ msg, to });
+
+  const results = [];
+  replyToPlanPage({ ScourgeMap: { planResult: (r) => results.push(r) }, postMessage }, origin, reply);
+  assert.deepEqual(results, [reply]);
+  assert.equal(posted.length, 0);
+
+  const expected = { msg: { type: 'scourge-plan-result', ...reply }, to: origin };
+  replyToPlanPage({ postMessage }, origin, reply);
+  assert.deepEqual(posted, [expected]);
+
+  posted.length = 0;
+  replyToPlanPage({ ScourgeMap: { planResult: () => { throw new Error('page broke'); } }, postMessage }, origin, reply);
+  assert.deepEqual(posted, [expected]);
+
+  // A frame on another origin throws on the property read. The message still goes.
+  posted.length = 0;
+  const crossOrigin = { get ScourgeMap() { throw new Error('blocked'); }, postMessage };
+  replyToPlanPage(crossOrigin, origin, reply);
+  assert.deepEqual(posted, [expected]);
+
+  assert.doesNotThrow(() => replyToPlanPage(null, origin, reply));
 });

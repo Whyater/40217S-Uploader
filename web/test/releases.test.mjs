@@ -1,7 +1,7 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { MODES, validateName, checkLatest, downloadLatest, loadBuild, modeAvailable } from '../releases.js';
+import { MODES, validateName, checkLatest, downloadLatest, loadBuild, modeAvailable, storedTag } from '../releases.js';
 
 // Minimal in-memory Cache Storage.
 function makeCaches() {
@@ -251,4 +251,14 @@ test('captive portal HTML gives a plain message', async () => {
   assert.equal(r.offline, true);
   assert.equal(r.isNew, false);
   assert.match(r.error, /public Wi-Fi/);
+});
+
+test('storedTag reads the tag without loading the files', async () => {
+  assert.equal(await storedTag(), null);
+  await seed('scourge-build-v1', 'old');
+  assert.equal(await storedTag(), 'old');
+  await seed('scourge-build-b', 'new');
+  const p = await globalThis.caches.open('scourge-build-pointer');
+  await p.put('active', new Response('scourge-build-b'));
+  assert.equal(await storedTag(), 'new');
 });

@@ -120,6 +120,12 @@ jobs:
             Write-Host '::error::Self-test exited non-zero'
             exit 1
           }
+          foreach ($needed in 'Route Map reader and math: OK', 'Route Map cloud data: OK', 'Route Map tab: OK') {
+            if ($out -notmatch [regex]::Escape($needed)) {
+              Write-Host ('::error::Self-test output has no "' + $needed + '"')
+              exit 1
+            }
+          }
           if (($env:SCOURGE_SELFTEST_DOWNLOAD -eq '1') -and ($out -notmatch 'Download: OK')) {
             Write-Host '::error::Self-test output has no "Download: OK"'
             exit 1
@@ -134,4 +140,6 @@ jobs:
           path: |
             ${{ runner.temp }}\uploader-window.png
             ${{ runner.temp }}\uploader-route-map.png
+            ${{ runner.temp }}\uploader-route-map-predicted.png
+            ${{ runner.temp }}\uploader-route-map-cloud.png
           if-no-files-found: warn

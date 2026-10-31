@@ -722,6 +722,8 @@ $SharedCode = {
     # ReadAllText would fail while Record results has the file open.
     function Read-SharedText {
         param([string]$Path)
+        # A results file is a few hundred KB. Anything this big is not one, so do not read it.
+        if ((New-Object System.IO.FileInfo($Path)).Length -gt 50MB) { throw 'The file is over 50 MB.' }
         $fs = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
         try {
             $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
@@ -1117,12 +1119,21 @@ $SharedCode = {
             foreach ($s in $Skip) { if ($s -and ($s -ieq $file.FullName)) { $skipThis = $true } }
             if ($skipThis) { continue }
             $result.Files++
+            if ($file.Length -gt 50MB) {
+                $result.Unreadable++
+                [void]$allRejected.Add(@{ Kind = '?'; Reason = 'file over 50 MB'; Got = 0; Expected = 0; MissingCount = 0; Missing = @(); Text = ($file.Name + ': skipped, the file is over 50 MB.'); Source = $file.Name })
+                continue
+            }
             $stamp = [string]$file.Length + '|' + [string]$file.LastWriteTimeUtc.Ticks
             $entry = $null
             if (($null -ne $Cache) -and $Cache.ContainsKey($file.FullName) -and ($Cache[$file.FullName].Stamp -eq $stamp)) { $entry = $Cache[$file.FullName] }
             if ($null -eq $entry) {
                 $text = ''
-                try { $text = Read-SharedText $file.FullName } catch { $result.Unreadable++; continue }
+                try { $text = Read-SharedText $file.FullName } catch {
+                    $result.Unreadable++
+                    [void]$allRejected.Add(@{ Kind = '?'; Reason = 'unreadable'; Got = 0; Expected = 0; MissingCount = 0; Missing = @(); Text = ($file.Name + ': could not be read.'); Source = $file.Name })
+                    continue
+                }
                 $parsed = ConvertFrom-ScourgeWire $text
                 $when = Get-FileWhen $file
                 $mine = New-Object System.Collections.ArrayList
@@ -1474,6 +1485,7 @@ $script:MapLoading = $false
 $script:MapReload = $false
 $script:MapFilling = $false
 $script:MapPaintError = $false
+$script:MapNoteLogged = ''
 $script:MapField = $null
 
 # Converts a size picked at 100% scaling into real pixels for this screen.
@@ -1974,7 +1986,8 @@ function Update-MapLayout {
     $ui.MapSessionsLabel.SetBounds($x, $y, ($colW - (Px 72)), (Px 16))
     $ui.MapRefresh.Location = New-Object System.Drawing.Point(($x + $colW - $ui.MapRefresh.PreferredSize.Width), ($y - (Px 1)))
     $y += Px 24
-    $listH = Px 152
+    # The list gives up height on a short screen so the miss table keeps room.
+    $listH = [math]::Min((Px 152), [math]::Max((Px 72), ($H - (Px 488))))
     $ui.MapList.SetBounds($x, $y, $colW, $listH)
     $y += $listH
     $hasRejected = [bool]$ui.MapRejected.Text
@@ -1982,6 +1995,8 @@ function Update-MapLayout {
     if ($hasRejected) {
         $y += Px 8
         Set-WrappedLabel $ui.MapRejected $x $y $colW
+        # A long note is cut at about four lines. The full text is in Details.
+        if ($ui.MapRejected.Height -gt (Px 56)) { $ui.MapRejected.Height = Px 56 }
         $y += $ui.MapRejected.Height
     }
     $y += Px 16
@@ -2017,17 +2032,19 @@ function Set-View {
     foreach ($ctl in $ui.MapControls) { $ctl.Visible = $isMap }
     Update-ViewButtons
     Update-Layout
-    if ($isMap) {
-        # The window just got wider, so keep it on the screen.
-        try {
-            $form = $ui.Form
-            $wa = [System.Windows.Forms.Screen]::FromControl($form).WorkingArea
-            $left = [math]::Max($wa.Left, [math]::Min($form.Left, ($wa.Right - $form.Width)))
-            $topPos = [math]::Max($wa.Top, [math]::Min($form.Top, ($wa.Bottom - $form.Height)))
-            if (($left -ne $form.Left) -or ($topPos -ne $form.Top)) { $form.Location = New-Object System.Drawing.Point($left, $topPos) }
-        } catch { }
-        if (-not $NoLoad) { Start-MapLoad }
-    }
+    # The window changed size, so keep it on the screen in either view.
+    Move-FormOnScreen
+    if ($isMap -and (-not $NoLoad)) { Start-MapLoad }
+}
+
+function Move-FormOnScreen {
+    try {
+        $form = $script:Ui.Form
+        $wa = [System.Windows.Forms.Screen]::FromControl($form).WorkingArea
+        $left = [math]::Max($wa.Left, [math]::Min($form.Left, ($wa.Right - $form.Width)))
+        $topPos = [math]::Max($wa.Top, [math]::Min($form.Top, ($wa.Bottom - $form.Height)))
+        if (($left -ne $form.Left) -or ($topPos -ne $form.Top)) { $form.Location = New-Object System.Drawing.Point($left, $topPos) }
+    } catch { }
 }
 
 function Switch-MapWhole {
@@ -2059,14 +2076,21 @@ function Start-MapLoad {
     $script:MapReload = $false
     $script:Map.Loading = $true
     $script:Ui.MapCanvas.Invalidate()
-    $skip = @()
-    if ($script:Recording -and $script:ResultsPath) { $skip = @($script:ResultsPath) }
-    Start-BgJob $MapBody @{ Folder = (Get-ResultsFolder); Skip = $skip; Cache = $script:MapCache } {
-        param($r)
+    try {
+        $skip = @()
+        if ($script:Recording -and $script:ResultsPath) { $skip = @($script:ResultsPath) }
+        Start-BgJob $MapBody @{ Folder = (Get-ResultsFolder); Skip = $skip; Cache = $script:MapCache } {
+            param($r)
+            $script:MapLoading = $false
+            $script:Map.Loading = $false
+            Set-MapData $r
+            if ($script:MapReload) { Start-MapLoad }
+        }
+    } catch {
+        # Could not even start: say so, instead of leaving "Reading recordings..." up.
         $script:MapLoading = $false
         $script:Map.Loading = $false
-        Set-MapData $r
-        if ($script:MapReload) { Start-MapLoad }
+        Set-MapData @{ Status = 'error'; Error = ('Could not start reading the recordings: ' + $_.Exception.Message) }
     }
 }
 
@@ -2133,6 +2157,12 @@ function Update-MapPanel {
     for ($i = $n - 1; ($i -ge 0) -and ($i -ge ($n - 3)); $i--) { [void]$lines.Add([string]$m.Rejected[$i].Text) }
     if ($n -gt 3) { [void]$lines.Add('and ' + ($n - 3) + ' more rejected recordings.') }
     $ui.MapRejected.Text = ($lines.ToArray() -join "`n")
+    # The note on screen is cut short when long, so the whole text also goes to Details (once per change).
+    $fullNote = (@($m.Rejected | ForEach-Object { [string]$_.Text }) -join ' ')
+    if ($fullNote -ne $script:MapNoteLogged) {
+        $script:MapNoteLogged = $fullNote
+        if ($fullNote) { Add-LogText ('Route Map: ' + $fullNote) }
+    }
 
     # Last run: the newest recording of kind run.
     $run = $null
@@ -3331,6 +3361,11 @@ if ($SelfTest) {
             $writer.Flush()
             $open = Read-ScourgeResults -Folder $tmp
             & $expect ($open.Unreadable -eq 0 -and $open.Files -eq 4) 'folder: a file that is still open should be readable'
+            $bigPath = Join-Path $tmp 'results-20261030-120000.csv'
+            $bigStream = [System.IO.File]::Create($bigPath)
+            try { $bigStream.SetLength(51MB) } finally { $bigStream.Dispose() }
+            $big = Read-ScourgeResults -Folder $tmp
+            & $expect ($big.Unreadable -eq 1 -and (@($big.Rejected | Where-Object { $_.Text -like 'results-20261030-120000.csv: skipped*50 MB*' }).Count -eq 1)) 'folder: a file over 50 MB should be skipped and reported'
             $nothing = Read-ScourgeResults -Folder (Join-Path $tmp 'missing')
             & $expect ($nothing.Status -eq 'ok' -and $nothing.Sessions.Count -eq 0) 'folder: a missing folder should read as empty'
         } finally {
@@ -3367,6 +3402,13 @@ if ($SelfTest) {
             Write-Host ('  Screenshot saved: ' + $env:SCOURGE_SCREENSHOT)
             $testForm.Hide()
         }
+        # If starting the read throws, the tab must not stay on "Reading recordings...".
+        $realFolderFn = ${function:Get-ResultsFolder}
+        try {
+            ${function:Get-ResultsFolder} = { throw 'no folder' }
+            Start-MapLoad
+        } finally { ${function:Get-ResultsFolder} = $realFolderFn }
+        if ($script:MapLoading -or $script:Map.Loading -or (-not $script:Map.Error)) { $failures.Add('Route Map stayed on Reading recordings after a failed start') }
         # Route Map tab: sample recordings go through the same file reader the app uses.
         # Compare the size the layout asks for. The window itself is cut to the screen by Windows
         # (the CI screen is shorter than the Upload view with Details open), and only while shown.
@@ -3411,6 +3453,7 @@ if ($SelfTest) {
                 Write-Host ('  Route Map screenshot saved: ' + $mapShot)
                 $testForm.Hide()
             }
+            if ($script:MapPaintError) { $failures.Add('Route Map drawing failed: ' + $script:Ui.Log.Text) }
             Set-View 'upload'
             Write-Host ('  Upload view size: layout ' + $uploadSize + ' before and ' + $script:UploadLayoutSize + ' after, window ' + $uploadActual + ' before and ' + $testForm.ClientSize + ' after')
             if ($script:UploadLayoutSize -ne $uploadSize) { $failures.Add('Upload view size changed after visiting Route Map: ' + $uploadSize + ' became ' + $script:UploadLayoutSize) }

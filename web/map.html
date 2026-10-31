@@ -9,7 +9,7 @@
 <style>
 :root {
   color-scheme: light dark;
-  /* tokens from 40217S-MacUploader/DESIGN.md and 40217S-Uploader/web/styles.css */
+  /* the same tokens as the uploader apps */
   --accent: #3056D3;
   --accent-fill: #3056D3;
   --on-accent: #FFFFFF;
@@ -204,8 +204,13 @@ code { background: var(--track); padding: 1px 4px; border-radius: 4px; }
 .menu-row .chk { width: 11px; height: 11px; fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; visibility: hidden; }
 .menu-row[aria-pressed="true"] .chk { visibility: visible; }
 .menu-row .sw { width: 22px; height: 12px; overflow: visible; }
-.mapbox { position: relative; background: var(--field); border-top: 0.5px solid var(--sep); border-bottom: 0.5px solid var(--sep); overflow: hidden; }
-#map { display: block; width: 100%; height: auto; aspect-ratio: 1 / 1; touch-action: manipulation; }
+.mapbox { display: flex; justify-content: center; position: relative; background: var(--field); border-top: 0.5px solid var(--sep); border-bottom: 0.5px solid var(--sep); overflow: hidden; }
+/* The map stops short of the window's height, so the transport under it stays on screen. */
+#map {
+  display: block; flex: none; height: auto; aspect-ratio: 1 / 1; touch-action: manipulation;
+  width: min(100%, max(280px, calc(100vh - 290px)));
+  width: min(100%, max(280px, calc(100dvh - 290px)));
+}
 .mapnote { position: absolute; left: 8px; bottom: 8px; right: 8px; font-size: var(--callout); color: var(--text-2); pointer-events: none; }
 .mapnote:empty { display: none; }
 .mapnote span { background: var(--solid); border: 0.5px solid var(--sep); border-radius: 6px; padding: 2px 6px; display: inline-block; }
@@ -318,9 +323,10 @@ svg text { font-family: var(--font); }
 /* ---------- rail ---------- */
 #lists > summary { padding: 0 var(--inset); font-weight: 600; }
 @media (min-width: 720px) { #lists > summary { display: none; } }
-.listscroll { max-height: 440px; overflow: auto; padding-bottom: 6px; }
+.listscroll { padding-bottom: 6px; }
+.morebtn { display: block; width: 100%; min-height: var(--hit); padding: 0 var(--inset); border: 0; background: none; color: var(--accent); text-align: left; font-size: var(--callout); }
+.morebtn:hover { background: var(--hover); }
 .grouphead { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px var(--inset) 4px; color: var(--text-2); font-size: var(--callout); font-weight: 600; }
-.grouphead.sub { font-weight: 400; padding-top: 8px; }
 .grouphead .num { font-weight: 400; margin-left: auto; }
 .rowlist { list-style: none; }
 .row {
@@ -425,7 +431,7 @@ td .na { color: var(--text-2); }
         <div class="emptybox" id="emptybox" hidden>
           <h2>No routes or runs yet</h2>
           <p>Teach a route or record a run, then bring its results file here. The field fills in with the path, the marks, and how far the robot missed.</p>
-          <p class="standalone-only">Build this page from your data with <code>python3 tools/autopath/autopath.py go</code>.</p>
+          <p class="standalone-only">The laptop tool builds this page from your data.</p>
         </div>
         <div class="transport" id="transport">
           <button class="icbtn" id="btn-prev" type="button" aria-label="Previous step (left arrow)" title="Previous step (left arrow)">
@@ -527,6 +533,7 @@ function normField(f) {
   const rb = f.robot && typeof f.robot === 'object' ? f.robot : {};
   return {
     wall: nn(f.wall) != null ? f.wall : 70.1,
+    // Against the robot's footprint. The laptop tool's 5.0 in [VERIFY] is against the robot's center: different checks, so both stay.
     goalRadius: nn(f.goal_radius) != null ? f.goal_radius : 2.4,
     robot: { length: nn(rb.length) != null ? rb.length : 17, width: nn(rb.width) != null ? rb.width : 16 },
     goals: arr(f.goals).map(normPt).filter(hasXY),
@@ -616,7 +623,7 @@ function normSession(s, i, forcedUnit) {
   const ends = [samples.length ? samples[samples.length - 1].t : 0, events.length ? events[events.length - 1].t : 0, marks.length ? marks[marks.length - 1].t : 0];
   return {
     id: String(s.id != null ? s.id : 'session-' + (i + 1)), kind: String(s.kind || ''), side: s.side ? String(s.side) : '', when: s.when ? String(s.when) : '',
-    for_slot: s.for_slot != null ? String(s.for_slot) : null, samples, marks, events, duration: Math.max.apply(null, ends),
+    build: typeof s.build === 'string' ? s.build : '', for_slot: s.for_slot != null ? String(s.for_slot) : s.kind === 'run' ? slotFromBuild(s.build) : null, samples, marks, events, duration: Math.max.apply(null, ends),
     unit: tu.unit, unitGuessed: tu.guessed,
   };
 }
@@ -719,7 +726,8 @@ function missRows(route, session) {
     const ty = ev && isNum(ev.ty) ? ev.ty : wp && wp.y !== null ? wp.y : null;
     const th = ev && isNum(ev.th) ? ev.th : wp && wp.hKnown ? wp.h : null;
     const e2 = ev ? { tx, ty, x: ev.x, y: ev.y } : null;
-    const usesPos = !NO_POS.has(kind), usesHead = !NO_HEAD.has(kind);
+    const did = ev && ev.type ? ev.type : kind; // a turn logs 0, 0 as its target position, so score what the robot says it did
+    const usesPos = !NO_POS.has(did), usesHead = !NO_HEAD.has(did);
     const mi = ev && usesPos ? missIn(e2) : null;
     const md = ev && usesHead ? headingMiss(ev.h, th) : null;
     const rIn = rateIn(mi), rDeg = rateDeg(md);
@@ -909,7 +917,7 @@ function layoutTags(pts, labels, extra) {
 }
 
 
-/* ---------- results files: the same rules as tools/autopath/wire.py ---------- */
+/* ---------- results files: the same rules as the laptop tool ---------- */
 const WIRE_ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 // The strings Python's int() accepts, so a line one parser takes the other takes too. null means not a number.
 function wireInt(s) { return /^\s*[+-]?\d+(_\d+)*\s*$/.test(s) ? parseInt(s.replace(/_/g, ''), 10) : null; }
@@ -1035,7 +1043,7 @@ function leftFrame(s) {
 
 function csvSession(s, name) {
   const left = leftFrame(s), stem = baseName(name), m = /(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})\d{2}/.exec(stem);
-  return { id: stem, kind: s.kind, side: s.side, when: m ? m[1] + '-' + m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5] : '', samples: left.samples, marks: left.marks, events: left.events };
+  return { id: stem, kind: s.kind, side: s.side, build: s.build, when: m ? m[1] + '-' + m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5] : '', samples: left.samples, marks: left.marks, events: left.events };
 }
 
 // The same recording arriving twice, once through the tool and once as a file: kind, row count, first and last sample.
@@ -1043,7 +1051,7 @@ function sameSession(a, b) {
   const ends = (s) => (s.samples.length ? s.samples : s.marks.length ? s.marks : s.events);
   const close = (p, q) => (!p && !q) || (p && q && Math.abs(p.t - q.t) < 0.002 && (p.x === q.x || Math.abs(p.x - q.x) < 0.011) && (p.y === q.y || Math.abs(p.y - q.y) < 0.011));
   const ea = ends(a), eb = ends(b);
-  return a.kind === b.kind && a.samples.length + a.marks.length + a.events.length === b.samples.length + b.marks.length + b.events.length &&
+  return a.kind === b.kind && a.side === b.side && a.samples.length + a.marks.length + a.events.length === b.samples.length + b.marks.length + b.events.length &&
     close(ea[0], eb[0]) && close(ea[ea.length - 1], eb[eb.length - 1]);
 }
 
@@ -1053,7 +1061,7 @@ function uniqueIds(sessions) {
   sessions.forEach((s) => { const n = (seen.get(s.id) || 0) + 1; seen.set(s.id, n); if (n > 1) s.id += '-' + n; });
 }
 
-// The Goals and walls, same numbers as field.py (tests/test_map_embed.py compares them), so results files alone still get a real field.
+// The Goals and walls, the same numbers the laptop tool uses (a test compares them), so results files alone still get a real field.
 const DEFAULT_FIELD = {
   wall: 70.1,
   goals: [
@@ -1091,17 +1099,35 @@ function buildModel(input) {
   return m;
 }
 
+/* ---------- the host ---------- */
+// A page on a real address takes a load only from its own address. File pages and app web views report "null" or "file://",
+// which proves nothing, so there the check that the sender is the parent frame is what counts.
+function hostAllowed(selfOrigin, fromOrigin) {
+  return /^https?:/.test(selfOrigin) ? fromOrigin === selfOrigin : true;
+}
+
 /* ---------- which run the first glance talks about ---------- */
-// A run with no route named fits a route when every logged step is the kind that route has at that index.
-function runFitsRoute(route, s) {
-  return s.events.every((e) => e.step === null || e.step < 0 || (route.steps[e.step] && route.steps[e.step].kind === e.type));
+// The robot names the routine it ran in the build label: "Taught A", or "SIMULATED Taught A" from the simulator.
+// "SIMULATED Taught A truth" is the fake robot's real position, not a run of the route, so the label must end there.
+function slotFromBuild(build) {
+  const m = /\bTaught ([ABC])$/.exec(typeof build === 'string' ? build.trim() : '');
+  return m ? m[1] : null;
+}
+// A run belongs to its own slot's route, as long as every logged step exists there and is the same kind. A run can log
+// fewer steps than the route (it stopped early, or a kind logs nothing), so a shorter log still counts.
+function runMatchesRoute(route, s) {
+  return s.for_slot === route.slot && s.events.every((e) => e.step === null || e.step < 0 || (route.steps[e.step] && route.steps[e.step].kind === e.type));
+}
+// Date and time to the second: the file name has the seconds, the "when" field stops at the minute.
+function whenFine(s) {
+  const m = /(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/.exec(s.id);
+  return m ? m[1] + '-' + m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5] + ':' + m[6] : s.when;
 }
 function lastRun(model, route) {
   let best = null;
   model.sessions.forEach((s) => {
-    if (s.kind !== 'run') return;
-    if (route && !(s.for_slot === route.slot || (s.for_slot === null && runFitsRoute(route, s)))) return;
-    if (!best || s.when >= best.when) best = s;
+    if (s.kind !== 'run' || (route && !runMatchesRoute(route, s))) return;
+    if (!best || whenFine(s) >= whenFine(best)) best = s;
   });
   return best;
 }
@@ -1112,11 +1138,12 @@ function pickSelection(model, prev) {
   const kept = route >= 0;
   if (!kept) route = model.routes.length ? 0 : null;
   const r = route !== null ? model.routes[route] : null;
-  let session = p.session != null && model.sessions.some((s) => s.id === p.session) ? p.session : null;
+  const old = p.session != null ? model.sessions.find((s) => s.id === p.session) : null;
+  let session = old && !(old.kind === 'run' && r && !runMatchesRoute(r, old)) ? old.id : null;
   if (session === null && !p.cleared) {
     const run = lastRun(model, r);
     if (run) session = run.id;
-    else if (!r && model.sessions.length) session = model.sessions.reduce((a, b) => (b.when >= a.when ? b : a)).id;
+    else if (!r && model.sessions.length) session = model.sessions.reduce((a, b) => (whenFine(b) >= whenFine(a) ? b : a)).id;
   }
   return { route, session, step: kept && isNum(p.step) && r.steps[p.step] ? p.step : null };
 }
@@ -1189,8 +1216,9 @@ function frameCtx(model, sel, W, fit, layers) {
 }
 
 function resolveSel(model, state) {
-  const baseRoute = state.route != null && model.routes[state.route] ? model.routes[state.route] : null;
   const session = state.session != null ? model.sessions.find((s) => s.id === state.session) || null : null;
+  let baseRoute = state.route != null && model.routes[state.route] ? model.routes[state.route] : null;
+  if (session && session.kind === 'run' && baseRoute && !runMatchesRoute(baseRoute, session)) baseRoute = null; // never score a run against another route
   const kind = session ? session.kind : '';
   const frame = kind === 'push' ? 'local' : 'field';
   const rawSession = frame === 'local' ? null : kind.indexOf('teach') === 0 ? session : rawSessionFor(baseRoute, model.sessions);
@@ -1308,9 +1336,9 @@ function renderRoute(model, state, sel, ctx) {
   const extra = [];
   if (start) { extra.push({ x: start.x / k, y: -start.y / k }); extra.push({ x: start.x / k + 8, y: -start.y / k - 19, w: 40, h: 14 }); } // the START word
   if (route.opening) {
-    const ex = route.opening.source === 'teach';
     extra.push({ x: route.opening.x / k, y: -route.opening.y / k });
-    extra.push({ x: route.opening.x / k + (ex ? 10 : 14), y: -route.opening.y / k + (ex ? 4 : 6), w: ex ? 92 : 150, h: 14 }); // the AFTER OPENING words
+    const ol = openingLabel(route.opening, F, ctx);
+    if (ol) extra.push(ol.box);
   }
   if (state.layers.route) {
     route.wp.forEach((w, i) => {
@@ -1328,7 +1356,7 @@ function renderRoute(model, state, sel, ctx) {
     if (op) {
       const exact = op.source === 'teach';
       p.push(at(op.x, op.y, k, '<circle class="open-ring' + (exact ? '' : ' approx') + '" r="' + (exact ? 6.5 : 11) + '"/>' + (exact ? '<path class="open-cross" d="M-3.5 0h7M0 -3.5v7"/>' : '') +
-        (ctx.W < 420 ? '' : '<text class="lbl strong halo" x="' + (exact ? 10 : 14) + '" y="' + (exact ? 15 : 17) + '">' + (exact ? 'AFTER OPENING' : 'AFTER OPENING (approx.)') + '</text>') +
+        (() => { const l = openingLabel(op, F, ctx); return l ? '<text class="lbl strong halo" x="' + l.dx + '" y="' + l.dy + '" text-anchor="' + (l.dx < 0 ? 'end' : 'start') + '">' + l.text + '</text>' : ''; })() +
         '<title>' + (exact ? 'Where the opening ended: first sample of the teach session. Step 0 starts here.' : 'No teach_open session selected, so this is the first waypoint the route has, not a measured end of the opening.') + '</title>'));
     }
   }
@@ -1371,17 +1399,32 @@ function renderRaw(model, sel, ctx) {
   return p.join('');
 }
 
-// Where the worst miss gets its label: the first spot beside the ring in view and clear of Goal names.
+// The first spot beside a mark where a label stays in view and clear of every Goal and Goal name. null when there is none.
+function labelSpot(px, py, w, spots, field, ctx) {
+  const left = ctx.win.x0 / ctx.k, right = ctx.win.x1 / ctx.k;
+  const keep = [];
+  field.goals.forEach((g) => { const gg = goalGeom(g, field, ctx), d = gg.disc; keep.push(gg.box, { x: d.x - d.r, y: d.y - d.r, w: 2 * d.r, h: 2 * d.r }); });
+  for (const c of spots) {
+    const b = { x: px + (c[0] < 0 ? c[0] - w : c[0]), y: py + c[1] - 10, w, h: 13 };
+    if (b.x >= left && b.x + w <= right && keep.every((g) => b.x + b.w < g.x || b.x > g.x + g.w || b.y + b.h < g.y || b.y > g.y + g.h)) return { dx: c[0], dy: c[1], box: b };
+  }
+  return null;
+}
+// The words beside the after-opening mark. Left out on a phone, or when no spot is clear; the ring and its tooltip stay.
+function openingLabel(op, field, ctx) {
+  if (ctx.W < 420) return null;
+  const exact = op.source === 'teach', text = exact ? 'AFTER OPENING' : 'AFTER OPENING (approx.)', a = exact ? 10 : 14;
+  const spot = labelSpot(op.x / ctx.k, -op.y / ctx.k, text.length * 6.6, [[a, 15], [a, -8], [-a, 15], [-a, -8]], field, ctx);
+  return spot && { text, dx: spot.dx, dy: spot.dy, box: spot.box };
+}
+// Where the worst miss gets its label.
 function worstMark(model, sel, ctx) {
   if (!sel.runSession || !sel.rows) return null;
   const sm = runSummary(sel.rows, sel.runSession), worst = sm.worstIn !== null ? sel.rows.find((r) => r.idx === sm.worstInStep) : null;
   if (!worst || !worst.actual) return null;
-  const k = ctx.k, label = fmt(sm.worstIn, 2) + ' in', tw = label.length * 6.8;
-  const px = worst.actual.x / k, py = -worst.actual.y / k, right = ctx.win.x1 / k, goals = model.field.goals.map((g) => goalGeom(g, model.field, ctx).box);
-  const boxAt = (c) => ({ x: px + (c[0] < 0 ? c[0] - tw : c[0]), y: py + c[1] - 10, w: tw, h: 12 });
-  const clear = (b, g) => b.x + b.w < g.x || b.x > g.x + g.w || b.y + b.h < g.y || b.y > g.y + g.h;
-  const spot = [[12, -8], [12, 18], [-12, -8], [-12, 18]].find((c) => boxAt(c).x + tw < right && goals.every((g) => clear(boxAt(c), g))) || [-12, -8];
-  return { x: worst.actual.x, y: worst.actual.y, dx: spot[0], dy: spot[1], label, cl: rateIn(sm.worstIn), box: boxAt(spot) };
+  const label = fmt(sm.worstIn, 2) + ' in', px = worst.actual.x / ctx.k, py = -worst.actual.y / ctx.k;
+  const spot = labelSpot(px, py, label.length * 6.8, [[12, -8], [12, 18], [-12, -8], [-12, 18]], model.field, ctx) || { dx: -12, dy: -8, box: { x: px - 12 - label.length * 6.8, y: py - 18, w: label.length * 6.8, h: 13 } };
+  return { x: worst.actual.x, y: worst.actual.y, dx: spot.dx, dy: spot.dy, label, cl: rateIn(sm.worstIn), box: spot.box };
 }
 
 function renderRunOverlay(model, sel, ctx) {
@@ -1471,9 +1514,12 @@ function renderPlay(model, state, sel, ctx) {
 const WARN_ICON = '<svg viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1 13.5 12.5h-13z"/><path d="M6.4 5h1.2v4H6.4zM6.4 9.8h1.2V11H6.4z" fill="var(--solid)"/></svg>';
 const isOpen = (state, key) => (state && state.open && state.open[key] ? ' open' : '');
 const plural = (n, word, many) => n + ' ' + (n === 1 ? word : many || word + 's');
-const when2 = (s) => s.when || 'time not recorded';
+const when2 = (s) => whenFine(s) || 'time not recorded';
 
-function sessionLabel(s) { return SESSION_LABEL[s.kind] || s.kind || 'Session'; }
+function sessionLabel(s) {
+  const label = SESSION_LABEL[s.kind] || s.kind || 'Session';
+  return /^SIMULATED/.test(s.build || '') ? label + ' (simulated)' : label;
+}
 
 // The one row that answers first: which route, did the last run hit, where it missed.
 function renderSummary(model, state, sel) {
@@ -1488,7 +1534,8 @@ function renderSummary(model, state, sel) {
   } else {
     title = r ? 'Route ' + esc(r.slot) : s ? esc(sessionLabel(s)) : 'No route selected';
     if (r) sub = esc(r.note || (s ? sessionLabel(s) + ', ' + when2(s) : r.steps.length + ' steps'));
-    else if (s) sub = esc(when2(s)) + '. No cleaned route here: routes come from autopath.py on the programmer\'s computer.';
+    else if (s && s.kind === 'run' && model.routes.length) sub = esc(when2(s)) + '. ' + (s.for_slot ? 'Route ' + esc(s.for_slot) + ' has different steps now, so this run is drawn on its own.' : 'This run names no route, so it is drawn on its own.');
+    else if (s) sub = esc(when2(s)) + '. No cleaned route here: routes come from the laptop tool.';
     else if (model.sessions.length) sub = 'Pick a session to see it on the field.';
     const latest = lastRun(model, r), run = sel.runSession || latest;
     if (run) {
@@ -1500,7 +1547,7 @@ function renderSummary(model, state, sel) {
       if (r) stats.push(stat('Pins planned', pinsTotal(r)));
       stats.push(stat('Run time', fmtS(sm.total)));
     } else {
-      stats.push(stat('Last run', '<i class="idle"></i>No run yet', '', true));
+      stats.push(stat('Last run', '<i class="idle"></i>' + (r ? 'No run for this route yet' : 'No run yet'), '', true));
       if (r) stats.push(stat('Pins planned', pinsTotal(r)), stat('Estimate', isNum(r.checks.estimated_s) ? fmt(r.checks.estimated_s, 1) + ' s' : 'n/a'));
     }
   }
@@ -1517,21 +1564,22 @@ function renderWarn(model, sel, state) {
   let bad = false;
   const li = (who, text, cls) => '<li' + (cls ? ' class="' + cls + '"' : '') + '><span class="who">' + esc(who) + '</span><br>' + esc(text) + '</li>';
   arr(model.rejected).forEach((x) => items.push(li(x.file, x.text)));
-  model.routes.forEach((r) => r.checks.warnings.forEach((w) => items.push(li('Route ' + r.slot, w))));
+  if (sel.route) sel.route.checks.warnings.forEach((w) => items.push(li('Route ' + sel.route.slot, w)));
   (sel.contactList || []).forEach((c) => {
     if (c.severity === 'bad') bad = true;
     items.push(li('Route ' + sel.route.slot + ', step ' + c.step, c.text, c.severity === 'bad' ? 'bad' : ''));
   });
   if (!items.length) {
-    return model.routes.length ? '<div class="calmline"><i class="good"></i>No warnings on the selected route</div>' : '<div class="calmline"><i></i>No routes, so no route warnings</div>';
+    return model.routes.length ? '<div class="calmline"><i class="good"></i>' + (sel.route ? 'No warnings on this route' : 'No warnings') + '</div>' : '<div class="calmline"><i></i>No routes, so no route warnings</div>';
   }
   return '<details class="disc warnline' + (bad ? ' bad' : '') + '" data-keep="warn"' + isOpen(state, 'warn') + '><summary>' + WARN_ICON + '<span>' + plural(items.length, 'warning') + '</span></summary><ul class="warnlist">' + items.join('') + '</ul></details>';
 }
 
+const LIST_SHORT = 5;
 function renderLists(model, state) {
-  const p = [];
+  const p = [], more = state.more || {};
   p.push('<div class="grouphead">Routes <span class="num">' + model.routes.length + '</span></div>');
-  if (!model.routes.length) p.push('<p class="listnote">None yet. Clean a teach session with <code>autopath.py clean</code>.</p>');
+  if (!model.routes.length) p.push('<p class="listnote">None yet. Routes come from the laptop tool.</p>');
   else {
     p.push('<ul class="rowlist">');
     model.routes.forEach((r, i) => {
@@ -1542,28 +1590,35 @@ function renderLists(model, state) {
     });
     p.push('</ul>');
   }
-  const groups = [['teach', 'Taught', (s) => s.kind.indexOf('teach') === 0], ['run', 'Runs', (s) => s.kind === 'run'], ['push', 'Push tests', (s) => s.kind === 'push']];
+  // Runs come first and each group has its own heading. A long group shows its newest rows and says how many more there are.
+  const groups = [['run', 'Runs', (s) => s.kind === 'run'], ['teach', 'Taught', (s) => s.kind.indexOf('teach') === 0], ['push', 'Push tests', (s) => s.kind === 'push']];
   const shown = new Set();
-  p.push('<div class="grouphead">Sessions <span class="num">' + model.sessions.length + '</span>' + (state.session ? '<button type="button" class="linkbtn" data-key="clear" data-clear="1">Clear</button>' : '') + '</div>');
-  if (!model.sessions.length) p.push('<p class="listnote">No sessions yet.</p>');
   groups.concat([['other', 'Other', () => true]]).forEach((g) => {
-    const list = model.sessions.filter((s) => !shown.has(s.id) && g[2](s)).sort((a, b) => (a.when < b.when ? 1 : a.when > b.when ? -1 : 0));
-    if (!list.length) return;
+    const list = model.sessions.filter((s) => !shown.has(s.id) && g[2](s)).sort((a, b) => (whenFine(a) < whenFine(b) ? 1 : whenFine(a) > whenFine(b) ? -1 : 0));
     list.forEach((s) => shown.add(s.id));
-    p.push('<div class="grouphead sub">' + g[1] + '</div><ul class="rowlist">');
-    list.forEach((s) => {
-      const route = model.routes.find((r) => r.slot === s.for_slot) || null;
-      let extra = '';
+    if (!list.length && g[0] !== 'run') return;
+    const picked = list.some((s) => s.id === state.session);
+    p.push('<div class="grouphead">' + g[1] + ' <span class="num">' + list.length + '</span>' + (picked ? '<button type="button" class="linkbtn" data-key="clear" data-clear="1">Clear</button>' : '') + '</div>');
+    if (!list.length) { p.push('<p class="listnote">No runs yet.</p>'); return; }
+    const rows = more[g[0]] ? list : list.filter((s, i) => i < LIST_SHORT || s.id === state.session);
+    p.push('<ul class="rowlist">');
+    rows.forEach((s) => {
+      let title = sessionLabel(s), extra = '', note = '';
       if (s.kind === 'run') {
+        const route = model.routes.find((r) => runMatchesRoute(r, s)) || null;
+        const sim = title.endsWith(' (simulated)') ? ' (simulated)' : '';
+        title = s.for_slot ? 'Route ' + s.for_slot + sim : title;
+        if (s.for_slot && !route) note = 'route has changed';
         const sum = runSummary(missRows(route, s), s);
         extra = sum.worstIn !== null ? '<span class="row-x pill ' + rateIn(sum.worstIn) + '"><i class="' + rateIn(sum.worstIn) + '"></i>' + fmt(sum.worstIn, 2) + ' in</span>' : '<span class="row-x txt">no scored steps</span>';
       } else if (s.kind === 'push') {
         extra = '<span class="row-x txt">' + plural(s.marks.filter((m) => m.type === 'push').length, 'push', 'pushes') + '</span>';
       }
-      const bits = [when2(s), s.side ? 'side ' + s.side : '', s.samples.length ? fmt(s.duration, 1) + ' s' : 'no samples', s.for_slot ? 'route ' + s.for_slot : ''].filter(Boolean);
-      p.push('<li><button type="button" class="row" title="' + esc(s.id) + '" data-key="ses-' + esc(s.id) + '" data-session="' + esc(s.id) + '" aria-pressed="' + (state.session === s.id) + '"><span class="row-t">' + esc(sessionLabel(s)) + '</span>' + extra + '<span class="row-m">' + esc(bits.join(' · ')) + '</span></button></li>');
+      const bits = [when2(s), s.side ? 'side ' + s.side : '', s.samples.length ? fmt(s.duration, 1) + ' s' : 'no samples', s.kind !== 'run' && s.for_slot ? 'route ' + s.for_slot : '', note].filter(Boolean);
+      p.push('<li><button type="button" class="row" title="' + esc(s.id) + '" data-key="ses-' + esc(s.id) + '" data-session="' + esc(s.id) + '" aria-pressed="' + (state.session === s.id) + '"><span class="row-t">' + esc(title) + '</span>' + extra + '<span class="row-m">' + esc(bits.join(' · ')) + '</span></button></li>');
     });
     p.push('</ul>');
+    if (list.length > LIST_SHORT) p.push('<button type="button" class="morebtn" data-key="more-' + g[0] + '" data-more="' + g[0] + '">' + (more[g[0]] ? 'Show fewer' : 'Show all ' + list.length) + '</button>');
   });
   return p.join('');
 }
@@ -1604,7 +1659,7 @@ function renderLegend(state) {
     it('<circle r="4" fill="none" stroke="var(--obj)" stroke-width="1.5"/><circle r="1.8" fill="var(--obj)"/>', 'Cup stack, Cup, Pin on the field') +
     it('<line x1="-11" y1="0" x2="11" y2="0" stroke="var(--route)" stroke-width="2.5" stroke-dasharray="5 3.5"/>', 'Dashed leg: driven in reverse') +
     it('<path d="M-9 8L9 -8" stroke="var(--text-2)" stroke-width="1.5" stroke-dasharray="5 3.5"/>', 'Autonomous Line, y = x') +
-    '</ul><p class="hint">Heading 0 is up, clockwise is positive. A number on a Goal is how many Pins the route puts on it. Step numbers match <code>nudge</code>. Goal radius ' + '2.4 in and the robot box are from field.hpp notes, not measured here.</p>' +
+    '</ul><p class="hint">Heading 0 is up, clockwise is positive. A number on a Goal is how many Pins the route puts on it. Step numbers match the laptop tool. The Goal radius (2.4 in) and the robot box are not measured here.</p>' +
     '<p class="hint">Footprint contacts are checked on this page: the robot box at each waypoint and along straight legs between them, against Goals, the Autonomous Line and the wall. Each Drop may touch its own Goal. The hand path is not checked.</p></div></details></div>';
 }
 
@@ -1630,7 +1685,8 @@ function stepDetailHtml(model, state, sel, i) {
   if (sel.runSession) {
     if (row && row.reached) {
       kv.push(['Run actual', fmt(row.actual.x) + ', ' + fmt(row.actual.y) + ' in, ' + fmt(row.actual.h) + ' deg']);
-      kv.push(['Run target', fmt(row.target.x) + ', ' + fmt(row.target.y) + ' in, ' + fmt(row.target.h) + ' deg']);
+      const tgt = [NO_POS.has(s.kind) ? '' : fmt(row.target.x) + ', ' + fmt(row.target.y) + ' in', NO_HEAD.has(s.kind) ? '' : fmt(row.target.h) + ' deg'].filter(Boolean);
+      kv.push(['Run target', tgt.length ? tgt.join(', ') : '-']);
       kv.push(['Miss', (row.missIn !== null ? '<span class="pill ' + row.ratingIn + '"><i class="' + row.ratingIn + '"></i>' + fmt(row.missIn, 2) + ' in</span> ' : '') + (row.missDeg !== null ? '<span class="pill ' + row.ratingDeg + '"><i class="' + row.ratingDeg + '"></i>' + fmt(row.missDeg, 1) + ' deg</span>' : '') + (row.missIn === null && row.missDeg === null ? '<span class="muted">not scored for this step kind</span>' : '')]);
       kv.push(['Finished at', fmt(row.t, 2) + ' s' + (row.ok === false ? ' <span class="pill bad"><i class="bad"></i>step reported failure</span>' : '')]);
     } else kv.push(['Run', '<span class="muted">no result logged for this step</span>']);
@@ -1646,7 +1702,7 @@ function pushPanel(sel) {
   if (!pd.rows.length) return h + '<p class="hint">No push marks in this session.</p>';
   if (!pd.hasSamples) return h + '<p class="hint">' + pd.rows.length + ' push mark' + (pd.rows.length === 1 ? '' : 's') + ' found, but this session has no samples, so no distances are shown.</p>';
   const mx = pd.max || 1;
-  h += '<p class="hint" style="margin-bottom:8px">Straight-line distance from the first sample (the start pose) to each push mark. This assumes the robot was dragged back to the start each time. The gate verdict (pod and motor inches) comes from <code>autopath.py gate</code>.</p>';
+  h += '<p class="hint" style="margin-bottom:8px">Straight-line distance from the first sample (the start pose) to each push mark. This assumes the robot was dragged back to the start each time. The pass or fail verdict comes from the laptop tool.</p>';
   h += pd.rows.map((r) => '<div class="pinrow"><span>Push ' + r.n + ' <span class="muted">at ' + fmt(r.t, 1) + ' s</span></span><span>' + fmt(r.dist, 2) + ' in</span></div>' + (r.dist !== null ? '<span class="minibar" style="width:' + Math.max(2, (r.dist / mx) * 100).toFixed(1) + '%"></span>' : '')).join('');
   h += '<dl class="kv" style="margin-top:10px"><dt>Mean</dt><dd>' + fmt(pd.mean, 2) + ' in</dd><dt>Spread</dt><dd>' + (pd.spread !== null ? fmt(pd.spread, 2) + ' in (max minus min)' : 'needs 2 or more pushes') + '</dd></dl>';
   return h;
@@ -1694,8 +1750,8 @@ function renderSteps(model, state, sel, cur) {
   }
   if (!route && !rows) {
     return model.sessions.length
-      ? '<div class="empty"><b>No route to tabulate</b>These sessions have no cleaned route here. A route comes from <code>autopath.py</code> on the programmer\'s computer.</div>'
-      : '<div class="empty"><b>No route to tabulate</b>The step table fills in when a route is loaded. Teach a route on the robot, then run <code>python3 tools/autopath/autopath.py go</code> to rebuild this page.</div>';
+      ? '<div class="empty"><b>No route to tabulate</b>These sessions have no cleaned route here. Routes come from the laptop tool.</div>'
+      : '<div class="empty"><b>No route to tabulate</b>The step table fills in when a route is loaded. Teach a route on the robot, then rebuild this page with the laptop tool.</div>';
   }
   const run = !!sel.runSession;
   let head = '<header><h2>' + (route ? 'Route ' + esc(route.slot) + ' steps' : 'Run events') + '</h2>';
@@ -1720,7 +1776,7 @@ function renderSteps(model, state, sel, cur) {
     const na = '<span class="na" title="not in the data">n/a</span>';
     const dash = '<span class="muted" title="not a target for this step kind">-</span>';
     const pos = NO_POS.has(kind) ? dash : row && row.target && isNum(row.target.x) ? fmt(row.target.x) + ', ' + fmt(row.target.y) : w && w.x !== null ? fmt(w.x) + ', ' + fmt(w.y) : na;
-    const hd = kind === 'toggle' || kind === 'opening' ? dash : row && row.target && isNum(row.target.h) ? fmt(row.target.h) : w && w.hKnown ? fmt(w.h) : na;
+    const hd = kind === 'toggle' || kind === 'opening' || (row && NO_HEAD.has(kind)) ? dash : row && row.target && isNum(row.target.h) ? fmt(row.target.h) : w && w.hKnown ? fmt(w.h) : na;
     const lift = s ? (s.kind === 'drop' ? (s.lift !== null ? fmt(s.lift, 0) : na) : s.drop_lift !== null && (s.kind === 'grab_stack' || s.kind === 'grab_pin') ? fmt(s.drop_lift, 0) + ' <span class="muted" title="lift for the next drop">next</span>' : '<span class="muted">-</span>') : '<span class="muted">-</span>';
     const cls = (state.step === i ? ' sel' : '') + (cur === i ? ' cur' : '') + (run && !(row && row.reached) && i >= 0 ? ' unreached' : '');
     let tds = '<td class="n"><button type="button" class="stepbtn" data-key="step-' + i + '" data-step="' + i + '" aria-label="Select step ' + i + '">' + (i < 0 ? 'open' : i) + '</button></td><td><span class="kindcell">' + kindIcon(kind) + esc(KIND_LABEL[kind] || kind) + '</span></td><td class="n' + (run ? ' opt' : '') + '">' + pos + '</td><td class="n' + (run ? ' opt' : '') + '">' + hd + '</td><td class="n opt">' + lift + '</td>';
@@ -1792,7 +1848,7 @@ function renderAll(model, state, W) {
   };
 }
 
-const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normalize, resolveWaypoints, missRows, runSummary, pushDistances, footprintCorners, hull, areaOf, interpPose, circleHitsHull, sweepPoints, contacts, rawSessionFor, layoutTags, fitWindow, openingPoint, displayRoute, startPoseOf, frameCtx, resolveSel, renderAll, renderPlay, fmt, esc, activeEvent, shortName, parseWire, leftFrame, rejectionText, buildModel, sameSession, lastRun, runFitsRoute, pickSelection, thinPath, drawnPath, DEFAULT_FIELD };
+const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normalize, resolveWaypoints, missRows, runSummary, pushDistances, footprintCorners, hull, areaOf, interpPose, circleHitsHull, sweepPoints, contacts, rawSessionFor, layoutTags, fitWindow, openingPoint, displayRoute, startPoseOf, frameCtx, resolveSel, renderAll, renderPlay, fmt, esc, activeEvent, shortName, parseWire, leftFrame, rejectionText, buildModel, sameSession, lastRun, pickSelection, slotFromBuild, runMatchesRoute, whenFine, openingLabel, hostAllowed, thinPath, drawnPath, DEFAULT_FIELD };
 /*</pure>*/
 
 /* ---------- page shell (DOM) ---------- */
@@ -1806,7 +1862,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   const svg = $('map'), app = $('app');
   const state = {
     route: null, session: null, step: null, hover: null, t: 0, playing: false, speed: 1, cleared: false,
-    view: 'fit', open: {},
+    view: 'fit', open: {}, more: {},
     layers: { route: true, raw: true, run: true, foot: false, sweep: false, tags: true },
   };
   Object.assign(state, pickSelection(model, null));
@@ -1901,7 +1957,8 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     stop();
     state.route = i; state.step = null; state.hover = null; state.t = 0; state.cleared = false;
     const s = model.sessions.find((x) => x.id === state.session), r = model.routes[i];
-    if (!s || (s.kind !== 'push' && s.for_slot !== r.slot)) { const run = lastRun(model, r); state.session = run ? run.id : null; }
+    const keep = s && (s.kind === 'push' || (s.kind === 'run' ? runMatchesRoute(r, s) : s.for_slot === r.slot));
+    if (!keep) { const run = lastRun(model, r); state.session = run ? run.id : null; }
     refresh();
   }
   function selectSession(id) {
@@ -1909,10 +1966,9 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     if (state.session === id) { state.session = null; state.cleared = true; } else {
       state.session = id; state.cleared = false;
       const s = model.sessions.find((x) => x.id === id);
-      const cur = state.route != null ? model.routes[state.route] : null;
       let ri = state.route;
-      if (s && s.for_slot != null) { const f = model.routes.findIndex((r) => r.slot === s.for_slot); if (f >= 0) ri = f; }
-      else if (s && s.kind === 'run' && !(cur && runFitsRoute(cur, s))) { const f = model.routes.findIndex((r) => runFitsRoute(r, s)); ri = f >= 0 ? f : null; }
+      if (s && s.kind === 'run') { const f = model.routes.findIndex((r) => runMatchesRoute(r, s)); ri = f >= 0 ? f : null; }
+      else if (s && s.for_slot != null) { const f = model.routes.findIndex((r) => r.slot === s.for_slot); if (f >= 0) ri = f; }
       if (ri !== state.route) { state.route = ri; state.step = null; }
     }
     state.t = 0; state.hover = null;
@@ -1968,14 +2024,14 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     $('gen').textContent = '';
     Object.assign(state, pickSelection(model, { slot, session: state.session, step: state.step, cleared: state.cleared }));
     state.hover = null; state.t = 0;
-    W = box.clientWidth || W;
+    W = svg.getBoundingClientRect().width || W;
     refresh();
     syncLists();
     return { routes: model.routes.length, sessions: model.sessions.length, rejected: model.rejected.length };
   }
   window.ScourgeMap = { load };
   window.addEventListener('message', (e) => {
-    if (e.source === window.parent && e.data && e.data.type === 'scourge-map-load') load(e.data.input);
+    if (e.source === window.parent && hostAllowed(location.origin, e.origin) && e.data && e.data.type === 'scourge-map-load') load(e.data.input);
   });
 
   /* ----- events ----- */
@@ -1985,6 +2041,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     const menu = document.querySelector('details.menu[open]');
     if (menu && !el.closest('details.menu')) menu.open = false;
     let n;
+    if ((n = el.closest('[data-more]'))) { state.more[n.dataset.more] = !state.more[n.dataset.more]; keepFocus(() => put($('listbody'), renderLists(model, state))); return; }
     if ((n = el.closest('[data-route]'))) return selectRoute(+n.dataset.route);
     if ((n = el.closest('[data-session]'))) return selectSession(n.dataset.session);
     if (el.closest('[data-clear]')) { if (state.session) selectSession(state.session); return; }
@@ -2029,19 +2086,18 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   });
 
   /* ----- sizing: keep UI marks a fixed pixel size while the field scales ----- */
-  const box = svg.parentElement;
   function measure() {
-    const w = box.clientWidth;
+    const w = svg.getBoundingClientRect().width;
     if (w && Math.abs(w - W) > 1) { W = w; last = view(); paintMap(last); }
   }
-  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(measure).observe(box); else window.addEventListener('resize', measure);
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(measure).observe(svg); else window.addEventListener('resize', measure);
   // Side by side the list is always showing; stacked on a narrow screen it starts folded so the map comes first.
   const mq = window.matchMedia ? window.matchMedia('(max-width: 719px)') : null;
   const lists = $('lists');
   function syncLists() { if (mq && !mq.matches) lists.open = true; else if (mq && mq.matches && !lists.dataset.touched) lists.open = false; }
   $('listsum').addEventListener('click', () => { lists.dataset.touched = '1'; });
   if (mq) { (mq.addEventListener ? mq.addEventListener.bind(mq, 'change') : mq.addListener.bind(mq))(syncLists); }
-  W = box.clientWidth || W;
+  W = svg.getBoundingClientRect().width || W;
   syncLists();
   refresh();
 
@@ -2050,7 +2106,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     let sent = -1;
     const report = () => {
       const h = Math.ceil(app.getBoundingClientRect().height);
-      if (h !== sent) { sent = h; window.parent.postMessage({ type: 'scourge-map', height: h }, '*'); }
+      if (h !== sent) { sent = h; window.parent.postMessage({ type: 'scourge-map', height: h }, /^https?:/.test(location.origin) ? location.origin : '*'); }
     };
     if (typeof ResizeObserver !== 'undefined') new ResizeObserver(report).observe(app); else window.addEventListener('resize', report);
     report();

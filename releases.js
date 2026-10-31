@@ -84,12 +84,29 @@ function otherCache(name) {
   return name === CACHE_A ? CACHE_B : CACHE_A;
 }
 
-export async function loadBuild() {
+// With a pointer: the active cache, then the other one. Without one (or if
+// both fail): the cache from before the two-cache layout.
+async function buildOrder() {
   const active = await readPointer();
-  // With a pointer: the active cache, then the other one. Without one (or if
-  // both fail): the cache from before the two-cache layout.
-  const order = active ? [active, otherCache(active), LEGACY_CACHE] : [LEGACY_CACHE];
-  for (const name of order) {
+  return active ? [active, otherCache(active), LEGACY_CACHE] : [LEGACY_CACHE];
+}
+
+// Just the tag of the stored build, without reading its (large) files. The
+// Route Map tab asks for it on every open.
+export async function storedTag() {
+  for (const name of await buildOrder()) {
+    try {
+      if (!(await caches.has(name))) continue;
+      const res = await (await caches.open(name)).match('release.json');
+      const tag = res ? ((await res.json()) || {}).tag : null;
+      if (typeof tag === 'string' && tag) return tag;
+    } catch (e) { /* try the next cache */ }
+  }
+  return null;
+}
+
+export async function loadBuild() {
+  for (const name of await buildOrder()) {
     const build = await readBuild(name);
     if (build) return build;
   }

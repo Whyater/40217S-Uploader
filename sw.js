@@ -1,6 +1,6 @@
 // App shell cache. scripts/publish-web.sh replaces VERSION when it publishes,
 // so every deploy gets a fresh cache and phones pick up the new app.
-const VERSION = '8303227-build-69-6ecf982';
+const VERSION = '9a9e0a0-build-70-e2fdfc5';
 const CACHE_PREFIX = 'scourge-shell-';
 const CACHE = CACHE_PREFIX + VERSION;
 const SHELL = [
@@ -14,6 +14,7 @@ const SHELL = [
   './mapdata.js',
   './mapstore.js',
   './maptab.js',
+  './mapcloud.js',
   './manifest.webmanifest',
   './protocol/index.js',
   './protocol/connection.js',
@@ -57,6 +58,10 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin) return;
   // Release data belongs to releases.js; let the network (or its own cache) answer.
   if (url.pathname.includes('/build/')) return;
+  // The map download is team data fetched from another origin, so it already
+  // bypasses this worker. This keeps it that way if the relay is ever proxied
+  // under this origin: it is never cached here.
+  if (url.pathname.endsWith('/map')) return;
   event.respondWith((async () => {
     const shell = await caches.open(CACHE);
     const hit = await shell.match(req, { ignoreSearch: true });

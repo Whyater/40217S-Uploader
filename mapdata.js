@@ -123,23 +123,33 @@ export async function planAdd(existing, incoming, cap = MAX_BYTES) {
   return { accepted, rejected };
 }
 
-// The object ScourgeMap.load takes: { mapData, csvTexts, note }.
-// The newest map-data.json wins; every results file is passed along.
-export function buildInput(records) {
+// The object ScourgeMap.load takes: { simulated, mapData, csvTexts, note }.
+//   records: files added by hand on this device
+//   cloud:   { simulated, recorded, recordedUpdated } from the last map download
+// simulated is always present (an object or null). For route data, the newer of
+// the newest hand-added map-data.json and the downloaded recording wins; a file
+// is dated by its own "generated" when it has one, else by when it was added.
+// Every results file is passed along.
+export function buildInput(records, cloud = {}) {
   const json = records.filter((r) => r.kind === 'json').sort((a, b) => (b.added || 0) - (a.added || 0));
-  let mapData = null;
+  let hand = null;
+  let handName = '';
   for (const r of json) {
     try {
       const d = JSON.parse(r.text);
-      if (isPlainObject(d)) { mapData = d; break; }
+      if (isPlainObject(d)) { hand = { data: d, stamp: Date.parse(d.generated) || r.added || 0 }; handName = r.name; break; }
     } catch { /* a bad stored file is skipped, not fatal */ }
   }
+  const rec = isPlainObject(cloud.recorded) ? cloud.recorded : null;
+  const recStamp = rec ? Date.parse(rec.generated) || Date.parse(cloud.recordedUpdated) || 0 : 0;
+  const useHand = !!hand && (!rec || hand.stamp > recStamp);
+  const mapData = useHand ? hand.data : rec;
   const csvTexts = records
     .filter((r) => r.kind === 'csv')
     .sort((a, b) => a.name.localeCompare(b.name))
     .map((r) => ({ name: r.name, text: r.text }));
-  const input = { mapData, csvTexts };
-  if (json.length > 1 && mapData) input.note = `Route data from ${json[0].name}`;
+  const input = { simulated: isPlainObject(cloud.simulated) ? cloud.simulated : null, mapData, csvTexts };
+  if (useHand && json.length > 1) input.note = `Route data from ${handName}`;
   return input;
 }
 

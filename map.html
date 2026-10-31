@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>Auto Pathing map | 40217S Scourge</title>
-<script>if (new URLSearchParams(location.search).get('embed') === '1') document.documentElement.classList.add('embed');</script>
+<script>if (new URLSearchParams(location.search).get('embed') === '1') document.documentElement.classList.add('embed'); if (window.parent === window) document.documentElement.classList.add('solo');</script>
 <style>
 :root {
   color-scheme: light dark;
@@ -42,6 +42,7 @@
   --opp: rgba(0, 0, 0, 0.035);
   --wall: #3A3D44;
   --route: #3056D3;
+  --pred: #0E7C86;
   --raw: #7B818C;
   --run: #7633C4;
   --goal-ally: #1E2126;
@@ -73,6 +74,7 @@
     --opp: rgba(255, 255, 255, 0.035);
     --wall: #8E8E93;
     --route: #7A98FF;
+    --pred: #5CC8D6;
     --raw: #8F95A0;
     --run: #BB90FF;
     --goal-ally: #E8E8EA;
@@ -123,6 +125,10 @@ code { background: var(--track); padding: 1px 4px; border-radius: 4px; }
 .stage { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--section); align-items: start; }
 .mapcol, .rail { display: flex; flex-direction: column; gap: var(--section); min-width: 0; }
 @media (min-width: 720px) { .stage { grid-template-columns: minmax(0, 1fr) 272px; } }
+/* Nothing recorded to list or inspect: the prediction gets one calm column, centered. */
+.app[data-rail="0"] { max-width: 700px; }
+.app[data-rail="0"] .stage { grid-template-columns: minmax(0, 1fr); }
+.app[data-rail="0"] .rail { display: none; }
 @media (max-width: 480px) { :root { --pad: 12px; --inset: 12px; } }
 
 /* ---------- summary row ---------- */
@@ -137,6 +143,16 @@ code { background: var(--track); padding: 1px 4px; border-radius: 4px; }
 @media (max-width: 520px) {
   .stats { width: 100%; grid-auto-flow: row; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 }
+/* ---------- prediction label ---------- */
+.predlabel { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-weight: 600; }
+.predlabel svg { width: 26px; height: 8px; flex: none; overflow: visible; }
+.predlabel.none { font-weight: 400; color: var(--text-2); font-size: var(--callout); }
+.predlabel.none i { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); flex: none; }
+.predwarn { display: flex; align-items: flex-start; gap: 8px; margin-top: 6px; font-size: var(--callout); }
+.predwarn svg { width: 14px; height: 14px; flex: none; margin-top: 1px; fill: var(--warn); }
+.about { margin-top: 4px; }
+.about > summary { color: var(--text-2); font-size: var(--callout); }
+.about p + p { margin-top: 2px; }
 .pill { display: inline-flex; align-items: center; gap: 5px; }
 .pill + .pill { margin-left: 8px; }
 .pill i, .stat i { display: inline-block; flex: none; width: 8px; height: 8px; background: currentColor; }
@@ -162,6 +178,7 @@ code { background: var(--track); padding: 1px 4px; border-radius: 4px; }
 @keyframes settle { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
 
 /* ---------- warning line ---------- */
+#warn:empty { display: none; }
 #warn { border-top: 0.5px solid var(--sep); margin-top: 10px; padding-top: 4px; font-size: var(--callout); }
 .calmline { display: flex; align-items: center; gap: 8px; min-height: var(--hit); color: var(--text-2); }
 .calmline i { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); flex: none; }
@@ -175,7 +192,10 @@ code { background: var(--track); padding: 1px 4px; border-radius: 4px; }
 .notel { color: var(--text-2); font-size: var(--callout); margin-top: 8px; }
 
 /* ---------- map card ---------- */
-.toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; }
+.toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 12px; padding: 8px 10px; }
+.tb { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; min-width: 0; }
+.tb-right { margin-left: auto; }
+.toolbar:empty, .tb:empty { display: none; }
 .app[data-frame="local"] .toolbar { display: none; }
 .seg { display: inline-flex; gap: 2px; padding: 2px; background: var(--track); border-radius: 8px; }
 .seg button {
@@ -208,9 +228,13 @@ code { background: var(--track); padding: 1px 4px; border-radius: 4px; }
 /* The map stops short of the window's height, so the transport under it stays on screen. */
 #map {
   display: block; flex: none; height: auto; aspect-ratio: 1 / 1; touch-action: manipulation;
-  width: min(100%, max(280px, calc(100vh - 290px)));
-  width: min(100%, max(280px, calc(100dvh - 290px)));
+  width: min(100%, max(280px, calc(100vh - 330px)));
+  width: min(100%, max(280px, calc(100dvh - 330px)));
 }
+.keyrow { display: flex; flex-wrap: wrap; gap: 4px 16px; padding: 8px var(--inset) 0; color: var(--text-2); font-size: var(--callout); }
+.keyrow:empty { display: none; }
+.key { display: inline-flex; align-items: center; gap: 7px; }
+.key svg { width: 22px; height: 12px; overflow: visible; }
 .mapnote { position: absolute; left: 8px; bottom: 8px; right: 8px; font-size: var(--callout); color: var(--text-2); pointer-events: none; }
 .mapnote:empty { display: none; }
 .mapnote span { background: var(--solid); border: 0.5px solid var(--sep); border-radius: 6px; padding: 2px 6px; display: inline-block; }
@@ -247,6 +271,9 @@ svg text { font-family: var(--font); }
 .toggle-bar.other { fill: none; stroke: var(--toggle); stroke-width: 1.2; stroke-dasharray: 3 2; }
 .loader { fill: none; stroke: var(--text-2); stroke-width: 1.5; }
 .zone { fill: none; stroke: var(--field-seam); stroke-width: 1; stroke-dasharray: 4 3; }
+.pred-line { fill: none; stroke: var(--pred); stroke-width: 2.4; stroke-dasharray: 7 5; stroke-linejoin: round; stroke-linecap: round; }
+.pred-start { fill: var(--field); stroke: var(--pred); stroke-width: 2.2; }
+.pred-end { fill: var(--pred); stroke: var(--field); stroke-width: 1.5; }
 .raw-line { fill: none; stroke: var(--raw); stroke-width: 1.4; stroke-linejoin: round; stroke-linecap: round; opacity: 0.9; }
 .route-leg { fill: none; stroke: var(--route); stroke-width: 2.5; stroke-linecap: round; }
 .route-leg.back { stroke-dasharray: 6 4; }
@@ -282,6 +309,10 @@ svg text { font-family: var(--font); }
 .play-fp { fill: var(--run); fill-opacity: 0.1; stroke: var(--run); stroke-width: 1.5; }
 .play-front { stroke: var(--run); stroke-width: 3; }
 .play-dot { fill: var(--run); stroke: var(--field); stroke-width: 1.5; }
+.play-fp.pred { fill: var(--pred); fill-opacity: 0.12; stroke: var(--pred); }
+.play-front.pred { stroke: var(--pred); }
+.play-dot.pred { fill: var(--pred); }
+.pred-trail { fill: none; stroke: var(--pred); stroke-width: 3.5; stroke-linejoin: round; stroke-linecap: round; }
 .target-x { stroke: var(--text-2); stroke-width: 1.2; fill: none; }
 .miss-line { stroke-width: 1.6; fill: none; }
 .miss-ring { fill: var(--field); stroke-width: 2; }
@@ -317,7 +348,9 @@ svg text { font-family: var(--font); }
 .ticks span.bad { background: var(--bad); }
 .readout { font-family: var(--mono); font-size: var(--callout); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .app[data-noplay="1"] .scrub, .app[data-noplay="1"] .readout, .app[data-noplay="1"] .speedseg, .app[data-noplay="1"] #btn-play { display: none; }
-.playinfo { padding: 0 12px 10px; min-height: 20px; color: var(--text-2); font-size: var(--callout); }
+.playrow { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 12px; padding: 0 12px 10px; }
+.playinfo { min-height: 20px; color: var(--text-2); font-size: var(--callout); flex: 1 1 200px; min-width: 0; }
+.app[data-steps="0"] #btn-prev, .app[data-steps="0"] #btn-next { display: none; }
 @media (max-width: 520px) { .scrub { order: 5; flex-basis: 100%; } .transport .speedseg { order: 6; margin-left: auto; } }
 
 /* ---------- rail ---------- */
@@ -389,9 +422,11 @@ td .na { color: var(--text-2); }
 .emptybox { padding: 14px var(--inset) 16px; }
 .emptybox p { color: var(--text-2); margin-top: 4px; max-width: 58ch; }
 .app[data-empty="1"] { max-width: 560px; }
+/* A page of its own (not inside a host's frame) centers the empty state in whatever window it has. */
+.solo .app[data-empty="1"] { min-height: 100vh; min-height: 100dvh; justify-content: center; }
 .app[data-empty="1"] .stage { grid-template-columns: minmax(0, 1fr); }
 .app[data-empty="1"] #summary, .app[data-empty="1"] .rail, .app[data-empty="1"] .steps,
-.app[data-empty="1"] .toolbar, .app[data-empty="1"] .transport, .app[data-empty="1"] .playinfo { display: none; }
+.app[data-empty="1"] .toolbar, .app[data-empty="1"] .keyrow, .app[data-empty="1"] .transport, .app[data-empty="1"] .playrow { display: none; }
 .app[data-empty="1"] .mapbox { border-top: 0; border-radius: 12px 12px 0 0; }
 .app[data-empty="1"] #map { opacity: 0.62; }
 .embed .standalone-only { display: none; }
@@ -428,11 +463,8 @@ td .na { color: var(--text-2); }
           </svg>
           <div class="mapnote" id="mapnote"></div>
         </div>
-        <div class="emptybox" id="emptybox" hidden>
-          <h2>No routes or runs yet</h2>
-          <p>Teach a route or record a run, then bring its results file here. The field fills in with the path, the marks, and how far the robot missed.</p>
-          <p class="standalone-only">The laptop tool builds this page from your data.</p>
-        </div>
+        <div class="keyrow" id="keyrow" aria-label="Key"></div>
+        <div class="emptybox" id="emptybox" hidden></div>
         <div class="transport" id="transport">
           <button class="icbtn" id="btn-prev" type="button" aria-label="Previous step (left arrow)" title="Previous step (left arrow)">
             <svg viewBox="0 0 14 14" aria-hidden="true"><path d="M9.5 1.5 3.5 7l6 5.5v-3L7 7l2.5-2.5z"/></svg>
@@ -456,14 +488,17 @@ td .na { color: var(--text-2); }
             <button type="button" data-speed="4" aria-pressed="false">4x</button>
           </div>
         </div>
-        <div class="playinfo" id="playinfo"></div>
+        <div class="playrow">
+          <div class="playinfo" id="playinfo"></div>
+          <div class="seg" id="playsrc" role="group" aria-label="What plays" hidden></div>
+        </div>
       </div>
     </section>
 
     <aside class="rail" aria-label="Routes, sessions and step details">
-      <div class="panel">
+      <div class="panel" id="listpanel">
         <details class="disc" id="lists" open>
-          <summary id="listsum">Routes and sessions</summary>
+          <summary id="listsum">Recordings</summary>
           <div id="listbody" class="listscroll"></div>
         </details>
       </div>
@@ -634,9 +669,87 @@ function normalize(raw) {
   const sessions = arr(d.sessions).map((s, i) => normSession(s, i, forced));
   uniqueIds(sessions);
   return {
-    field: normField(d.field), routes: arr(d.routes).map(normRoute), sessions, rejected: [], note: '',
+    field: normField(d.field), routes: arr(d.routes).map(normRoute), sessions, rejected: [], note: d.note ? String(d.note) : '', sim: null, deviceBuild: null,
     illustrative: !!d.illustrative, label: d.label ? String(d.label) : '', generated: d.generated ? String(d.generated) : '',
   };
+}
+
+/* ---------- the prediction: one simulated run per routine and side ---------- */
+// "build-70-abc1234", "Build 70", 70 and "70" all mean build 70. null when there is no number to find.
+function buildNum(v) {
+  if (isNum(v)) return Math.trunc(v);
+  const m = typeof v === 'string' ? /^\s*(?:build[-_ ]?)?(\d+)\b/i.exec(v) : null;
+  return m ? parseInt(m[1], 10) : null;
+}
+// Samples and events are in the LEFT frame, like a session in mapData (its side only says which run it was); sil/sim_export.py writes them that way. The Right view mirrors them back.
+function normSim(raw) {
+  if (!raw || typeof raw !== 'object' || !Array.isArray(raw.routes)) return null;
+  if (isNum(raw.schema) && raw.schema !== 1) return null; // a newer shape than this page reads
+  const byId = new Map();
+  raw.routes.forEach((r, i) => {
+    if (!r || typeof r !== 'object') return;
+    const fromId = /-([LR])$/.exec(String(r.id || ''));
+    const side = /^[LR]$/i.test(String(r.side)) ? String(r.side).toUpperCase() : fromId ? fromId[1] : 'L';
+    const s = normSession({ id: r.id != null ? r.id : 'sim-' + (i + 1), kind: 'sim', side, samples: r.samples, events: r.events }, i, 'ms');
+    if (s.samples.length < 2) return; // a line needs two points
+    s.slot = r.slot != null ? String(r.slot) : null;
+    s.name = r.name ? String(r.name) : s.slot ? 'Taught ' + s.slot : 'AWP';
+    s.total = isNum(r.total_ms) && r.total_ms > 0 ? r.total_ms / 1000 : s.duration;
+    byId.set(s.id, s);
+  });
+  const routes = Array.from(byId.values());
+  if (!routes.length) return null;
+  return {
+    tag: raw.tag ? String(raw.tag) : '', build: buildNum(raw.build != null ? raw.build : raw.tag), commit: raw.commit ? String(raw.commit) : '',
+    generated: raw.generated ? String(raw.generated) : '', assumptions: raw.assumptions ? String(raw.assumptions) : '', routes,
+  };
+}
+
+// The route picker: AWP first, then every taught slot the prediction or the cleaned routes know about. entry.sim holds the L and R predictions.
+const entryMemo = new WeakMap();
+function routeEntries(model) {
+  if (entryMemo.has(model)) return entryMemo.get(model);
+  const map = new Map();
+  const get = (slot) => {
+    const key = slot == null ? 'awp' : 't-' + slot;
+    if (!map.has(key)) map.set(key, { key, slot: slot == null ? null : slot, label: slot == null ? 'AWP' : 'Taught ' + slot, routeIdx: -1, sim: {} });
+    return map.get(key);
+  };
+  get(null);
+  if (model.sim) model.sim.routes.forEach((r) => { get(r.slot).sim[r.side] = r; });
+  model.routes.forEach((r, i) => { get(r.slot).routeIdx = i; });
+  const list = Array.from(map.values()).sort((a, b) => (a.slot === null ? -1 : b.slot === null ? 1 : a.slot < b.slot ? -1 : a.slot > b.slot ? 1 : 0));
+  entryMemo.set(model, list);
+  return list;
+}
+const hasSim = (e) => !!(e && (e.sim.L || e.sim.R));
+const simFor = (e, side) => (e ? e.sim[side] || e.sim.L || e.sim.R || null : null);
+// Which entry a recording sits under: its own taught slot when the picker has one, otherwise AWP (push tests and unplaced files go there).
+function belongs(entries, entry, s) {
+  const own = s.for_slot != null && entries.some((x) => x.slot === s.for_slot) ? s.for_slot : null;
+  return entry.slot === own;
+}
+const listedSessions = (model, entry) => (entry ? model.sessions.filter((s) => belongs(routeEntries(model), entry, s)) : model.sessions);
+
+// prev: { pick, side, sideSet, session, step, cleared }. Opens on AWP's prediction; with no prediction, on the first route that has a recording.
+function pickView(model, prev) {
+  const p = prev || {}, entries = routeEntries(model);
+  let e = entries.find((x) => x.key === p.pick);
+  if (!e) e = hasSim(entries[0]) ? entries[0] : entries.find((x) => x.routeIdx >= 0) || entries[0];
+  const old = p.session != null ? model.sessions.find((s) => s.id === p.session) : null;
+  const keep = old && belongs(entries, e, old) ? old.id : null;
+  let route = null, session = keep, step = null;
+  if (e.routeIdx >= 0) {
+    const k = pickSelection(model, { slot: model.routes[e.routeIdx].slot, session: keep, step: e.key === p.pick ? p.step : null, cleared: p.cleared });
+    route = k.route; session = k.session; step = k.step;
+  } else if (session === null && !p.cleared && !model.sim) {
+    const mine = listedSessions(model, e); // nothing predicted to show, so the newest recording is the best first view
+    if (mine.length) session = mine.reduce((a, b) => (whenFine(b) >= whenFine(a) ? b : a)).id;
+  }
+  const sess = session !== null ? model.sessions.find((s) => s.id === session) : null;
+  const sides = ['L', 'R'].filter((sd) => e.sim[sd]);
+  const side = p.sideSet && sides.includes(p.side) ? p.side : sess && sides.includes(sess.side) ? sess.side : sides.includes('L') ? 'L' : sides[0] || 'L';
+  return { pick: e.key, side, route, session, step };
 }
 
 /* ---------- geometry ---------- */
@@ -873,6 +986,7 @@ function fitWindow(model, sel, layers) {
   }
   if (sel.session) addAll(sel.session.samples);
   if (sel.rawSession && (!layers || layers.raw)) addAll(sel.rawSession.samples);
+  if (sel.sim && (!layers || layers.pred !== false)) addAll(sel.sim.samples);
   if (!pts.length) return null;
   const wall = model.field.wall;
   const b = extent(pts), x0 = b.x0 - FIT_MARGIN, x1 = b.x1 + FIT_MARGIN, y0 = b.y0 - FIT_MARGIN, y1 = b.y1 + FIT_MARGIN;
@@ -970,8 +1084,9 @@ function wireFinish(op, endRows, out) {
   else if (endRows !== expected) fail = 'BEGIN says ' + expected + ' rows but END says ' + endRows + ' (received ' + got + ').';
   else if (missing.length) fail = 'received ' + got + ' of ' + expected + ' rows with gaps.';
   else if (got !== expected) fail = 'received ' + got + ' rows but BEGIN says ' + expected + '.';
-  if (fail) { out.rejected.push({ reason: fail, kind: op.begin.kind, got, expected, missing }); return; }
-  const s = { kind: op.begin.kind, side: op.begin.side, rows: expected, build: op.begin.build, samples: [], marks: [], events: [], fingerprint: '' };
+  const rowText = new Map(seqs.map((q) => [q, op.rows.get(q).tag + '|' + op.rows.get(q).payload])); // kept so a later full copy can clear a cut-off one
+  if (fail) { out.rejected.push({ reason: fail, kind: op.begin.kind, side: op.begin.side, got, expected, missing, order: op.order, rowText }); return; }
+  const s = { kind: op.begin.kind, side: op.begin.side, rows: expected, build: op.begin.build, samples: [], marks: [], events: [], fingerprint: '', order: op.order, rowText };
   const canon = [];
   seqs.forEach((q) => {
     const r = op.rows.get(q);
@@ -984,7 +1099,7 @@ function wireFinish(op, endRows, out) {
 
 function parseWire(text) {
   const out = { sessions: [], rejected: [], noise: 0 };
-  let op = null, orphans = 0;
+  let op = null, orphans = 0, begins = 0;
   String(text).split(/[\r\n]+/).forEach((raw) => {
     const line = raw.replace(WIRE_ANSI, '');
     if (!line.includes('SCOURGE,')) {
@@ -1002,7 +1117,7 @@ function parseWire(text) {
         const begin = wireBegin(f[3]);
         if (!begin) { out.noise++; return; }
         if (op) wireFinish(op, null, out);
-        op = { begin, rows: new Map(), conflict: null };
+        op = { begin, rows: new Map(), conflict: null, order: begins++ };
       } else if (tag === 'END' && f[2] === 'autopath') {
         const endRows = wireInt(f[3]);
         if (endRows === null) { out.noise++; return; }
@@ -1022,24 +1137,64 @@ function parseWire(text) {
   });
   if (op) wireFinish(op, null, out);
   if (orphans) out.rejected.push({ reason: orphans + ' data or END lines with no BEGIN before them (the capture started mid-send).', kind: '?', got: 0, expected: 0, missing: [] });
+  // A cut-off copy followed by a full copy in the same file is a resend, not a loss: the same kind and side, a later BEGIN, and every
+  // row the cut-off copy did get is the same row in the full one. A lone cut-off still shows.
+  out.rejected = out.rejected.filter((r) => r.rowText === undefined || !out.sessions.some((s) => s.order > r.order && s.kind === r.kind && s.side === r.side &&
+    Array.from(r.rowText).every(([q, v]) => s.rowText.get(q) === v)));
   // A resend repeats a whole recording: keep the last complete copy of each.
   const unique = new Map();
   out.sessions.forEach((s) => { unique.delete(s.fingerprint); unique.set(s.fingerprint, s); });
   out.sessions = Array.from(unique.values());
+  out.sessions.forEach((s) => { delete s.order; delete s.rowText; });
+  out.rejected.forEach((r) => { delete r.order; delete r.rowText; });
   return out;
 }
 
-// A RIGHT session in the LEFT frame: (x, y) -> (-y, -x), h -> 270 - h.
-function leftFrame(s) {
-  if (s.side !== 'R') return s;
-  const pose = (o) => ({ x: -o.y, y: -o.x, h: 270 - o.h });
+// The mirror between the two sides: (x, y) -> (-y, -x), h -> 270 - h. It is its own inverse, and the Autonomous Line, the walls and the
+// Goals sit the same after it. Results files and mapData keep everything in the LEFT frame; the Right view mirrors it back for display.
+const mirrorPose = (o) => ({ x: isNum(o.y) ? -o.y : null, y: isNum(o.x) ? -o.x : null, h: isNum(o.h) ? 270 - o.h : o.h });
+function mirrorSession(s) {
   return Object.assign({}, s, {
-    side: 'L',
-    samples: s.samples.map((q) => Object.assign({}, q, pose(q))),
-    marks: s.marks.map((q) => Object.assign({}, q, pose(q))),
-    events: s.events.map((e) => Object.assign({}, e, pose(e), { tx: -e.ty, ty: -e.tx, th: 270 - e.th })),
+    samples: s.samples.map((q) => Object.assign({}, q, mirrorPose(q))),
+    marks: s.marks.map((q) => Object.assign({}, q, mirrorPose(q))),
+    events: s.events.map((e) => Object.assign({}, e, mirrorPose(e), { tx: isNum(e.ty) ? -e.ty : null, ty: isNum(e.tx) ? -e.tx : null, th: isNum(e.th) ? 270 - e.th : e.th })),
   });
 }
+// Memoized, so a mirrored session keeps its identity (the path thinning and the playback pick-out rely on that).
+const mirrorMemo = new WeakMap(), routeMirrorMemo = new WeakMap();
+function mirroredSession(s) {
+  if (!s) return s;
+  if (!mirrorMemo.has(s)) mirrorMemo.set(s, mirrorSession(s));
+  return mirrorMemo.get(s);
+}
+// The Goal that sits where this one lands after the mirror (the near alliance Goal lands on the side one), so a Drop and its Pins follow their Goal.
+function mirrorGoalName(field, name) {
+  const g = field.goals.find((q) => q.name === name);
+  const h = g ? field.goals.find((q) => Math.abs(q.x + g.y) < 0.5 && Math.abs(q.y + g.x) < 0.5) : null;
+  return h ? h.name : name;
+}
+// A cleaned route in true Right-side position: waypoints, start, opening, step targets, the raw waypoints, and the Goals its Drops and Pins name. Kinds are unchanged.
+function mirroredRoute(r, field) {
+  if (!r) return r;
+  if (!routeMirrorMemo.has(r)) {
+    const pins = {};
+    Object.keys(r.checks.pins).forEach((k) => { pins[mirrorGoalName(field, k)] = r.checks.pins[k]; });
+    const pt = (o) => (o ? Object.assign({}, o, { x: isNum(o.y) ? -o.y : null, y: isNum(o.x) ? -o.x : null }) : o);
+    const ang = (v) => (isNum(v) ? 270 - v : v);
+    const mp = (o) => (o ? Object.assign(pt(o), { h: ang(o.h) }) : o);
+    routeMirrorMemo.set(r, Object.assign({}, r, {
+      wp: r.wp.map((w) => (w ? Object.assign(mp(w), { from: mp(w.from) }) : w)),
+      start: Object.assign(pt(r.start), { theta: ang(r.start.theta) }),
+      opening: r.opening ? mp(r.opening) : r.opening,
+      steps: r.steps.map((st) => Object.assign(pt(st), { heading: ang(st.heading), raw_heading: ang(st.raw_heading), goal: st.goal ? mirrorGoalName(field, st.goal) : st.goal })),
+      checks: Object.assign({}, r.checks, { pins }),
+      rawWps: r.rawWps.map((w) => (w && typeof w === 'object' && isNum(w.x) && isNum(w.y) ? Object.assign({}, w, { x: -w.y, y: -w.x, heading: ang(w.heading) }) : w)),
+    }));
+  }
+  return routeMirrorMemo.get(r);
+}
+// A RIGHT session in the LEFT frame.
+function leftFrame(s) { return s.side === 'R' ? Object.assign(mirrorSession(s), { side: 'L' }) : s; }
 
 function csvSession(s, name) {
   const left = leftFrame(s), stem = baseName(name), m = /(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})\d{2}/.exec(stem);
@@ -1080,12 +1235,15 @@ const DEFAULT_FIELD = {
   robot: { length: 17, width: 16 },
 };
 
-// What window.ScourgeMap.load gets: { mapData, csvTexts: [{ name, text }], note }. Routes only ever come from mapData.
+// What window.ScourgeMap.load gets: { mapData, csvTexts: [{ name, text }], simulated, note, build }. Routes only ever come from mapData.
 function buildModel(input) {
   const i = input && typeof input === 'object' ? input : {};
   const m = normalize(i.mapData);
   if (!(i.mapData && i.mapData.field && typeof i.mapData.field === 'object')) m.field = normField(DEFAULT_FIELD);
-  m.note = i.note ? String(i.note) : '';
+  const notes = [i.note, m.note].filter(Boolean).map(String); // the host's line and the data's own line, once each
+  m.note = notes.filter((x, j) => notes.indexOf(x) === j).join(' ');
+  m.sim = normSim(i.simulated);
+  m.deviceBuild = buildNum(i.build); // the build this device has, when the host knows it
   arr(i.csvTexts).forEach((f) => {
     if (!f || typeof f.text !== 'string') return;
     const name = String(f.name || 'results.csv'), parsed = parseWire(f.text);
@@ -1195,7 +1353,7 @@ function tagSvg(n, label, selected, extraAttr) {
 }
 
 function frameCtx(model, sel, W, fit, layers) {
-  const mgPx = 28;
+  const mgPx = 36; // room below the field for the axis numbers and the OUR STATION and +X captions under them
   const wide = Math.max(120, W || 560);
   if (sel.frame === 'local') {
     const pts = [{ x: 0, y: 0 }];
@@ -1212,7 +1370,8 @@ function frameCtx(model, sel, W, fit, layers) {
   const win = (fit && fitWindow(model, sel, layers)) || { x0: -wall, y0: -wall, x1: wall, y1: wall };
   const span = win.x1 - win.x0;
   const k = span / (wide - 2 * mgPx), mg = mgPx * k;
-  return { frame: 'field', k, span, win, fit: span < 2 * wall - 0.01, vb: [win.x0 - mg, -win.y1 - mg, span + 2 * mg, span + 2 * mg], grid: 24, wall, W: wide };
+  const pins = sel && sel.route && sel.route.checks ? sel.route.checks.pins : {};
+  return { frame: 'field', k, span, win, fit: span < 2 * wall - 0.01, vb: [win.x0 - mg, -win.y1 - mg, span + 2 * mg, span + 2 * mg], grid: 24, wall, W: wide, pins };
 }
 
 function resolveSel(model, state) {
@@ -1225,9 +1384,20 @@ function resolveSel(model, state) {
   const route = frame === 'local' ? baseRoute : displayRoute(baseRoute, rawSession);
   const runSession = kind === 'run' ? session : null;
   const rows = runSession ? missRows(route, runSession) : null;
-  const scrub = session && session.samples.length ? session : null;
-  const list = frame === 'field' ? contacts(model, route) : [];
-  return { route, session, frame, rawSession, runSession, rows, scrub, contactList: list };
+  const entries = routeEntries(model);
+  const entry = state.pick != null ? entries.find((x) => x.key === state.pick) || null : state.route != null ? entries.find((x) => x.routeIdx === state.route) || null : null;
+  const sim = frame === 'field' ? simFor(entry, state.side || 'L') : null;
+  // The transport plays the prediction unless the recording was asked for (and has a path to play).
+  const hasPath = !!(session && session.samples.length);
+  const playSim = !!sim && state.layers.pred !== false && !(state.play === 'rec' && hasPath);
+  const scrub0 = playSim ? sim : hasPath ? session : null;
+  // Right shows true field position: the prediction and every recorded layer are mirrored together, so they always share a frame.
+  const mirror = frame === 'field' && (sim ? sim.side : state.side || 'L') === 'R';
+  const M = (x) => (mirror ? mirroredSession(x) : x), mroute = mirror ? mirroredRoute(route, model.field) : route;
+  const mrows = runSession && mirror ? missRows(mroute, M(runSession)) : rows; // a miss distance is the same under the mirror, but its target fallbacks are not
+  const list = frame === 'field' ? contacts(model, mroute) : [];
+  const viewMode = state.view || (route || session || rawSession ? 'fit' : 'field'); // no recording: show the whole field, it reads at a glance
+  return { route: mroute, session: M(session), frame, rawSession: M(rawSession), runSession: M(runSession), rows: mrows, scrub: M(scrub0), contactList: list, entry, sim: M(sim), mirror, viewMode };
 }
 
 /* ---------- map layers ---------- */
@@ -1259,22 +1429,86 @@ function renderBase(model, sel, ctx) {
   p.push(at(win.x1, win.y0, k, '<text class="axis" y="27" text-anchor="end">+X right, in</text>'));
   p.push(at(win.x0, win.y1, k, '<text class="axis" y="-18" text-anchor="start">+Y up, in</text>'));
   p.push('<line class="aline ns" x1="' + f3(-w) + '" y1="' + f3(w) + '" x2="' + f3(w) + '" y2="' + f3(-w) + '"/>');
-  // The two line labels go on the part of y = x that is in view. Our side is below it, the other alliance's side above.
-  const lo = Math.max(win.x0, win.y0), hi = Math.min(win.x1, win.y1);
-  if (hi - lo > 24) {
-    const t1 = lo + (hi - lo) * 0.3, t2 = lo + (hi - lo) * 0.72;
-    p.push(at(t1, t1, k, '<g transform="rotate(-45)"><text class="lbl halo" y="13" text-anchor="middle">AUTONOMOUS LINE  y = x</text></g>'));
-    p.push(at(t2, t2, k, '<g transform="rotate(-45)"><text class="lbl halo muted" y="-7" text-anchor="middle">other alliance side</text></g>'));
-  }
+  // Our side is below the line, the other alliance's side above. A caption is left out when no stretch of the line in view is clear.
+  fieldLabels(F, ctx).caps.forEach((c) => p.push(at(c.t, c.t, k, '<g transform="rotate(-45)"><text class="lbl halo' + (c.muted ? ' muted' : '') + '" y="' + c.off + '" text-anchor="middle">' + c.text + '</text></g>')));
   p.push('<rect class="wall ns" x="' + f3(-w) + '" y="' + f3(-w) + '" width="' + f3(2 * w) + '" height="' + f3(2 * w) + '"/>');
   return p.join('');
 }
 
-// Where a Goal's body and name sit, in px around the Goal: the name is centered underneath.
+/* ---------- names on the field ---------- */
+// Where each Goal's name and the two Autonomous Line captions go, in px, so no name prints over another name, a Goal, a field
+// object or a caption, and a name stays off the dashed line where it can. Pure, so map_check.mjs can test it.
+const CAPTIONS = [
+  { id: 'our', text: 'AUTONOMOUS LINE  y = x', off: 13, cw: 6.9, want: 0.3, muted: false },
+  { id: 'other', text: 'other alliance side', off: -7, cw: 5.6, want: 0.72, muted: true },
+];
+const NAME_H = 14, NAME_CW = 6.9; // a little over the real text width, so a name keeps a gap to what is beside it
+const boxHitsBox = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+const boxHitsDisc = (b, d) => Math.hypot(d.x - Math.max(b.x, Math.min(d.x, b.x + b.w)), d.y - Math.max(b.y, Math.min(d.y, b.y + b.h))) < d.r;
+function fieldLabels(F, ctx) {
+  if (ctx.labels) return ctx.labels;
+  const k = ctx.k, win = ctx.win, vb = ctx.vb, pins = ctx.pins || {};
+  const geo = F.goals.map((g) => {
+    const R = Math.max(F.goalRadius / k, 4), ring = g.kind === 'neutral' ? R : R + 4;
+    return { g, R, ring, x: g.x / k, y: -g.y / k, w: shortName(g.name || 'Goal').length * NAME_CW, disc: { x: g.x / k, y: -g.y / k, r: R + 6 } };
+  });
+  // Where a name can sit: under the Goal first, then above, then beside it (not beside a Goal that wears a Pin badge).
+  const spots = (o) => {
+    const list = [{ a: 'middle', dx: 0, dy: o.ring + 13, x: -o.w / 2, y: o.ring + 3 }, { a: 'middle', dx: 0, dy: -(o.ring + 7), x: -o.w / 2, y: -(o.ring + 17) }];
+    if (!pins[o.g.name]) list.push({ a: 'start', dx: o.ring + 5, dy: 4, x: o.ring + 5, y: -7 }, { a: 'end', dx: -(o.ring + 5), dy: 4, x: -(o.ring + 5) - o.w, y: -7 });
+    return list;
+  };
+  const boxAt = (o, c) => ({ x: o.x + c.x, y: o.y + c.y, w: o.w, h: NAME_H });
+  const things = F.objects.map((q) => ({ x: q.x / k, y: -q.y / k, r: Math.max((q.r !== null ? q.r : 1.6) / k, 3) + 5 }))
+    .concat(F.loaders.map((q) => ({ x: q.x / k, y: -q.y / k, r: 15 })));
+  // The axis numbers along the left and bottom of the view are in the way too.
+  const axes = [];
+  for (let v = -Math.floor(F.wall / ctx.grid) * ctx.grid; v <= F.wall; v += ctx.grid) {
+    if (v >= win.y0 - 0.01 && v <= win.y1 + 0.01) axes.push({ x: win.x0 / k - 28, y: -v / k - 8, w: 26, h: 13 });
+    if (v >= win.x0 - 0.01 && v <= win.x1 + 0.01) axes.push({ x: v / k - 13, y: -win.y0 / k + 4, w: 26, h: 13 });
+  }
+  // The captions go first, on the stretch of y = x in view that is clear of every Goal and its default name.
+  const lo = Math.max(win.x0, win.y0), hi = Math.min(win.x1, win.y1), caps = [];
+  if (hi - lo > 24) {
+    CAPTIONS.forEach((c) => {
+      const len = c.text.length * c.cw, half = (len * k) / (2 * Math.SQRT2); // half the text's length as a stretch of t on the line
+      let best = null;
+      for (let t = lo + half + 2; t <= hi - half - 2 + 1e-9; t += 2) {
+        const cx = t / k + 0.7071 * (c.off - 3.5), cy = -t / k + 0.7071 * (c.off - 3.5), pts = [];
+        for (let u = -len / 2; u <= len / 2 + 0.01; u += 8) pts.push({ x: cx + 0.7071 * u, y: cy - 0.7071 * u });
+        const clash = pts.some((q) => geo.some((o) => Math.hypot(q.x - o.x, q.y - o.y) < o.R + 13 || boxHitsDisc(boxAt(o, spots(o)[0]), { x: q.x, y: q.y, r: 6 })) || things.some((d) => Math.hypot(q.x - d.x, q.y - d.y) < d.r + 6));
+        const dist = Math.abs(t - (lo + (hi - lo) * c.want));
+        if (!clash && (!best || dist < best.dist)) best = { t, dist, pts };
+      }
+      if (best) caps.push({ id: c.id, text: c.text, t: best.t, off: c.off, muted: c.muted, pts: best.pts });
+    });
+  }
+  const capPts = caps.reduce((a, c) => a.concat(c.pts), []);
+  const placed = [], goals = new Map();
+  geo.forEach((o) => {
+    let best = null;
+    spots(o).forEach((c) => {
+      const b = boxAt(o, c);
+      let hard = 0;
+      geo.forEach((q) => { if (q !== o && boxHitsDisc(b, q.disc)) hard++; });
+      things.forEach((d) => { if (boxHitsDisc(b, d)) hard++; });
+      capPts.forEach((q) => { if (boxHitsDisc(b, { x: q.x, y: q.y, r: 6 })) hard++; });
+      placed.concat(axes).forEach((q) => { if (boxHitsBox(b, q)) hard++; });
+      const onLine = b.x + b.y < 0 && b.x + b.w + b.y + b.h > 0 ? 1 : 0; // the line is x + y = 0 in px with y down
+      const seen = b.x * k >= vb[0] && (b.x + b.w) * k <= vb[0] + vb[2] && b.y * k >= vb[1] && (b.y + b.h) * k <= vb[1] + vb[3];
+      const score = hard * 10 + (seen ? 0 : 3) + onLine;
+      if (!best || score < best.score) best = { score, c, b, seen };
+    });
+    placed.push(best.b);
+    goals.set(o.g, { dx: best.c.dx, dy: best.c.dy, anchor: best.c.a, box: best.b, seen: best.seen }); // a name that would be cut by the edge of the view is not printed
+  });
+  ctx.labels = { goals, caps };
+  return ctx.labels;
+}
+// Where a Goal's body and name sit, in px around the Goal.
 function goalGeom(g, F, ctx) {
-  const k = ctx.k, R = Math.max(F.goalRadius / k, 4), ring = g.kind === 'neutral' ? R : R + 4;
-  const w = shortName(g.name || 'Goal').length * 6.4;
-  return { R, labelY: ring + 13, box: { x: g.x / k - w / 2, y: -g.y / k + ring + 3, w, h: 14 }, disc: { x: g.x / k, y: -g.y / k, r: R + 6 } };
+  const k = ctx.k, R = Math.max(F.goalRadius / k, 4), lab = fieldLabels(F, ctx).goals.get(g);
+  return { R, label: lab, box: lab.box, disc: { x: g.x / k, y: -g.y / k, r: R + 6 } };
 }
 
 function renderFieldObjects(model, route, ctx) {
@@ -1313,7 +1547,7 @@ function renderFieldObjects(model, route, ctx) {
       const tx = String(pins), bw = 12 + tx.length * 7;
       badge = '<g class="pinbadge" transform="translate(' + f3(R + 6) + ' -7.5)"><rect width="' + f3(bw) + '" height="15" rx="3.5"/><g transform="translate(8 8)">' + sym('grab_pin', 3.4, 'sym') + '</g><text x="' + f3(bw - 5) + '" y="11.3" text-anchor="end">' + esc(tx) + '</text></g>';
     }
-    const label = '<text class="lbl strong halo" y="' + f3(gg.labelY) + '" text-anchor="middle">' + esc(shortName(g.name || 'Goal')) + '</text>';
+    const label = !gg.label.seen ? '' : '<text class="lbl strong halo" x="' + f3(gg.label.dx) + '" y="' + f3(gg.label.dy) + '" text-anchor="' + gg.label.anchor + '">' + esc(shortName(g.name || 'Goal')) + '</text>';
     const kindName = kind === 'alliance' ? 'our alliance Goal' : kind === 'opponent' ? 'opponent alliance Goal' : kind === 'center' ? 'tall neutral Goal' : 'neutral Goal';
     p.push(at(g.x, g.y, k, body + label + badge + '<title>' + esc((g.name || 'Goal') + ', ' + kindName + ', at ' + fmt(g.x) + ', ' + fmt(g.y) + (pins ? ', ' + pins + ' Pin' + (pins === 1 ? '' : 's') + ' from this route' : '')) + '</title>'));
   });
@@ -1386,6 +1620,16 @@ function renderRoute(model, state, sel, ctx) {
     p.push(at(w.x, w.y, k, inner + '<title>Step ' + i + ': ' + esc(KIND_LABEL[route.steps[i].kind] || route.steps[i].kind) + '</title>', ' data-step="' + i + '" class="steptag"'));
   });
   return p.join('');
+}
+
+// The predicted line: a dashed teal path from the simulated run, a hollow dot where it starts and a solid one where it ends.
+function renderPredicted(sel, state, ctx) {
+  const s = sel.sim, k = ctx.k;
+  if (!s || state.layers.pred === false) return '';
+  const a = s.samples[0], z = s.samples[s.samples.length - 1];
+  return '<path class="pred-line ns" d="' + linePath(drawnPath(s.samples, k)) + '"/>' +
+    at(a.x, a.y, k, '<circle class="pred-start" r="4.5"/><title>Predicted start</title>') +
+    at(z.x, z.y, k, '<circle class="pred-end" r="4"/><title>Predicted end, ' + fmt(s.duration, 1) + ' s in</title>');
 }
 
 function renderRaw(model, sel, ctx) {
@@ -1464,6 +1708,7 @@ function renderStatic(model, state, sel, ctx) {
     if (model.illustrative) p.push(at(0, 0, ctx.k, '<g transform="rotate(-30)"><text class="wm" y="14">ILLUSTRATIVE SAMPLE</text></g>'));
     if (state.layers.raw) p.push(renderRaw(model, sel, ctx));
     p.push(renderRoute(model, state, sel, ctx));
+    p.push(renderPredicted(sel, state, ctx)); // over the cleaned route, so a dashed line is never hidden under a solid one
     if (state.layers.run) p.push(renderRunOverlay(model, sel, ctx));
   } else {
     p.push(renderPushLayer(sel, ctx));
@@ -1503,10 +1748,10 @@ function renderPlay(model, state, sel, ctx) {
   if (!pose) return '';
   const trail = samplesUpTo(drawnPath(s.samples, k), state.t || 0);
   if (trail.length) trail[trail.length - 1] = pose; // the trail ends where the robot is, not at the thinned path
-  const out = [];
-  if (trail.length > 1) out.push('<path class="run-trail ns" d="' + linePath(trail) + '"/>');
-  out.push(robotAt(pose, F.robot.length, F.robot.width, k, 'play-fp', 'play-front'));
-  out.push(at(pose.x, pose.y, k, '<circle class="play-dot" r="3"/>'));
+  const out = [], pr = s.kind === 'sim' ? ' pred' : ''; // the prediction plays in its own color
+  if (trail.length > 1) out.push('<path class="' + (pr ? 'pred-trail' : 'run-trail') + ' ns" d="' + linePath(trail) + '"/>');
+  out.push(robotAt(pose, F.robot.length, F.robot.width, k, 'play-fp' + pr, 'play-front' + pr));
+  out.push(at(pose.x, pose.y, k, '<circle class="play-dot' + pr + '" r="3"/>'));
   return out.join('');
 }
 
@@ -1521,6 +1766,26 @@ function sessionLabel(s) {
   return /^SIMULATED/.test(s.build || '') ? label + ' (simulated)' : label;
 }
 
+// The label that says what the dashed line is. It never says how close it is to the robot: nobody has measured that.
+const predLabel = (sim) => (isNum(sim.build) ? 'Build ' + sim.build + ', predicted' : 'Predicted') + ' from the code, not a real run';
+const PRED_SWATCH = '<svg viewBox="0 0 26 8" aria-hidden="true"><line x1="1" y1="4" x2="25" y2="4" stroke="var(--pred)" stroke-width="2.4" stroke-dasharray="6 4" stroke-linecap="round"/></svg>';
+const genText = (g) => { const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(g); return m ? m[1] + ' ' + m[2] + ' UTC' : g; };
+function predBlock(model, state, sel) {
+  if (sel.frame === 'local') return '';
+  const sim = model.sim, none = (t) => '<p class="predlabel none"><i></i><span>' + t + '</span></p>';
+  if (!sim) return none('No prediction for this build yet. Get the latest build, then Refresh.');
+  if (!sel.sim) return none(esc(isNum(sim.build) ? 'Build ' + sim.build : 'This build') + ' has no prediction for ' + esc(sel.entry ? sel.entry.label : 'this route') + '.');
+  let h = '<p class="predlabel">' + PRED_SWATCH + '<span>' + esc(predLabel(sim)) + '</span></p>';
+  if (isNum(model.deviceBuild) && isNum(sim.build) && model.deviceBuild !== sim.build) {
+    h += '<p class="predwarn">' + WARN_ICON + '<span>This device has Build ' + model.deviceBuild + ', so this prediction is for a different build.</span></p>';
+  }
+  if (sim.assumptions || sim.generated) {
+    h += '<details class="disc about" data-keep="about"' + isOpen(state, 'about') + '><summary>About this prediction</summary>' + (sim.assumptions ? '<p class="hint">' + esc(sim.assumptions) + '</p>' : '') +
+      (sim.generated ? '<p class="hint">Generated ' + esc(genText(sim.generated)) + '</p>' : '') + '</details>';
+  }
+  return h;
+}
+
 // The one row that answers first: which route, did the last run hit, where it missed.
 function renderSummary(model, state, sel) {
   const r = sel.route, s = sel.session;
@@ -1532,14 +1797,16 @@ function renderSummary(model, state, sel) {
     sub = esc(when2(s));
     stats = [stat('Pushes', String(pd.rows.length)), stat('Mean', pd.mean !== null ? fmt(pd.mean, 2) + ' in' : 'n/a'), stat('Spread', pd.spread !== null ? fmt(pd.spread, 2) + ' in' : 'n/a')];
   } else {
-    title = r ? 'Route ' + esc(r.slot) : s ? esc(sessionLabel(s)) : 'No route selected';
+    title = r ? esc(sel.entry ? sel.entry.label : 'Route ' + r.slot) : s ? esc(sessionLabel(s)) : sel.entry ? esc(sel.entry.label) : 'No route selected';
     if (r) sub = esc(r.note || (s ? sessionLabel(s) + ', ' + when2(s) : r.steps.length + ' steps'));
     else if (s && s.kind === 'run' && model.routes.length) sub = esc(when2(s)) + '. ' + (s.for_slot ? 'Route ' + esc(s.for_slot) + ' has different steps now, so this run is drawn on its own.' : 'This run names no route, so it is drawn on its own.');
     else if (s) sub = esc(when2(s)) + '. No cleaned route here: routes come from the laptop tool.';
-    else if (model.sessions.length) sub = 'Pick a session to see it on the field.';
-    const latest = lastRun(model, r), run = sel.runSession || latest;
-    if (run) {
-      const sm = runSummary(sel.runSession ? sel.rows : missRows(r, run), run), label = run === latest ? 'Last run' : 'This run';
+    else if (model.sessions.length && !sel.sim) sub = 'Pick a session to see it on the field.';
+    const latest = lastRun(model, r), run = sel.runSession || (sel.mirror ? mirroredSession(latest) : latest);
+    if (!r && !s && sel.sim) {
+      stats = [stat('Predicted time', fmtS(sel.sim.total)), stat('Steps', sel.sim.events.length ? String(sel.sim.events.length) : 'n/a'), stat('Side', sel.sim.side === 'R' ? 'Right' : 'Left')];
+    } else if (run) {
+      const sm = runSummary(sel.runSession ? sel.rows : missRows(r, run), run), label = latest && run.id === latest.id ? 'Last run' : 'This run';
       if (sm.worstIn !== null) {
         const rt = rateIn(sm.worstIn);
         stats.push(stat(label, '<i class="' + rt + '"></i>' + fmt(sm.worstIn, 2) + ' in<span class="sr">, rated ' + rt + '</span>', 'worst, step ' + sm.worstInStep));
@@ -1552,7 +1819,7 @@ function renderSummary(model, state, sel) {
     }
   }
   return '<div class="sum-row"><div class="sum-title"><h2>' + title + '</h2>' + (sub ? '<p class="sum-sub">' + sub + '</p>' : '') + '</div><dl class="stats">' + stats.join('') + '</dl></div>' +
-    (model.note ? '<p class="notel">' + esc(model.note) + '</p>' : '');
+    predBlock(model, state, sel) + (model.note ? '<p class="notel">' + esc(model.note) + '</p>' : '');
 }
 function pinsTotal(r) {
   const k = Object.keys(r.checks.pins);
@@ -1569,37 +1836,23 @@ function renderWarn(model, sel, state) {
     if (c.severity === 'bad') bad = true;
     items.push(li('Route ' + sel.route.slot + ', step ' + c.step, c.text, c.severity === 'bad' ? 'bad' : ''));
   });
-  if (!items.length) {
-    return model.routes.length ? '<div class="calmline"><i class="good"></i>' + (sel.route ? 'No warnings on this route' : 'No warnings') + '</div>' : '<div class="calmline"><i></i>No routes, so no route warnings</div>';
-  }
+  if (!items.length) return sel.route ? '<div class="calmline"><i class="good"></i>No warnings on this route</div>' : ''; // a prediction has no checks to pass or fail
   return '<details class="disc warnline' + (bad ? ' bad' : '') + '" data-keep="warn"' + isOpen(state, 'warn') + '><summary>' + WARN_ICON + '<span>' + plural(items.length, 'warning') + '</span></summary><ul class="warnlist">' + items.join('') + '</ul></details>';
 }
 
 const LIST_SHORT = 5;
-function renderLists(model, state) {
-  const p = [], more = state.more || {};
-  p.push('<div class="grouphead">Routes <span class="num">' + model.routes.length + '</span></div>');
-  if (!model.routes.length) p.push('<p class="listnote">None yet. Routes come from the laptop tool.</p>');
-  else {
-    p.push('<ul class="rowlist">');
-    model.routes.forEach((r, i) => {
-      const pins = pinsTotal(r);
-      const meta = [plural(r.steps.length, 'step'), isNum(r.checks.estimated_s) ? 'about ' + fmt(r.checks.estimated_s, 1) + ' s' : '', pins !== 'n/a' ? pins + (pins === '1' ? ' Pin' : ' Pins') : ''].filter(Boolean);
-      p.push('<li><button type="button" class="row" data-key="route-' + i + '" data-route="' + i + '" aria-pressed="' + (state.route === i) + '"><span class="row-t">Route ' + esc(r.slot) + '</span><span class="row-x txt">' + (r.start.kind === 'pose' ? 'pose start' : 'after opening') + '</span>' +
-        (r.note ? '<span class="row-note">' + esc(r.note) + '</span>' : '') + '<span class="row-m">' + esc(meta.join(' · ')) + '</span></button></li>');
-    });
-    p.push('</ul>');
-  }
+// Only recordings, and only the ones under the picked route: a group with nothing in it is left out, and so is the whole list.
+function renderLists(model, state, sel) {
+  const p = [], more = state.more || {}, mine = listedSessions(model, sel ? sel.entry : null);
   // Runs come first and each group has its own heading. A long group shows its newest rows and says how many more there are.
   const groups = [['run', 'Runs', (s) => s.kind === 'run'], ['teach', 'Taught', (s) => s.kind.indexOf('teach') === 0], ['push', 'Push tests', (s) => s.kind === 'push']];
   const shown = new Set();
   groups.concat([['other', 'Other', () => true]]).forEach((g) => {
-    const list = model.sessions.filter((s) => !shown.has(s.id) && g[2](s)).sort((a, b) => (whenFine(a) < whenFine(b) ? 1 : whenFine(a) > whenFine(b) ? -1 : 0));
+    const list = mine.filter((s) => !shown.has(s.id) && g[2](s)).sort((a, b) => (whenFine(a) < whenFine(b) ? 1 : whenFine(a) > whenFine(b) ? -1 : 0));
     list.forEach((s) => shown.add(s.id));
-    if (!list.length && g[0] !== 'run') return;
+    if (!list.length) return;
     const picked = list.some((s) => s.id === state.session);
     p.push('<div class="grouphead">' + g[1] + ' <span class="num">' + list.length + '</span>' + (picked ? '<button type="button" class="linkbtn" data-key="clear" data-clear="1">Clear</button>' : '') + '</div>');
-    if (!list.length) { p.push('<p class="listnote">No runs yet.</p>'); return; }
     const rows = more[g[0]] ? list : list.filter((s, i) => i < LIST_SHORT || s.id === state.session);
     p.push('<ul class="rowlist">');
     rows.forEach((s) => {
@@ -1625,6 +1878,7 @@ function renderLists(model, state) {
 
 function layerSwatch(id) {
   const s = {
+    pred: '<line x1="1" y1="6" x2="21" y2="6" stroke="var(--pred)" stroke-width="2.4" stroke-dasharray="5 3.5" stroke-linecap="round"/>',
     route: '<line x1="1" y1="6" x2="21" y2="6" stroke="var(--route)" stroke-width="2.5" stroke-linecap="round"/>',
     raw: '<path d="M1 8 C5 2,8 10,12 5 S18 7,21 4" fill="none" stroke="var(--raw)" stroke-width="1.4"/>',
     run: '<line x1="1" y1="6" x2="21" y2="6" stroke="var(--run)" stroke-width="2.2" stroke-linecap="round"/>',
@@ -1634,18 +1888,46 @@ function layerSwatch(id) {
   };
   return '<svg class="sw" viewBox="0 0 22 12" aria-hidden="true">' + s[id] + '</svg>';
 }
-const LAYER_DEFS = [['route', 'Cleaned route'], ['raw', 'Raw hand path'], ['run', 'Run path'], ['foot', 'Footprints'], ['sweep', 'Swept outline'], ['tags', 'Step numbers']];
-function renderLayers(state) {
+const LAYER_DEFS = [['pred', 'Predicted route'], ['route', 'Cleaned route'], ['raw', 'Raw hand path'], ['run', 'Run path'], ['foot', 'Footprints'], ['sweep', 'Swept outline'], ['tags', 'Step numbers']];
+// A layer is offered only when there is data for it on the picked route.
+function layerAvail(sel) {
+  const f = sel.frame === 'field', has = !!sel.route && f;
+  return { pred: !!sel.sim, route: has, raw: !!sel.rawSession && f, run: !!sel.runSession && f, foot: has, sweep: has, tags: has };
+}
+function renderLayers(model, state, sel) {
   const seg = (v, label, on) => '<button type="button" data-key="view-' + v + '" data-view="' + v + '" aria-pressed="' + on + '">' + label + '</button>';
-  const view = '<div class="seg" role="group" aria-label="Map view">' + seg('fit', 'Fit route', state.view !== 'field') + seg('field', 'Whole field', state.view === 'field') + '</div>';
-  const rows = LAYER_DEFS.map((d) => '<button type="button" class="menu-row" data-key="layer-' + d[0] + '" data-layer="' + d[0] + '" aria-pressed="' + !!state.layers[d[0]] + '"><svg class="chk" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6.5 5 9.5 10 3"/></svg>' + layerSwatch(d[0]) + '<span>' + esc(d[1]) + '</span></button>').join('');
-  return view + '<details class="menu" data-keep="layers"' + isOpen(state, 'layers') + '><summary><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.5 13 4.7 7 8 1 4.7z"/><path d="M1 7.6 7 10.9 13 7.6"/></svg>Layers</summary><div class="menu-pop" role="group" aria-label="Map layers">' + rows + '</div></details>';
+  const entries = routeEntries(model), sides = sel.entry ? ['L', 'R'].filter((sd) => sel.entry.sim[sd]) : [];
+  const pick = entries.length > 1 ? '<div class="seg" role="group" aria-label="Route">' + entries.map((x) => '<button type="button" data-key="pick-' + esc(x.key) + '" data-pick="' + esc(x.key) + '" aria-pressed="' + (sel.entry === x) + '">' + esc(x.label) + '</button>').join('') + '</div>' : '';
+  const side = sides.length > 1 ? '<div class="seg" role="group" aria-label="Side">' + sides.map((sd) => '<button type="button" data-key="side-' + sd + '" data-side="' + sd + '" aria-pressed="' + (!!sel.sim && sel.sim.side === sd) + '">' + (sd === 'L' ? 'Left' : 'Right') + '</button>').join('') + '</div>' : '';
+  const view = '<div class="seg" role="group" aria-label="Map view">' + seg('fit', 'Fit route', sel.viewMode !== 'field') + seg('field', 'Whole field', sel.viewMode === 'field') + '</div>';
+  const av = layerAvail(sel), defs = LAYER_DEFS.filter((d) => av[d[0]]);
+  const rows = defs.map((d) => '<button type="button" class="menu-row" data-key="layer-' + d[0] + '" data-layer="' + d[0] + '" aria-pressed="' + !!state.layers[d[0]] + '"><svg class="chk" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6.5 5 9.5 10 3"/></svg>' + layerSwatch(d[0]) + '<span>' + esc(d[1]) + '</span></button>').join('');
+  const menu = defs.length > 1 ? '<details class="menu" data-keep="layers"' + isOpen(state, 'layers') + '><summary><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.5 13 4.7 7 8 1 4.7z"/><path d="M1 7.6 7 10.9 13 7.6"/></svg>Layers</summary><div class="menu-pop" role="group" aria-label="Map layers">' + rows + '</div></details>' : '';
+  return '<div class="tb tb-left">' + pick + side + '</div><div class="tb tb-right">' + view + menu + '</div>';
+}
+// One chip per line that is drawn, under the map, so the dashed line always has its own entry.
+function renderKey(state, sel) {
+  if (sel.frame !== 'field') return '';
+  const on = (id) => (id === 'pred' ? state.layers.pred !== false : !!state.layers[id]);
+  const items = [];
+  if (sel.sim && on('pred')) items.push(['pred', 'Predicted route']);
+  if (sel.route && on('route')) items.push(['route', 'Cleaned route']);
+  if (sel.rawSession && on('raw')) items.push(['raw', 'Raw hand path']);
+  if (sel.runSession && on('run')) items.push(['run', 'Run path']);
+  return items.map((d) => '<span class="key">' + layerSwatch(d[0]) + d[1] + '</span>').join('');
+}
+// Which of the two paths the transport plays, offered only when both are on the map.
+function renderPlaySrc(state, sel) {
+  if (!sel.sim || state.layers.pred === false || !sel.session || !sel.session.samples.length) return '';
+  const b = (v, label) => '<button type="button" data-key="play-' + v + '" data-play="' + v + '" aria-pressed="' + (v === 'pred' ? sel.scrub === sel.sim : sel.scrub === sel.session) + '">' + label + '</button>';
+  return b('pred', 'Predicted') + b('rec', 'Recorded');
 }
 
 function legendSvg(inner) { return '<svg viewBox="-13 -10 26 20" aria-hidden="true">' + inner + '</svg>'; }
-function renderLegend(state) {
+function renderLegend(state, sel) {
   const it = (ic, tx) => '<li>' + legendSvg(ic) + '<span>' + tx + '</span></li>';
   return '<div class="panel legendbox"><details class="disc" data-keep="legend"' + isOpen(state, 'legend') + '><summary>Legend and how checks work</summary><div><ul class="legend">' +
+    (sel && sel.sim ? it('<line x1="-11" y1="0" x2="11" y2="0" stroke="var(--pred)" stroke-width="2.4" stroke-dasharray="5 3.5" stroke-linecap="round"/>', 'Predicted route, from the code') : '') +
     it('<circle r="9" fill="none" stroke="var(--goal-ally)" stroke-width="1.5"/><circle r="5.5" fill="var(--goal-ally)" fill-opacity="0.16" stroke="var(--goal-ally)" stroke-width="2"/>', 'Goal, our alliance') +
     it('<circle r="5.5" fill="var(--solid)" stroke="var(--goal-neu)" stroke-width="2.5"/>', 'Goal, neutral') +
     it('<circle r="9" fill="none" stroke="var(--goal-opp)" stroke-width="1.5" stroke-dasharray="3 2.5"/><circle r="5.5" fill="var(--goal-opp)" fill-opacity="0.22" stroke="var(--goal-opp)" stroke-width="2"/><path d="M-3.4 -3.4L3.4 3.4M3.4 -3.4L-3.4 3.4" stroke="var(--goal-opp)" stroke-width="2"/>', 'Goal, opponent alliance') +
@@ -1709,6 +1991,7 @@ function pushPanel(sel) {
 }
 
 function renderInspector(model, state, sel) {
+  if (!sel.route && !sel.session && !model.sessions.length) return ''; // a prediction alone has no details to list
   const p = [];
   const active = state.hover != null ? state.hover : state.step;
   if (sel.frame === 'local') p.push('<div class="panel pad">' + pushPanel(sel) + '</div>');
@@ -1729,7 +2012,7 @@ function renderInspector(model, state, sel) {
     const s = sel.session;
     p.push('<div class="panel pad">' + (s ? '<h3>' + esc(sessionLabel(s)) + '</h3><dl class="kv"><dt>Recorded</dt><dd>' + esc(when2(s)) + '</dd><dt>Samples</dt><dd class="num">' + s.samples.length + '</dd><dt>Marks</dt><dd class="num">' + s.marks.length + '</dd><dt>Length</dt><dd class="num">' + fmt(s.duration, 1) + ' s</dd><dt>Source</dt><dd class="id">' + esc(s.id) + '</dd></dl>' : '<h3>Nothing selected</h3><p class="hint">Pick a session to draw it on the field.</p>') + '</div>');
   }
-  p.push(renderLegend(state));
+  p.push(renderLegend(state, sel));
   return p.join('');
 }
 
@@ -1749,9 +2032,7 @@ function renderSteps(model, state, sel, cur) {
     return '<div class="empty"><b>Push test selected</b>Per-step tables belong to routes. Pick a route or a run to see one. The push distances are in the panel beside the plot.</div>';
   }
   if (!route && !rows) {
-    return model.sessions.length
-      ? '<div class="empty"><b>No route to tabulate</b>These sessions have no cleaned route here. Routes come from the laptop tool.</div>'
-      : '<div class="empty"><b>No route to tabulate</b>The step table fills in when a route is loaded. Teach a route on the robot, then rebuild this page with the laptop tool.</div>';
+    return sel.session ? '<div class="empty"><b>No route to tabulate</b>These sessions have no cleaned route here. Routes come from the laptop tool.</div>' : '';
   }
   const run = !!sel.runSession;
   let head = '<header><h2>' + (route ? 'Route ' + esc(route.slot) + ' steps' : 'Run events') + '</h2>';
@@ -1809,7 +2090,9 @@ function renderTicks(sel) {
   const s = sel.scrub;
   if (!s || !(s.duration > 0)) return '';
   const out = [];
-  if (sel.rows && sel.runSession === s) {
+  if (s.kind === 'sim') {
+    s.events.forEach((e) => out.push('<span style="left:' + ((e.t / s.duration) * 100).toFixed(2) + '%" title="Step ' + (e.step !== null ? e.step : '') + ' done at ' + fmt(e.t, 2) + ' s, predicted"></span>'));
+  } else if (sel.rows && sel.runSession === s) {
     sel.rows.forEach((r) => { if (r.reached && isNum(r.t)) out.push('<span class="' + (r.ok === false ? 'bad' : r.rating || '') + '" style="left:' + ((r.t / s.duration) * 100).toFixed(2) + '%" title="Step ' + r.idx + ' done at ' + fmt(r.t, 2) + ' s"></span>'); });
   } else {
     s.marks.forEach((m) => out.push('<span style="left:' + ((m.t / s.duration) * 100).toFixed(2) + '%" title="' + esc(KIND_LABEL[m.kind] || m.kind) + ' mark at ' + fmt(m.t, 2) + ' s"></span>'));
@@ -1819,9 +2102,10 @@ function renderTicks(sel) {
 
 function playInfoText(sel, t) {
   const s = sel.scrub;
-  if (!s) return sel.frame === 'local' ? 'This push test has no samples, so there is nothing to play.' : 'Pick a run or taught session to play it back.';
+  if (!s) return sel.frame === 'local' ? 'This push test has no samples, so there is nothing to play.' : sel.sim ? 'The predicted route is turned off in Layers.' : 'Pick a run or taught session to play it back.';
   const e = activeEvent(s, t);
-  const rows = sel.rows;
+  if (s.kind === 'sim') return e ? 'Predicted: ' + (e.step !== null ? 'step ' + e.step : 'a step') + ' (' + (KIND_LABEL[e.type] || e.type || 'step') + ') done at ' + fmt(e.t, 2) + ' s.' : 'Predicted route. No step done yet at this time.';
+  const rows = s === sel.runSession ? sel.rows : null;
   if (rows && e) {
     const r = rows.find((x) => x.reached && x.t === e.t && (e.step === null ? true : x.idx === e.step));
     return 'Last result: ' + (e.step !== null && e.step < 0 ? 'opening' : 'step ' + e.step) + ' (' + (KIND_LABEL[e.type] || e.type || 'step') + ') at ' + fmt(e.t, 2) + ' s' + (r && r.missIn !== null ? ', miss ' + fmt(r.missIn, 2) + ' in' : '') + '.';
@@ -1831,24 +2115,31 @@ function playInfoText(sel, t) {
   return 'No step result yet at this time.';
 }
 function currentStepAt(sel, t) {
-  if (!sel.runSession) return null;
+  if (!sel.runSession || sel.scrub !== sel.runSession) return null;
   const e = activeEvent(sel.runSession, t);
   return e && e.step !== null ? e.step : null;
 }
 
+// Nothing predicted, nothing recorded: the quiet field and the one thing to do.
+function renderEmpty(model) {
+  if (model.sim || model.routes.length || model.sessions.length || model.rejected.length) return '';
+  return '<h2>No prediction for this build yet</h2><p>Get the latest build, then Refresh.</p><p class="standalone-only">The laptop tool builds this page from your data.</p>' + (model.note ? '<p class="notel">' + esc(model.note) + '</p>' : '');
+}
+
 function renderAll(model, state, W) {
   const sel = resolveSel(model, state);
-  const ctx = frameCtx(model, sel, W, state.view !== 'field', state.layers);
+  const ctx = frameCtx(model, sel, W, sel.viewMode !== 'field', state.layers);
   const cur = currentStepAt(sel, state.t || 0);
   return {
     sel, ctx, viewBox: ctx.vb.map(f3).join(' '),
     static: renderStatic(model, state, sel, ctx), selLayer: renderSel(model, state, sel, ctx), play: renderPlay(model, state, sel, ctx),
-    summary: renderSummary(model, state, sel), warn: renderWarn(model, sel, state), lists: renderLists(model, state), layers: renderLayers(state), inspector: renderInspector(model, state, sel),
+    summary: renderSummary(model, state, sel), warn: renderWarn(model, sel, state), lists: renderLists(model, state, sel), layers: renderLayers(model, state, sel), inspector: renderInspector(model, state, sel),
     steps: renderSteps(model, state, sel, cur), ticks: renderTicks(sel), playinfo: playInfoText(sel, state.t || 0),
+    key: renderKey(state, sel), playsrc: renderPlaySrc(state, sel), empty: renderEmpty(model), listed: listedSessions(model, sel.entry).length,
   };
 }
 
-const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normalize, resolveWaypoints, missRows, runSummary, pushDistances, footprintCorners, hull, areaOf, interpPose, circleHitsHull, sweepPoints, contacts, rawSessionFor, layoutTags, fitWindow, openingPoint, displayRoute, startPoseOf, frameCtx, resolveSel, renderAll, renderPlay, fmt, esc, activeEvent, shortName, parseWire, leftFrame, rejectionText, buildModel, sameSession, lastRun, pickSelection, slotFromBuild, runMatchesRoute, whenFine, openingLabel, hostAllowed, thinPath, drawnPath, DEFAULT_FIELD };
+const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normalize, resolveWaypoints, missRows, runSummary, pushDistances, footprintCorners, hull, areaOf, interpPose, circleHitsHull, sweepPoints, contacts, rawSessionFor, layoutTags, fitWindow, openingPoint, displayRoute, startPoseOf, frameCtx, resolveSel, renderAll, renderPlay, fmt, esc, activeEvent, shortName, parseWire, leftFrame, rejectionText, buildModel, sameSession, lastRun, pickSelection, slotFromBuild, runMatchesRoute, whenFine, openingLabel, hostAllowed, thinPath, drawnPath, DEFAULT_FIELD, mirroredSession, mirroredRoute, normSim, buildNum, routeEntries, pickView, simFor, belongs, fieldLabels, renderEmpty };
 /*</pure>*/
 
 /* ---------- page shell (DOM) ---------- */
@@ -1856,16 +2147,17 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   const EMBED = document.documentElement.classList.contains('embed');
   const sampleOn = typeof DATA === 'undefined' && !EMBED && typeof window.__SAMPLE_DATA__ !== 'undefined';
   const rawData = typeof DATA !== 'undefined' ? DATA : sampleOn ? window.__SAMPLE_DATA__ : null;
-  let model = buildModel({ mapData: rawData });
+  let model = buildModel({ mapData: rawData, simulated: sampleOn && typeof window.__SAMPLE_SIM__ !== 'undefined' ? window.__SAMPLE_SIM__ : null });
   model.illustrative = sampleOn; // the banner and watermark mean the embedded sample, never real tool data
   const $ = (id) => document.getElementById(id);
   const svg = $('map'), app = $('app');
   const state = {
     route: null, session: null, step: null, hover: null, t: 0, playing: false, speed: 1, cleared: false,
-    view: 'fit', open: {}, more: {},
-    layers: { route: true, raw: true, run: true, foot: false, sweep: false, tags: true },
+    pick: null, picked: false, side: 'L', sideSet: false, play: 'pred', playPicked: false,
+    view: null, open: {}, more: {}, // view null: Fit route with a recording, Whole field without, until the person picks one
+    layers: { pred: true, route: true, raw: true, run: true, foot: false, sweep: false, tags: true },
   };
-  Object.assign(state, pickSelection(model, null));
+  Object.assign(state, pickView(model, null));
   let W = 560, last = null, raf = 0, lastTs = 0;
 
   if (model.illustrative) $('samplebadge').hidden = false;
@@ -1882,7 +2174,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   }
   function setMapNote(v) {
     let t = '';
-    if (model.illustrative) t += '<b>ILLUSTRATIVE SAMPLE.</b> Hand-written route, synthetic path and run. Not robot data. ';
+    if (model.illustrative) t += '<b>ILLUSTRATIVE SAMPLE.</b> Hand-written route, made-up lines and run. Not robot data. ';
     if (v.sel.frame === 'local') t += 'Local frame: the origin is the push test start pose, not a field position.';
     put($('mapnote'), t ? '<span>' + t + '</span>' : '');
   }
@@ -1892,7 +2184,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     put($('g-sel'), v.selLayer);
     put($('g-play'), v.play);
     const r = v.sel.route, ses = v.sel.session;
-    svg.setAttribute('aria-label', 'Field map, ' + (v.sel.frame === 'local' ? 'push test frame' : r ? 'route ' + r.slot + ' with ' + r.steps.length + ' steps' : 'no route loaded') + (ses ? ', session ' + ses.id : ''));
+    svg.setAttribute('aria-label', 'Field map, ' + (v.sel.frame === 'local' ? 'push test frame' : r ? 'route ' + r.slot + ' with ' + r.steps.length + ' steps' : 'no cleaned route') + (v.sel.sim ? ', predicted route' : '') + (ses ? ', session ' + ses.id : ''));
   }
   function paintTransport(v) {
     const s = v.sel.scrub, dur = s ? s.duration : 0, can = !!s && dur > 0;
@@ -1903,6 +2195,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     app.dataset.noplay = can ? '0' : '1';
     const hasRoute = !!v.sel.route && v.sel.frame === 'field';
     $('btn-prev').disabled = !hasRoute; $('btn-next').disabled = !hasRoute;
+    app.dataset.steps = hasRoute ? '1' : '0';
     paintTime(v.sel);
   }
   function paintTime(sel) {
@@ -1921,13 +2214,20 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
       put($('layers'), v.layers);
       put($('inspector'), v.inspector);
       put($('steps'), v.steps);
+      put($('keyrow'), v.key);
+      put($('playsrc'), v.playsrc);
+      put($('emptybox'), v.empty);
     });
-    const n = model.routes.length + model.sessions.length;
-    $('listsum').textContent = 'Routes and sessions (' + n + ')';
-    const empty = !n && !model.rejected.length;
-    app.dataset.empty = empty ? '1' : '0';
+    $('listsum').textContent = 'Recordings (' + v.listed + ')';
+    // What has no data is not shown: no list, no table, no side column for a prediction on its own.
+    const listed = v.lists !== '';
+    $('listpanel').hidden = !listed;
+    $('steps').hidden = !v.steps;
+    $('playsrc').hidden = !v.playsrc;
+    $('emptybox').hidden = !v.empty;
+    app.dataset.empty = v.empty ? '1' : '0';
+    app.dataset.rail = listed || v.inspector ? '1' : '0';
     app.dataset.frame = v.sel.frame;
-    $('emptybox').hidden = !empty;
   }
   function refresh() { last = view(); paintMap(last); setMapNote(last); paintChrome(last); paintTransport(last); }
   // Hover and playback run often, so they redraw only their own layer from the selection already worked out.
@@ -1950,33 +2250,41 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     const c = currentStepAt(last.sel, state.t);
     if (c !== null) { const tr = document.querySelector('#steps tbody tr[data-step="' + c + '"]'); if (tr) tr.classList.add('cur'); }
   }
+  // Predicted line first when there is one; otherwise the recording.
+  const defaultPlay = () => { const e = routeEntries(model).find((x) => x.key === state.pick); return simFor(e, state.side) ? 'pred' : 'rec'; };
 
   /* ----- actions ----- */
   function stop() { state.playing = false; cancelAnimationFrame(raf); }
-  function selectRoute(i) {
+  function selectEntry(key) {
     stop();
-    state.route = i; state.step = null; state.hover = null; state.t = 0; state.cleared = false;
-    const s = model.sessions.find((x) => x.id === state.session), r = model.routes[i];
-    const keep = s && (s.kind === 'push' || (s.kind === 'run' ? runMatchesRoute(r, s) : s.for_slot === r.slot));
-    if (!keep) { const run = lastRun(model, r); state.session = run ? run.id : null; }
+    state.picked = true; state.playPicked = false;
+    Object.assign(state, pickView(model, { pick: key, side: state.side, sideSet: state.sideSet }));
+    state.hover = null; state.t = 0; state.cleared = false; state.play = defaultPlay();
+    refresh();
+  }
+  function selectSide(side) {
+    stop();
+    state.side = side; state.sideSet = true; state.t = 0;
+    refresh();
+  }
+  function setPlay(src) {
+    stop();
+    state.play = src; state.playPicked = true; state.t = 0;
     refresh();
   }
   function selectSession(id) {
     stop();
-    if (state.session === id) { state.session = null; state.cleared = true; } else {
-      state.session = id; state.cleared = false;
-      const s = model.sessions.find((x) => x.id === id);
-      let ri = state.route;
-      if (s && s.kind === 'run') { const f = model.routes.findIndex((r) => runMatchesRoute(r, s)); ri = f >= 0 ? f : null; }
-      else if (s && s.for_slot != null) { const f = model.routes.findIndex((r) => r.slot === s.for_slot); if (f >= 0) ri = f; }
-      if (ri !== state.route) { state.route = ri; state.step = null; }
+    if (state.session === id) { state.session = null; state.cleared = true; state.playPicked = false; state.play = defaultPlay(); } else {
+      state.session = id; state.cleared = false; state.play = 'rec'; state.playPicked = true;
+      const s = model.sessions.find((x) => x.id === id), e = routeEntries(model).find((x) => x.key === state.pick);
+      if (s && e && !state.sideSet && e.sim[s.side]) state.side = s.side;
     }
     state.t = 0; state.hover = null;
     refresh();
   }
   function seekToStep(i) {
     const rows = last.sel.rows;
-    if (!rows) return;
+    if (!rows || last.sel.scrub !== last.sel.runSession) return; // step times belong to the run, not to the prediction
     const r = rows.find((x) => x.idx === i && x.reached);
     if (r && isNum(r.t)) state.t = Math.min(r.t, last.sel.scrub ? last.sel.scrub.duration : r.t);
   }
@@ -2017,12 +2325,13 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   /* ----- host ----- */
   function load(input) {
     stop();
-    const slot = state.route != null && model.routes[state.route] ? model.routes[state.route].slot : null;
     model = buildModel(input);
     model.illustrative = false; // only the page's own sample is ever a sample
     $('samplebadge').hidden = true;
     $('gen').textContent = '';
-    Object.assign(state, pickSelection(model, { slot, session: state.session, step: state.step, cleared: state.cleared }));
+    // A pick, a side or a playing choice the person made is kept; anything else is chosen again from what arrived.
+    Object.assign(state, pickView(model, { pick: state.picked ? state.pick : null, side: state.side, sideSet: state.sideSet, session: state.session, step: state.step, cleared: state.cleared }));
+    if (!state.playPicked) state.play = defaultPlay();
     state.hover = null; state.t = 0;
     W = svg.getBoundingClientRect().width || W;
     refresh();
@@ -2041,12 +2350,14 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     const menu = document.querySelector('details.menu[open]');
     if (menu && !el.closest('details.menu')) menu.open = false;
     let n;
-    if ((n = el.closest('[data-more]'))) { state.more[n.dataset.more] = !state.more[n.dataset.more]; keepFocus(() => put($('listbody'), renderLists(model, state))); return; }
-    if ((n = el.closest('[data-route]'))) return selectRoute(+n.dataset.route);
+    if ((n = el.closest('[data-more]'))) { state.more[n.dataset.more] = !state.more[n.dataset.more]; keepFocus(() => put($('listbody'), renderLists(model, state, last.sel))); return; }
+    if ((n = el.closest('[data-pick]'))) return selectEntry(n.dataset.pick);
+    if ((n = el.closest('[data-side]'))) return selectSide(n.dataset.side);
+    if ((n = el.closest('[data-play]'))) return setPlay(n.dataset.play);
     if ((n = el.closest('[data-session]'))) return selectSession(n.dataset.session);
     if (el.closest('[data-clear]')) { if (state.session) selectSession(state.session); return; }
     if ((n = el.closest('[data-view]'))) { state.view = n.dataset.view; last = view(); paintMap(last); keepFocus(() => put($('layers'), last.layers)); return; }
-    if ((n = el.closest('[data-layer]'))) { state.layers[n.dataset.layer] = !state.layers[n.dataset.layer]; last = view(); paintMap(last); keepFocus(() => put($('layers'), last.layers)); return; }
+    if ((n = el.closest('[data-layer]'))) { if (n.dataset.layer === 'pred') stop(); state.layers[n.dataset.layer] = !state.layers[n.dataset.layer]; refresh(); return; }
     if ((n = el.closest('#speed [data-speed]'))) { state.speed = +n.dataset.speed; document.querySelectorAll('#speed button').forEach((b) => b.setAttribute('aria-pressed', String(b === n))); return; }
     if ((n = el.closest('#map [data-step], #steps tr[data-step]'))) { const i = +n.dataset.step; if (i >= 0) selectStep(state.step === i ? null : i, true); return; }
   });
@@ -2099,6 +2410,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   if (mq) { (mq.addEventListener ? mq.addEventListener.bind(mq, 'change') : mq.addListener.bind(mq))(syncLists); }
   W = svg.getBoundingClientRect().width || W;
   syncLists();
+  state.play = defaultPlay();
   refresh();
 
   /* ----- embedded in an iframe: tell the host how tall the page is ----- */

@@ -12,6 +12,15 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Headers": "X-Team-Code",
 };
 const BUILD_TAG = /^(?!latest$)[\w.-]{1,100}$/;
+const PLAN_KIND = "proposed-auto-plan";
+const PLAN_LABEL = "proposed-auto-plan";
+const PLAN_TITLE = "Proposed auto plan: ";
+const MAX_PLAN_BYTES = 200_000;
+const PLAN_CORS_HEADERS = {
+  "Access-Control-Allow-Origin": PAGES_ORIGIN,
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "X-Team-Code, X-Scourge-Client, Content-Type",
+};
 
 function jsonResponse(payload, status) {
   return new Response(JSON.stringify(payload), {
@@ -154,11 +163,139 @@ async function handleRecorded(request, env) {
   return jsonResponse({ ok: true, recorded_updated: updated }, 200);
 }
 
+function createIssue(env, fields) {
+  return fetch(`https://api.github.com/repos/${REPOSITORY}/issues`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "40217S-results-relay",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(fields),
+  });
+}
+
+function plansResponse(payload, status) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json", ...PLAN_CORS_HEADERS },
+  });
+}
+
+const isCoordinate = (value) => Number.isFinite(value) && Math.abs(value) <= 100;
+const roundCoordinate = (value) => Math.round(value * 100) / 100;
+const charCount = (text) => [...text].length;
+const titleName = (name) => name.replace(/\p{Cc}/gu, "").trim();
+
+// Builds a new plan from the known fields, so nothing else a sender adds reaches the issue. Null means a bad shape.
+function cleanPlan(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  if (payload.schema !== 1 || payload.kind !== PLAN_KIND) return null;
+  if (typeof payload.name !== "string" || typeof payload.note !== "string") return null;
+  const name = payload.name.trim();
+  // A name of only control characters is not empty until the title removes them.
+  if (!titleName(name) || charCount(name) > 80 || charCount(payload.note) > 2000) return null;
+  if (payload.side !== "L" && payload.side !== "R") return null;
+  if (payload.build !== null && (typeof payload.build !== "string" || charCount(payload.build) > 100)) return null;
+  if (!Array.isArray(payload.lines) || payload.lines.length < 1 || payload.lines.length > 50) return null;
+
+  let pointCount = 0;
+  const lines = [];
+  for (const line of payload.lines) {
+    const points = line?.points;
+    if (!Array.isArray(points) || points.length < 2 || points.length > 500) return null;
+    pointCount += points.length;
+    if (pointCount > 3000) return null;
+    if (!points.every((p) => Array.isArray(p) && p.length === 2 && p.every(isCoordinate))) return null;
+    lines.push({ points: points.map((p) => p.map(roundCoordinate)) });
+  }
+  return { schema: 1, kind: PLAN_KIND, name, side: payload.side, note: payload.note, build: payload.build, lines };
+}
+
+function planIssueBody(plan) {
+  let inches = 0;
+  for (const { points } of plan.lines) {
+    for (let i = 1; i < points.length; i += 1) {
+      inches += Math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1]);
+    }
+  }
+  const count = plan.lines.length;
+  // JSON only holds a backtick inside a string, where \u0060 reads back the same and can't close the fence.
+  const json = JSON.stringify(plan).replace(/`/g, "\\u0060");
+  return `Proposal only, not run on a robot. Side ${plan.side}, ${count} ${count === 1 ? "line" : "lines"}, ` +
+    `${inches.toFixed(1)} in total.\n\n\`\`\`json\n${json}\n\`\`\`\n`;
+}
+
+async function handlePlans(request, env) {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: PLAN_CORS_HEADERS });
+  }
+  if (request.method !== "POST") {
+    return plansResponse({ ok: false, error: "method not allowed" }, 405);
+  }
+  if (!request.headers.get("X-Scourge-Client")) {
+    return plansResponse({ ok: false, error: "missing X-Scourge-Client" }, 403);
+  }
+  // Before the code check, so this also slows guessing the team code.
+  if (env?.LIMITER) {
+    const { success } = await env.LIMITER.limit({ key: request.headers.get("CF-Connecting-IP") || "unknown" });
+    if (!success) return plansResponse({ ok: false, error: "too many sends, try again in a minute" }, 429);
+  }
+  if (!env?.TEAM_CODE || !env?.GITHUB_TOKEN) {
+    return plansResponse({ ok: false, error: "relay not configured" }, 500);
+  }
+  if (!sameSecret(request.headers.get("X-Team-Code"), env.TEAM_CODE)) {
+    return plansResponse({ ok: false, error: "wrong team code" }, 401);
+  }
+
+  const bodyRead = await readRequestBody(request, MAX_PLAN_BYTES);
+  if (bodyRead.error) return plansResponse({ ok: false, error: "request too large" }, 413);
+  let payload;
+  try {
+    payload = JSON.parse(bodyRead.text);
+  } catch {
+    return plansResponse({ ok: false, error: "invalid JSON" }, 400);
+  }
+  const plan = cleanPlan(payload);
+  if (!plan) return plansResponse({ ok: false, error: "invalid plan" }, 400);
+
+  const fields = { title: PLAN_TITLE + titleName(plan.name), body: planIssueBody(plan) };
+  // GitHub refuses a body this long, so say so here. Plans can't be split the way results are.
+  if (fields.body.length > MAX_ISSUE_CHARS) {
+    return plansResponse({ ok: false, error: "plan too long for one issue, use fewer points" }, 413);
+  }
+
+  let response;
+  try {
+    response = await createIssue(env, { ...fields, labels: [PLAN_LABEL] });
+    // A missing label must never lose the plan: reading plans goes by the title.
+    if (response.status === 422) response = await createIssue(env, fields);
+  } catch {
+    return plansResponse({ ok: false, error: "GitHub unavailable" }, 502);
+  }
+  if (!response.ok) {
+    return plansResponse({ ok: false, error: `GitHub answered ${response.status}` }, 502);
+  }
+  let created;
+  try {
+    created = await response.json();
+  } catch {
+    return plansResponse({ ok: false, error: "GitHub answered with invalid JSON" }, 502);
+  }
+  if (!Number.isInteger(created?.number)) {
+    return plansResponse({ ok: false, error: "GitHub answered with invalid JSON" }, 502);
+  }
+  return plansResponse({ ok: true, issue: created.number }, 201);
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/map") return handleMap(request, env, url);
     if (url.pathname === "/map/recorded") return handleRecorded(request, env);
+    if (url.pathname === "/plans") return handlePlans(request, env);
     if (url.pathname !== "/results") {
       return jsonResponse({ ok: false, error: "not found" }, 404);
     }
@@ -231,29 +368,17 @@ export default {
     const onMap = Boolean(env.TEAM_CODE) && sameSecret(request.headers.get("X-Team-Code"), env.TEAM_CODE);
     const labels = onMap ? { labels: [TEAM_LABEL] } : {};
 
-    const createIssue = (fields) => fetch(`https://api.github.com/repos/${REPOSITORY}/issues`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "40217S-results-relay",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(fields),
-    });
-
     const numbers = [];
     let allLabelled = onMap;
     for (const issue of issues) {
       const fields = { title: payload.title + issue.titleSuffix, body: issue.body };
       let response;
       try {
-        response = await createIssue({ ...fields, ...labels });
+        response = await createIssue(env, { ...fields, ...labels });
         // A label problem must never lose the results: file them unlabelled, and say they won't reach the map.
         if (onMap && response.status === 422) {
           allLabelled = false;
-          response = await createIssue(fields);
+          response = await createIssue(env, fields);
         }
       } catch {
         return jsonResponse({ ok: false, error: "GitHub unavailable", issues: numbers }, 502);

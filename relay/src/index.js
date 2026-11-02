@@ -317,11 +317,45 @@ async function handlePlans(request, env) {
   return plansResponse({ ok: true, issue: created.number }, 201);
 }
 
+// CI sends the predicted routes of the build it just published. They become that build's and the latest prediction.
+async function handleSim(request, env, tag) {
+  if (request.method !== "PUT") {
+    return jsonResponse({ ok: false, error: "method not allowed" }, 405);
+  }
+  if (!env?.INGEST_TOKEN || !env?.MAP) {
+    return jsonResponse({ ok: false, error: "relay not configured" }, 500);
+  }
+  const auth = request.headers.get("Authorization") ?? "";
+  if (!auth.startsWith("Bearer ") || !sameSecret(auth.slice("Bearer ".length), env.INGEST_TOKEN)) {
+    return jsonResponse({ ok: false, error: "wrong token" }, 401);
+  }
+  if (!BUILD_TAG.test(tag)) {
+    return jsonResponse({ ok: false, error: "bad build tag" }, 400);
+  }
+  const bodyRead = await readRequestBody(request, MAX_RECORDED_BYTES);
+  if (bodyRead.error) return bodyRead.error;
+  let payload;
+  try {
+    payload = JSON.parse(bodyRead.text);
+  } catch {
+    return jsonResponse({ ok: false, error: "invalid JSON" }, 400);
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return jsonResponse({ ok: false, error: "JSON must be an object" }, 400);
+  }
+  await env.MAP.put(`sim/${tag}`, bodyRead.text);
+  await env.MAP.put("sim/latest", bodyRead.text);
+  return jsonResponse({ ok: true, tag }, 200);
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/map") return handleMap(request, env, url);
     if (url.pathname === "/map/recorded") return handleRecorded(request, env);
+    if (url.pathname.startsWith("/map/sim/")) {
+      return handleSim(request, env, decodeURIComponent(url.pathname.slice("/map/sim/".length)));
+    }
     if (url.pathname === "/plans") return handlePlans(request, env);
     if (url.pathname !== "/results") {
       return jsonResponse({ ok: false, error: "not found" }, 404);

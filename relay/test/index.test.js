@@ -719,3 +719,37 @@ test("adding /plans leaves /map's CORS and /results' lack of it alone", async ()
   const { response } = await sendWith({}, env);
   assert.equal(response.headers.get("Access-Control-Allow-Origin"), null);
 });
+
+function simPut(tag, body, headers = { Authorization: "Bearer ingest-1234" }, method = "PUT") {
+  return new Request(`https://relay.example/map/sim/${tag}`, { method, headers, body: method === "PUT" ? body : undefined });
+}
+
+test("PUT /map/sim stores the prediction for that build and as latest, and GET serves it", async () => {
+  const env = mapEnv();
+  const put = await worker.fetch(simPut("build-234-abc1234", '{"schema":1,"routes":[]}'), env);
+  assert.equal(put.status, 200);
+  for (const query of ["?build=build-234-abc1234", ""]) {
+    const got = await (await worker.fetch(mapGet(query), env)).json();
+    assert.deepEqual(got.sim, { schema: 1, routes: [] });
+  }
+});
+
+test("PUT /map/sim refuses a wrong token and stores nothing", async () => {
+  const env = mapEnv();
+  for (const headers of [{}, { Authorization: "Bearer nope" }, { Authorization: "Bearer code-1234" }]) {
+    assert.equal((await worker.fetch(simPut("build-1-a", "{}", headers), env)).status, 401);
+  }
+  assert.equal((await (await worker.fetch(mapGet(), env)).json()).sim, null);
+});
+
+test("PUT /map/sim refuses bad tags, bad JSON, other methods, and a missing token secret", async () => {
+  const env = mapEnv();
+  assert.equal((await worker.fetch(simPut("latest", "{}"), env)).status, 400);
+  assert.equal((await worker.fetch(simPut("a%2Fb", "{}"), env)).status, 400);
+  assert.equal((await worker.fetch(simPut("build-1-a", "not json"), env)).status, 400);
+  assert.equal((await worker.fetch(simPut("build-1-a", "[1]"), env)).status, 400);
+  assert.equal((await worker.fetch(simPut("build-1-a", null, {}, "GET"), env)).status, 405);
+  const open = mapEnv();
+  delete open.INGEST_TOKEN;
+  assert.equal((await worker.fetch(simPut("build-1-a", "{}"), open)).status, 500);
+});

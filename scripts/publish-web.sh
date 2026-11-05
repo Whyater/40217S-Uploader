@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Publish the web uploader to GitHub Pages (the gh-pages branch), built on
-# this machine so it needs no GitHub Actions. Run it from the repo root
+# this machine or by the "Publish web uploader" workflow. Run it from the repo root
 # after a new release is published, or after changing web/.
 #
 #   scripts/publish-web.sh
@@ -48,7 +48,7 @@ jq -r '.sha256 // {} | to_entries[] | "\(.value | ascii_downcase)  \(.key)"' "$s
 rm "$site/build.sha256"
 
 stamp="$(git rev-parse --short HEAD)-$tag"
-sed -i '' "s/^const VERSION = 'dev';/const VERSION = '$stamp';/" "$site/sw.js"
+sed -i.bak "s/^const VERSION = 'dev';/const VERSION = '$stamp';/" "$site/sw.js" && rm -f "$site/sw.js.bak"
 grep -q "const VERSION = '$stamp';" "$site/sw.js" || { echo "Couldn't stamp sw.js." >&2; exit 1; }
 
 git -C "$site" add -A

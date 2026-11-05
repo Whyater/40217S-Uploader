@@ -88,7 +88,7 @@ $script:Modes = @(
     @{ Label = 'Drive Test';   Asset = 'drive-test-hot.package.bin'; Slot = 3; Name = 'Scourge Drive Test' },
     @{ Label = 'Auto Pathing'; Asset = 'autopath-hot.package.bin';   Slot = 4; Name = 'Scourge Auto Pathing' }
 )
-$script:UploaderVersion = '2.6.1'
+$script:UploaderVersion = '2.6.2'
 $script:UploaderScriptPath = $PSCommandPath
 $script:UploaderManifestUrl = 'https://raw.githubusercontent.com/Whyater/40217S-Uploader/main/uploader.json'
 $script:ProjectDir = Join-Path $InstallDir 'project'
@@ -1538,8 +1538,8 @@ $SharedCode = {
     # Turns the text of a GET /map answer into plain data.
     # Returns @{ Status = 'ok'; Sim; SimIsLatest; Recorded; RecordedUpdated; Note } or
     # @{ Status = 'error'; Error }. Sim and Recorded are $null when the service had none.
-    #   Sim      = @{ Tag; Build; Routes = @( @{ Key; Side; Id; TotalMs; T; X; Y; H; Marks; Events } ) }
-    #              Key is the route slot ('A') or 'AWP' for the built-in routine.
+    #   Sim      = @{ Tag; Build; Routes = @( @{ Key; Side; Name; Id; TotalMs; T; X; Y; H; Marks; Events } ) }
+    #              Key is the route slot ('A'), 'AWP' for the built-in routine, or 'skills' (one fixed start, Left frame only).
     #   Recorded = @{ Routes = @( @{ Slot; HasStart; StartX; StartY; Wp = @( @{ X; Y; H; Step } ) } ); Sessions }
     function ConvertFrom-CloudMap {
         param([string]$Text)
@@ -1564,13 +1564,15 @@ $SharedCode = {
                     foreach ($r in $rl) {
                         if (-not ($r -is [System.Collections.IDictionary])) { continue }
                         $side = [string](Get-JsonValue $r 'side')
-                        if (($side -cne 'L') -and ($side -cne 'R')) { continue }
                         $key = 'AWP'
                         $slotV = Get-JsonValue $r 'slot'
                         if (($null -ne $slotV) -and ([string]$slotV).Trim()) { $key = ([string]$slotV).Trim() }
+                        # Skills runs once from a fixed start in field coordinates, so it is always the Left frame.
+                        if ($key -ieq 'skills') { $key = 'skills'; $side = 'L' }
+                        if (($side -cne 'L') -and ($side -cne 'R')) { continue }
                         $pts = ConvertFrom-CloudSamples (Get-JsonValue $r 'samples') 0.001
                         [void]$routes.Add(@{
-                            Key = $key; Side = $side; Id = [string](Get-JsonValue $r 'id'); TotalMs = (Get-JsonNumber (Get-JsonValue $r 'total_ms'))
+                            Key = $key; Side = $side; Name = [string](Get-JsonValue $r 'name'); Id = [string](Get-JsonValue $r 'id'); TotalMs = (Get-JsonNumber (Get-JsonValue $r 'total_ms'))
                             T = $pts.T; X = $pts.X; Y = $pts.Y; H = $pts.H; Marks = @(); Events = @()
                         })
                     }
@@ -3114,8 +3116,14 @@ function Update-ViewButtons {
     Set-SegmentStyle $ui.SegUpload ($script:View -eq 'upload')
     Set-SegmentStyle $ui.SegMap ($script:View -eq 'map')
     Set-SegmentStyle $ui.MapWholeButton ([bool]$script:Map.Whole)
-    Set-SegmentStyle $ui.MapSideL ($script:Cloud.Side -eq 'L')
-    Set-SegmentStyle $ui.MapSideR ($script:Cloud.Side -eq 'R')
+    # Skills has one fixed start: Left shows as the only side and neither button works. Drawing a plan still picks a side.
+    $p = $script:Plan
+    $fixed = (Test-CloudFixedRoute) -and (-not $p.On)
+    Set-SegmentStyle $ui.MapSideL ($fixed -or ($script:Cloud.Side -eq 'L'))
+    Set-SegmentStyle $ui.MapSideR ((-not $fixed) -and ($script:Cloud.Side -eq 'R'))
+    $sideFree = (-not $fixed) -and (-not ($p.On -and (@($p.Lines).Count -gt 0)))
+    $ui.MapSideL.Enabled = $sideFree
+    $ui.MapSideR.Enabled = $sideFree
 }
 
 # The two view buttons sit at the right end of the header, joined edge to edge.
@@ -3567,16 +3575,23 @@ function Get-BuildTagLabel {
     return $Tag
 }
 
-# AWP first, then each taught route found in the prediction or the recordings.
+# AWP first, then Skills when the prediction has it, then each taught route found in the prediction or the recordings.
 function Get-CloudRoutes {
     $cl = $script:Cloud
     $list = New-Object System.Collections.ArrayList
     [void]$list.Add(@{ Key = 'AWP'; Label = 'AWP' })
     $keys = @{}
+    $skillsLabel = ''
     if ($null -ne $cl.Data) {
-        if ($null -ne $cl.Data.Sim) { foreach ($r in $cl.Data.Sim.Routes) { if ([string]$r.Key -ine 'AWP') { $keys[[string]$r.Key] = $true } } }
-        if ($null -ne $cl.Data.Recorded) { foreach ($r in $cl.Data.Recorded.Routes) { if ([string]$r.Slot -ine 'AWP') { $keys[[string]$r.Slot] = $true } } }
+        if ($null -ne $cl.Data.Sim) {
+            foreach ($r in $cl.Data.Sim.Routes) {
+                if ([string]$r.Key -ieq 'skills') { $skillsLabel = 'Skills'; if ([string]$r.Name) { $skillsLabel = [string]$r.Name } }
+                elseif ([string]$r.Key -ine 'AWP') { $keys[[string]$r.Key] = $true }
+            }
+        }
+        if ($null -ne $cl.Data.Recorded) { foreach ($r in $cl.Data.Recorded.Routes) { if (([string]$r.Slot -ine 'AWP') -and ([string]$r.Slot -ine 'skills')) { $keys[[string]$r.Slot] = $true } } }
     }
+    if ($skillsLabel) { [void]$list.Add(@{ Key = 'skills'; Label = $skillsLabel }) }
     foreach ($k in @($keys.Keys | Sort-Object)) { [void]$list.Add(@{ Key = [string]$k; Label = ('Taught ' + $k) }) }
     return $list
 }
@@ -3587,15 +3602,27 @@ function Test-CloudRouteKnown {
     return $false
 }
 
+# Skills runs once from a fixed start, so it has no side to pick and is never mirrored.
+function Test-CloudFixedRoute {
+    return ([string]$script:Cloud.Route -ieq 'skills')
+}
+
+# The side the field is drawn from: Left for Skills, otherwise the picked side.
+function Get-CloudViewSide {
+    if (Test-CloudFixedRoute) { return 'L' }
+    return [string]$script:Cloud.Side
+}
+
 # The predicted route for the picked route and side, or $null.
 function Get-CloudPredicted {
     $cl = $script:Cloud
     if (($null -eq $cl.Data) -or ($null -eq $cl.Data.Sim)) { return $null }
+    $wantSide = Get-CloudViewSide
     foreach ($r in $cl.Data.Sim.Routes) {
-        if (([string]$r.Key -ieq [string]$cl.Route) -and ([string]$r.Side -ceq [string]$cl.Side)) {
+        if (([string]$r.Key -ieq [string]$cl.Route) -and ([string]$r.Side -ceq $wantSide)) {
             # The service sends every route in the LEFT frame, the Right entry equal to the Left one.
             # Recordings are drawn on the Right by mirroring them, so the prediction is mirrored the same way.
-            if ([string]$cl.Side -eq 'R') { return (Get-MirroredSession $r) }
+            if ($wantSide -eq 'R') { return (Get-MirroredSession $r) }
             return $r
         }
     }
@@ -3615,7 +3642,7 @@ function Get-CloudClean {
         if ($xs.Count -lt 1) { return $null }
         $x = $xs.ToArray()
         $y = $ys.ToArray()
-        if ($cl.Side -eq 'R') {
+        if ((Get-CloudViewSide) -eq 'R') {
             $nx = New-Object 'double[]' $x.Length
             $ny = New-Object 'double[]' $x.Length
             for ($i = 0; $i -lt $x.Length; $i++) { $nx[$i] = 0.0 - $y[$i]; $ny[$i] = 0.0 - $x[$i] }
@@ -3665,6 +3692,7 @@ function Get-CloudNote {
         $lines.Add('The prediction is for ' + (Get-BuildTagLabel ([string]$cl.Data.Sim.Tag)) + ', this computer has ' + (Get-BuildTagLabel ([string]$script:InstalledTag)) + '.')
     }
     if ($have -and $cl.Data.Note) { $lines.Add([string]$cl.Data.Note) }
+    if ((Test-CloudFixedRoute) -and (-not $script:Plan.On)) { $lines.Add('Skills runs once from a fixed start, so it has one side.') }
     return ($lines.ToArray() -join "`n")
 }
 
@@ -4621,7 +4649,7 @@ function Show-RouteMapCanvas {
     $c = $script:Colors
     $f = $script:Fonts
     $m = $script:Map
-    $vside = [string]$script:Cloud.Side
+    $vside = Get-CloudViewSide
     $field = Get-ViewField $vside
     $inv = [System.Globalization.CultureInfo]::InvariantCulture
     $G.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
@@ -6653,6 +6681,25 @@ if ($SelfTest) {
             Set-CloudSide 'L'
             $predBack = Get-CloudPredicted
             if (($null -eq $predBack) -or (-not (& $near $predBack.X[0] 8.0)) -or (-not (& $near $predBack.Y[0] -61.6))) { $failures.Add('Route Map cloud: the Left prediction changed after viewing the Right') }
+
+            # Skills: one fixed start, listed after AWP, never mirrored, and the side buttons stand down.
+            $skillsJson = $cloudJson.Replace('{"id":"taught-A-L"', '{"id":"skills","slot":"skills","name":"Skills","side":"R","total_ms":60000,"samples":[{"t":0,"x":-60,"y":-30,"h":90},{"t":30000,"x":-20,"y":-10,"h":0},{"t":60000,"x":-40,"y":20,"h":180}],"events":[]},{"id":"taught-A-L"')
+            $skillsOnly = ConvertFrom-CloudMap $skillsJson
+            $skillsOnly.Recorded = $null
+            Set-CloudData $skillsOnly '2026-10-30T23:06:00Z'
+            $skRoutes = @(Get-CloudRoutes)
+            if (($skRoutes.Count -ne 3) -or ($skRoutes[1].Key -ne 'skills') -or ($skRoutes[1].Label -ne 'Skills') -or ($skRoutes[2].Key -ne 'A')) { $failures.Add('Route Map cloud: the picker should list AWP, Skills, Taught A') }
+            if (($skillsOnly.Sim.Routes | Where-Object { $_.Key -eq 'skills' }).Side -ne 'L') { $failures.Add('Route Map cloud: a skills entry should always parse as the Left frame') }
+            Set-CloudSide 'R'
+            Set-CloudRoute 'skills'
+            $skPred = Get-CloudPredicted
+            if (($null -eq $skPred) -or ($skPred.Side -ne 'L') -or (-not (& $near $skPred.X[0] -60.0)) -or (-not (& $near $skPred.Y[0] -30.0)) -or (-not (& $near $skPred.T[2] 60.0))) { $failures.Add('Route Map cloud: Skills must be drawn unmirrored even with Right picked, and run 60 s') }
+            if ($script:Ui.MapSideL.Enabled -or $script:Ui.MapSideR.Enabled) { $failures.Add('Route Map cloud: both side buttons should be off for Skills') }
+            & $paintCanvas ''
+            Set-CloudRoute 'AWP'
+            if ((-not $script:Ui.MapSideL.Enabled) -or (-not $script:Ui.MapSideR.Enabled)) { $failures.Add('Route Map cloud: side buttons should come back for AWP') }
+            Set-CloudSide 'L'
+            Set-CloudData $simOnly '2026-10-30T23:05:00Z'
 
             $script:Cloud.Code = 'sample'
             $script:Cloud.Offline = $true

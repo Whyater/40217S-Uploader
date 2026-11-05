@@ -212,6 +212,7 @@ code { background: var(--track); padding: 1px 4px; border-radius: 4px; }
 }
 .seg button:hover { background: var(--hover); }
 .seg button:disabled { opacity: 0.4; cursor: default; }
+.seg.fixed button:disabled { opacity: 1; }
 .seg button:disabled:not([aria-pressed="true"]):hover { background: transparent; }
 .seg button[aria-pressed="true"] { background: var(--accent-fill); color: var(--on-accent); }
 .menu { position: relative; }
@@ -815,11 +816,14 @@ function normSim(raw) {
   raw.routes.forEach((r, i) => {
     if (!r || typeof r !== 'object') return;
     const fromId = /-([LR])$/.exec(String(r.id || ''));
-    const side = /^[LR]$/i.test(String(r.side)) ? String(r.side).toUpperCase() : fromId ? fromId[1] : 'L';
+    // Skills runs once from a fixed start in field coordinates: it is always the Left frame and is never mirrored.
+    const fixed = String(r.slot) === 'skills' || String(r.id) === 'skills';
+    const side = fixed ? 'L' : /^[LR]$/i.test(String(r.side)) ? String(r.side).toUpperCase() : fromId ? fromId[1] : 'L';
     const s = normSession({ id: r.id != null ? r.id : 'sim-' + (i + 1), kind: 'sim', side, samples: r.samples, events: r.events }, i, 'ms');
     if (s.samples.length < 2) return; // a line needs two points
-    s.slot = r.slot != null ? String(r.slot) : null;
-    s.name = r.name ? String(r.name) : s.slot ? 'Taught ' + s.slot : 'AWP';
+    s.slot = fixed ? 'skills' : r.slot != null ? String(r.slot) : null;
+    s.fixed = fixed;
+    s.name = r.name ? String(r.name) : fixed ? 'Skills' : s.slot ? 'Taught ' + s.slot : 'AWP';
     s.total = isNum(r.total_ms) && r.total_ms > 0 ? r.total_ms / 1000 : s.duration;
     byId.set(s.id, s);
   });
@@ -831,20 +835,21 @@ function normSim(raw) {
   };
 }
 
-// The route picker: AWP first, then every taught slot the prediction or the cleaned routes know about. entry.sim holds the L and R predictions.
+// The route picker: AWP first, then Skills (one fixed start, no sides), then every taught slot the prediction or the cleaned routes know about. entry.sim holds the L and R predictions.
 const entryMemo = new WeakMap();
 function routeEntries(model) {
   if (entryMemo.has(model)) return entryMemo.get(model);
   const map = new Map();
-  const get = (slot) => {
-    const key = slot == null ? 'awp' : 't-' + slot;
-    if (!map.has(key)) map.set(key, { key, slot: slot == null ? null : slot, label: slot == null ? 'AWP' : 'Taught ' + slot, routeIdx: -1, sim: {} });
+  const get = (slot, name) => {
+    const key = slot == null ? 'awp' : slot === 'skills' ? 'skills' : 't-' + slot;
+    if (!map.has(key)) map.set(key, { key, slot: slot == null ? null : slot, label: slot == null ? 'AWP' : slot === 'skills' ? name || 'Skills' : 'Taught ' + slot, routeIdx: -1, sim: {}, fixed: slot === 'skills' });
     return map.get(key);
   };
   get(null);
-  if (model.sim) model.sim.routes.forEach((r) => { get(r.slot).sim[r.side] = r; });
+  if (model.sim) model.sim.routes.forEach((r) => { get(r.slot, r.name).sim[r.side] = r; });
   model.routes.forEach((r, i) => { get(r.slot).routeIdx = i; });
-  const list = Array.from(map.values()).sort((a, b) => (a.slot === null ? -1 : b.slot === null ? 1 : a.slot < b.slot ? -1 : a.slot > b.slot ? 1 : 0));
+  const rank = (e) => (e.slot === null ? 0 : e.fixed ? 1 : 2);
+  const list = Array.from(map.values()).sort((a, b) => (rank(a) !== rank(b) ? rank(a) - rank(b) : a.slot < b.slot ? -1 : a.slot > b.slot ? 1 : 0));
   entryMemo.set(model, list);
   return list;
 }
@@ -2306,7 +2311,7 @@ function renderSummary(model, state, sel) {
     if (!r && !s && sel.sim) {
       stats = [stat('Predicted time', fmtS(sel.sim.total))];
       if (sel.sim.events.length > 1) stats.push(stat('Steps', String(sel.sim.events.length))); // one event is just the opening, not a list of steps
-      stats.push(stat('Side', sel.sim.side === 'R' ? 'Right' : 'Left'));
+      stats.push(stat('Side', sel.entry && sel.entry.fixed ? 'Fixed start' : sel.sim.side === 'R' ? 'Right' : 'Left'));
     } else if (run) {
       const sm = runSummary(sel.runSession ? sel.rows : missRows(r, run), run), label = latest && run.id === latest.id ? 'Last run' : 'This run';
       if (sm.worstIn !== null) {
@@ -2399,11 +2404,11 @@ function layerAvail(sel) {
 }
 function renderLayers(model, state, sel) {
   const seg = (v, label, on) => '<button type="button" data-key="view-' + v + '" data-view="' + v + '" aria-pressed="' + on + '">' + label + '</button>';
-  const entries = routeEntries(model), sides = sel.entry ? ['L', 'R'].filter((sd) => sel.entry.sim[sd]) : [];
+  const entries = routeEntries(model), sides = sel.entry && !sel.entry.fixed ? ['L', 'R'].filter((sd) => sel.entry.sim[sd]) : [];
   const pick = entries.length > 1 ? '<div class="seg" role="group" aria-label="Route">' + entries.map((x) => '<button type="button" data-key="pick-' + esc(x.key) + '" data-pick="' + esc(x.key) + '" aria-pressed="' + (sel.entry === x) + '">' + esc(x.label) + '</button>').join('') + '</div>' : '';
   // Drawing with nothing predicted still needs a side to pick; a plan has one side, so the control locks once there is a line.
   const drawing = !!state.draw, locked = drawing && state.draft > 0;
-  const side = sides.length > 1 || (drawing && !sides.length) ? '<div class="seg" role="group" aria-label="Side">' + ['L', 'R'].map((sd) => '<button type="button" data-key="side-' + sd + '" data-side="' + sd + '" aria-pressed="' + (sel.sim ? sel.sim.side === sd : (state.side || 'L') === sd) + '"' + (locked ? ' disabled' : '') + '>' + (sd === 'L' ? 'Left' : 'Right') + '</button>').join('') + '</div>' : '';
+  const side = sides.length > 1 || (drawing && !sides.length) ? '<div class="seg" role="group" aria-label="Side">' + ['L', 'R'].map((sd) => '<button type="button" data-key="side-' + sd + '" data-side="' + sd + '" aria-pressed="' + (sel.sim ? sel.sim.side === sd : (state.side || 'L') === sd) + '"' + (locked ? ' disabled' : '') + '>' + (sd === 'L' ? 'Left' : 'Right') + '</button>').join('') + '</div>' : sel.entry && sel.entry.fixed && sel.sim && !drawing ? '<div class="seg fixed" role="group" aria-label="Side"><button type="button" data-key="side-fixed" aria-pressed="true" disabled title="Skills runs once from a fixed start on the field, so it has one side only">Fixed start</button></div>' : '';
   const view = '<div class="seg" role="group" aria-label="Map view">' + seg('fit', 'Fit route', sel.viewMode !== 'field') + seg('field', 'Whole field', sel.viewMode === 'field') + '</div>';
   const av = layerAvail(sel), defs = LAYER_DEFS.filter((d) => av[d[0]]);
   const rows = defs.map((d) => '<button type="button" class="menu-row" data-key="layer-' + d[0] + '" data-layer="' + d[0] + '" aria-pressed="' + !!state.layers[d[0]] + '"><svg class="chk" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6.5 5 9.5 10 3"/></svg>' + layerSwatch(d[0]) + '<span>' + esc(d[1]) + '</span></button>').join('');

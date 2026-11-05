@@ -88,7 +88,7 @@ $script:Modes = @(
     @{ Label = 'Drive Test';   Asset = 'drive-test-hot.package.bin'; Slot = 3; Name = 'Scourge Drive Test' },
     @{ Label = 'Auto Pathing'; Asset = 'autopath-hot.package.bin';   Slot = 4; Name = 'Scourge Auto Pathing' }
 )
-$script:UploaderVersion = '2.6.0'
+$script:UploaderVersion = '2.6.1'
 $script:UploaderScriptPath = $PSCommandPath
 $script:UploaderManifestUrl = 'https://raw.githubusercontent.com/Whyater/40217S-Uploader/main/uploader.json'
 $script:ProjectDir = Join-Path $InstallDir 'project'
@@ -4481,7 +4481,7 @@ function Get-ViewField {
     $objects = New-Object System.Collections.ArrayList
     foreach ($o in $f.Objects) { [void]$objects.Add(@((0.0 - $o[1]), (0.0 - $o[0]))) }
     $script:MapFieldR = @{
-        Wall = $f.Wall; RobotLength = $f.RobotLength; RobotWidth = $f.RobotWidth
+        Wall = $f.Wall; RobotLength = $f.RobotLength; RobotWidth = $f.RobotWidth; RobotFront = $f.RobotFront; RobotBack = $f.RobotBack
         Goals = @($goals.ToArray()); Toggles = @($toggles.ToArray()); Objects = @($objects.ToArray())
     }
     return $script:MapFieldR
@@ -4527,6 +4527,9 @@ function Get-MapField {
         Wall = 70.1
         RobotLength = 17.0
         RobotWidth = 16.0
+        # The pose is the turning center: 7 in to the claw end, 10 in to the intake end (PIVOT_TO_FRONT / PIVOT_TO_BACK in include/field.hpp).
+        RobotFront = 7.0
+        RobotBack = 10.0
         Goals = @(
             @('alliance', 23.6, -47.2), @('alliance', 47.2, -23.6),
             @('neutral', -23.6, -47.2), @('neutral', 47.2, 23.6), @('neutral', 0.0, 0.0),
@@ -4824,16 +4827,17 @@ function Show-RouteMapCanvas {
                 $rad = $rh * [math]::PI / 180.0
                 $fx = [math]::Sin($rad); $fy = [math]::Cos($rad)
                 $sx = [math]::Cos($rad); $sy = -[math]::Sin($rad)
-                $hl = $field.RobotLength / 2.0
+                $hf = $field.RobotFront
+                $hb = $field.RobotBack
                 $hw = $field.RobotWidth / 2.0
                 $corner = {
                     param($a, $b)
                     [System.Drawing.PointF]::new([single]($ox + ($rx + $fx * $a + $sx * $b) * $sc), [single]($oy - ($ry + $fy * $a + $sy * $b) * $sc))
                 }
-                $fr = & $corner $hl $hw
-                $fl = & $corner $hl (-$hw)
-                $bl = & $corner (-$hl) (-$hw)
-                $br = & $corner (-$hl) $hw
+                $fr = & $corner $hf $hw
+                $fl = & $corner $hf (-$hw)
+                $bl = & $corner (-$hb) (-$hw)
+                $br = & $corner (-$hb) $hw
                 $box = [System.Drawing.PointF[]]@($fr, $fl, $bl, $br)
                 $G.FillPolygon($pal.RobotFill, $box)
                 $G.DrawPolygon($pal.RobotPen, $box)
@@ -5937,6 +5941,11 @@ if ($SelfTest) {
         & $expect ((& $near $vp.Scale 5.0) -and (& $near $vp.Cx 0.0) -and (& $near $vp.Cy 0.0)) 'whole field framing wrong'
         $vp = Get-MapViewport -Width 640 -Height 600 -Pad 0 -Whole $false -Bounds @{ MinX = 0.0; MaxX = 40.0; MinY = 0.0; MaxY = 20.0 }
         & $expect ((& $near $vp.Scale 10.0) -and (& $near $vp.Cx 20.0) -and (& $near $vp.Cy 10.0)) 'fit-to-path framing wrong'
+        # The pose is the turning center: the box reaches 7 in toward the claw and 10 in toward the intake (17 in long), on both sides of the field.
+        foreach ($fs in @('L', 'R')) {
+            $mf = Get-ViewField $fs
+            & $expect ((& $near $mf.RobotFront 7.0) -and (& $near $mf.RobotBack 10.0) -and (& $near ($mf.RobotFront + $mf.RobotBack) $mf.RobotLength)) ('robot box front and back wrong, side ' + $fs)
+        }
         $bx = Get-SessionBounds (ConvertFrom-ScourgeWire $fixA).Sessions[0]
         & $expect ((& $near $bx.MinX 8.0) -and (& $near $bx.MaxX 11.0) -and (& $near $bx.MinY -61.6) -and (& $near $bx.MaxY -48.0)) 'path bounds wrong'
         & $expect ((Format-MapWhen '2026-10-30 10:15') -eq 'Oct 30, 10:15 AM') 'time text wrong'

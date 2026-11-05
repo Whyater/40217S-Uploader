@@ -696,7 +696,7 @@ function normField(f) {
     wall: nn(f.wall) != null ? f.wall : 70.1,
     // Against the robot's footprint. The laptop tool's 5.0 in [VERIFY] is against the robot's center: different checks, so both stay.
     goalRadius: nn(f.goal_radius) != null ? f.goal_radius : 2.4,
-    robot: { length: nn(rb.length) != null ? rb.length : 17, width: nn(rb.width) != null ? rb.width : 16 },
+    robot: { length: nn(rb.length) != null ? rb.length : 17, width: nn(rb.width) != null ? rb.width : 16, front: nn(rb.front) != null ? rb.front : 7, back: nn(rb.back) != null ? rb.back : 10 },
     goals: arr(f.goals).map(normPt).filter(hasXY),
     toggles: arr(f.toggles).map(normPt).filter(hasXY),
     objects: arr(f.objects).map(normPt).filter(hasXY),
@@ -879,10 +879,12 @@ function pickView(model, prev) {
 }
 
 /* ---------- geometry ---------- */
-function footprintCorners(x, y, h, len, wid) {
+// The pose is the turning center, not the middle of the body: fr in front of it, bk behind it (7 and 10 in on the robot).
+// Without them (a caller that has only a length) the box is centered, which keeps the old tests' squares valid.
+function footprintCorners(x, y, h, len, wid, fr, bk) {
   const a = (h * Math.PI) / 180, fx = Math.sin(a), fy = Math.cos(a), rx = Math.cos(a), ry = -Math.sin(a);
-  const hl = len / 2, hw = wid / 2;
-  const c = (sf, sr) => ({ x: x + fx * hl * sf + rx * hw * sr, y: y + fy * hl * sf + ry * hw * sr });
+  const hf = fr == null ? len / 2 : fr, hb = bk == null ? len / 2 : bk, hw = wid / 2;
+  const c = (sf, sr) => { const d = sf > 0 ? hf : -hb; return { x: x + fx * d + rx * hw * sr, y: y + fy * d + ry * hw * sr }; };
   return [c(1, 1), c(1, -1), c(-1, -1), c(-1, 1)]; // front right, front left, rear left, rear right
 }
 function hull(points) {
@@ -902,11 +904,11 @@ function areaOf(poly) {
   return Math.abs(s) / 2;
 }
 function lerpPose(a, b, u) { return { x: a.x + (b.x - a.x) * u, y: a.y + (b.y - a.y) * u, h: a.h + wrap180(b.h - a.h) * u }; }
-function sweepPoints(a, b, len, wid) {
+function sweepPoints(a, b, len, wid, fr, bk) {
   const dist = Math.hypot(b.x - a.x, b.y - a.y), dh = Math.abs(wrap180(b.h - a.h));
   const n = Math.max(1, Math.ceil(Math.max(dist / 3, dh / 10)));
   const pts = [];
-  for (let i = 0; i <= n; i++) { const p = lerpPose(a, b, i / n); pts.push.apply(pts, footprintCorners(p.x, p.y, p.h, len, wid)); }
+  for (let i = 0; i <= n; i++) { const p = lerpPose(a, b, i / n); pts.push.apply(pts, footprintCorners(p.x, p.y, p.h, len, wid, fr, bk)); }
   return pts;
 }
 function distToSeg(px, py, a, b) {
@@ -1071,7 +1073,7 @@ function contacts(model, route) {
   if (contactMemo.has(route)) return contactMemo.get(route);
   const out = [], seen = new Set();
   const add = (step, severity, text) => { const k = step + '|' + text; if (!seen.has(k)) { seen.add(k); out.push({ step, severity, text }); } };
-  const F = model.field, L = F.robot.length, W = F.robot.width;
+  const F = model.field, L = F.robot.length, W = F.robot.width, FR = F.robot.front, BK = F.robot.back;
   const steps = route.steps, wp = route.wp;
   // A Drop is meant to touch its own Goal, and the steps right before and after it stay within a few inches of it.
   const exempt = steps.map(() => new Set());
@@ -1089,7 +1091,7 @@ function contacts(model, route) {
     const w = wp[i];
     if (!w || w.x === null) return;
     const here = { x: w.x, y: w.y, h: w.h };
-    const pts = prev ? sweepPoints(prev, here, L, W) : footprintCorners(here.x, here.y, here.h, L, W);
+    const pts = prev ? sweepPoints(prev, here, L, W, FR, BK) : footprintCorners(here.x, here.y, here.h, L, W, FR, BK);
     const poly = hull(pts);
     if (pts.some((p) => p.y - p.x > 0.05)) add(i, 'bad', 'Footprint crosses the Autonomous Line (y = x)');
     if (pts.some((p) => Math.abs(p.x) > F.wall + 0.05 || Math.abs(p.y) > F.wall + 0.05)) add(i, 'warn', 'Footprint reaches past the field wall');
@@ -1104,14 +1106,14 @@ function contacts(model, route) {
 }
 const contactsAt = (list, step) => list.filter((c) => c.step === step);
 
-function sweepPolygons(route, L, W) {
+function sweepPolygons(route, L, W, FR, BK) {
   const out = [];
   if (!route) return out;
   let prev = startPoseOf(route);
   route.wp.forEach((w, i) => {
     if (!w || w.x === null) return;
     const here = { x: w.x, y: w.y, h: w.h };
-    if (prev) out.push({ step: i, poly: hull(sweepPoints(prev, here, L, W)) });
+    if (prev) out.push({ step: i, poly: hull(sweepPoints(prev, here, L, W, FR, BK)) });
     prev = here;
   });
   return out;
@@ -1413,7 +1415,7 @@ const DEFAULT_FIELD = {
     { name: 'OBJ_MID_NEAR', x: 0, y: -23.6 }, { name: 'OBJ_MID_SIDE', x: 23.6, y: 0 }, { name: 'OBJ_DIAGONAL_SIDE', x: 47.2, y: -47.2 }, { name: 'OBJ_DIAGONAL_INNER', x: 23.6, y: -23.6 },
   ],
   loaders: [{ name: 'LOADER_LEFT', x: -58.7, y: -68.5 }, { name: 'LOADER_RIGHT', x: 58.7, y: -68.5 }],
-  robot: { length: 17, width: 16 },
+  robot: { length: 17, width: 16, front: 7, back: 10 }, // front/back: claw end and intake end, measured from the turning center
 };
 
 // What window.ScourgeMap.load gets: { mapData, csvTexts: [{ name, text }], simulated, note, build }. Routes only ever come from mapData.
@@ -1558,7 +1560,7 @@ function frameCtx(model, sel, W, fit, layers) {
     const pts = thinPath(sel.sim.samples.map((q) => ({ x: q.x / k, y: -q.y / k })), 0.75);
     for (let i = 0; i + 1 < pts.length; i++) predSegs.push([pts[i], pts[i + 1]]);
     // and the robot standing at its start, which the playback draws there until it is played
-    const a = sel.sim.samples[0], c = footprintCorners(a.x, a.y, a.h, model.field.robot.length, model.field.robot.width).map((q) => ({ x: q.x / k, y: -q.y / k })), b = extent(c);
+    const a = sel.sim.samples[0], c = footprintCorners(a.x, a.y, a.h, model.field.robot.length, model.field.robot.width, model.field.robot.front, model.field.robot.back).map((q) => ({ x: q.x / k, y: -q.y / k })), b = extent(c);
     predSegs.start = { x: b.x0, y: b.y0, w: b.x1 - b.x0, h: b.y1 - b.y0 };
   }
   return { predSegs, frame: 'field', k, span, win, fit: span < 2 * wall - 0.01, vb: [win.x0 - mg, -win.y1 - mg, span + 2 * mg, span + 2 * mg], grid: 24, wall, W: wide, pins };
@@ -1762,15 +1764,15 @@ function renderFieldObjects(model, route, ctx) {
 }
 
 function renderRoute(model, state, sel, ctx) {
-  const route = sel.route, k = ctx.k, F = model.field, L = F.robot.length, W = F.robot.width, p = [];
+  const route = sel.route, k = ctx.k, F = model.field, L = F.robot.length, W = F.robot.width, FR = F.robot.front, BK = F.robot.back, p = [];
   if (!route) return '';
   const hitSteps = new Set(sel.contactList.map((c) => c.step));
-  if (state.layers.sweep) sweepPolygons(route, L, W).forEach((s) => p.push('<polygon class="sweep ns' + (hitSteps.has(s.step) ? ' hit' : '') + '" points="' + polyPts(s.poly) + '"/>'));
+  if (state.layers.sweep) sweepPolygons(route, L, W, FR, BK).forEach((s) => p.push('<polygon class="sweep ns' + (hitSteps.has(s.step) ? ' hit' : '') + '" points="' + polyPts(s.poly) + '"/>'));
   // Footprints are off by default. A footprint that touches something is drawn anyway, in red, so a hit is never hidden.
   route.wp.forEach((w, i) => {
     const hit = hitSteps.has(i);
     if (!w || w.x === null || !(state.layers.foot || hit)) return;
-    const c = footprintCorners(w.x, w.y, w.h, L, W), hc = hit ? ' hit' : '';
+    const c = footprintCorners(w.x, w.y, w.h, L, W, FR, BK), hc = hit ? ' hit' : '';
     p.push('<polygon class="fp ns' + hc + '" points="' + polyPts(c) + '"/><line class="fp-front ns' + hc + '" x1="' + f3(c[0].x) + '" y1="' + f3(-c[0].y) + '" x2="' + f3(c[1].x) + '" y2="' + f3(-c[1].y) + '"/>');
   });
   const start = route.start.kind === 'pose' ? startPoseOf(route) : null;
@@ -1790,7 +1792,7 @@ function renderRoute(model, state, sel, ctx) {
       if (Math.hypot(w.x - w.from.x, w.y - w.from.y) * (1 / k) > 36) p.push(at(mx, my, k, '<path class="chev" d="M5 0L-4 4.5L-4 -4.5Z" transform="rotate(' + f3(ang) + ')"/>'));
     });
     if (start) {
-      if (state.layers.foot) p.push('<polygon class="fp ns" points="' + polyPts(footprintCorners(start.x, start.y, start.h, L, W)) + '" style="stroke-dasharray:3 2"/>');
+      if (state.layers.foot) p.push('<polygon class="fp ns" points="' + polyPts(footprintCorners(start.x, start.y, start.h, L, W, FR, BK)) + '" style="stroke-dasharray:3 2"/>');
       p.push(at(start.x, start.y, k, '<circle class="dot" r="4.5"/><text class="lbl strong halo" x="8" y="-7">START</text>'));
     }
     const op = route.opening;
@@ -1925,8 +1927,8 @@ function renderStatic(model, state, sel, ctx) {
   return p.join('');
 }
 
-function robotAt(pose, L, W, k, cls, fcls) {
-  const c = footprintCorners(pose.x, pose.y, pose.h, L, W);
+function robotAt(pose, F, cls, fcls) {
+  const c = footprintCorners(pose.x, pose.y, pose.h, F.robot.length, F.robot.width, F.robot.front, F.robot.back);
   return '<polygon class="' + cls + ' ns" points="' + polyPts(c) + '"/><line class="' + fcls + ' ns" x1="' + f3(c[0].x) + '" y1="' + f3(-c[0].y) + '" x2="' + f3(c[1].x) + '" y2="' + f3(-c[1].y) + '"/>';
 }
 
@@ -1937,10 +1939,10 @@ function renderSel(model, state, sel, ctx) {
   const one = (i, cls, fcls, ring) => {
     const w = route.wp[i];
     if (!w || w.x === null) return;
-    p.push(robotAt(w, F.robot.length, F.robot.width, k, cls, fcls));
+    p.push(robotAt(w, F, cls, fcls));
     if (ring) {
       // claw direction: an arrow leaving the middle of the front edge, along the heading
-      const c = footprintCorners(w.x, w.y, w.h, F.robot.length, F.robot.width);
+      const c = footprintCorners(w.x, w.y, w.h, F.robot.length, F.robot.width, F.robot.front, F.robot.back);
       p.push(at((c[0].x + c[1].x) / 2, (c[0].y + c[1].y) / 2, k, '<g transform="rotate(' + f3(w.h) + ')"><path class="claw" d="M0 0V-14M-4.5 -9L0 -14L4.5 -9"/></g>'));
       p.push(at(w.x, w.y, k, '<circle class="sel-ring" r="12"/>'));
     }
@@ -1959,7 +1961,7 @@ function renderPlay(model, state, sel, ctx) {
   if (trail.length) trail[trail.length - 1] = pose; // the trail ends where the robot is, not at the thinned path
   const out = [], pr = s.kind === 'sim' ? ' pred' : ''; // the prediction plays in its own color
   if (trail.length > 1) out.push('<path class="' + (pr ? 'pred-trail' : 'run-trail') + ' ns" d="' + linePath(trail) + '"/>');
-  out.push(robotAt(pose, F.robot.length, F.robot.width, k, 'play-fp' + pr, 'play-front' + pr));
+  out.push(robotAt(pose, F, 'play-fp' + pr, 'play-front' + pr));
   out.push(at(pose.x, pose.y, k, '<circle class="play-dot' + pr + '" r="3"/>'));
   return out.join('');
 }

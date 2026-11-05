@@ -88,7 +88,7 @@ $script:Modes = @(
     @{ Label = 'Drive Test';   Asset = 'drive-test-hot.package.bin'; Slot = 3; Name = 'Scourge Drive Test' },
     @{ Label = 'Auto Pathing'; Asset = 'autopath-hot.package.bin';   Slot = 4; Name = 'Scourge Auto Pathing' }
 )
-$script:UploaderVersion = '2.5.0'
+$script:UploaderVersion = '2.6.0'
 $script:UploaderScriptPath = $PSCommandPath
 $script:UploaderManifestUrl = 'https://raw.githubusercontent.com/Whyater/40217S-Uploader/main/uploader.json'
 $script:ProjectDir = Join-Path $InstallDir 'project'
@@ -1705,6 +1705,450 @@ $SharedCode = {
         try { Write-CloudCache -Path $CachePath -Text $text } catch { $cacheError = $_.Exception.Message }
         return @{ Status = 'ok'; Data = $parsed; Fetched = [DateTime]::UtcNow.ToString('o'); CacheError = $cacheError }
     }
+
+    # ------------------------------------------------------------------
+    # Proposed auto plans: someone draws lines on the Route Map, says what the
+    # robot does along them, and sends that to <relay>/plans, which files it as
+    # an issue for the programmer. A plan never changes a route or robot code.
+    # Same rules, wording, and JSON as the web map (web/map.html: strokeToLine,
+    # addPlanLine, snapToLines, buildPlan, validatePlan), so the relay takes
+    # either. Points are true field inches, whichever side is showing.
+    #   line   = @{ X = double[]; Y = double[] }
+    #   action = @{ Type; Line (counts from 1); Along (inches from the line's start); AtX; AtY; Detail }
+    # ------------------------------------------------------------------
+
+    # The shared contract's limits (ROUTE_SYNC_SPEC.md). The relay checks them again.
+    function Get-PlanLimits {
+        return @{ Name = 80; Note = 2000; Lines = 50; PerLine = 500; Total = 3000; Coord = 100.0; MinLen = 1.0; Tol = 1.0; Actions = 200; Detail = 120 }
+    }
+
+    # What the robot can do along a line, in the spec's order. Glyph is the letter on the map.
+    function Get-PlanActionTypes {
+        return @(
+            @{ Type = 'score'; Label = 'Score on Goal'; Group = 'Score and grab'; Glyph = 'S' },
+            @{ Type = 'grab_stack'; Label = 'Grab stack'; Group = 'Score and grab'; Glyph = 'G' },
+            @{ Type = 'grab_pin'; Label = 'Grab Pin'; Group = 'Score and grab'; Glyph = 'G' },
+            @{ Type = 'grab_wall'; Label = 'Grab from wall'; Group = 'Score and grab'; Glyph = 'G' },
+            @{ Type = 'grab_loader'; Label = 'Grab from Loader'; Group = 'Score and grab'; Glyph = 'G' },
+            @{ Type = 'toggle'; Label = 'Turn Toggle'; Group = 'Toggle and roller'; Glyph = 'T' },
+            @{ Type = 'roller_on'; Label = 'Roller on'; Group = 'Toggle and roller'; Glyph = 'R' },
+            @{ Type = 'roller_reverse'; Label = 'Roller reverse'; Group = 'Toggle and roller'; Glyph = 'R' },
+            @{ Type = 'roller_off'; Label = 'Roller off'; Group = 'Toggle and roller'; Glyph = 'R' },
+            @{ Type = 'intake_in'; Label = 'Intake in'; Group = 'Intake'; Glyph = 'I' },
+            @{ Type = 'intake_out'; Label = 'Intake out'; Group = 'Intake'; Glyph = 'I' },
+            @{ Type = 'intake_off'; Label = 'Intake off'; Group = 'Intake'; Glyph = 'I' },
+            @{ Type = 'lift_floor'; Label = 'Lift to floor'; Group = 'Lift'; Glyph = 'L' },
+            @{ Type = 'lift_alliance'; Label = 'Lift to Alliance Goal'; Group = 'Lift'; Glyph = 'L' },
+            @{ Type = 'lift_neutral'; Label = 'Lift to Neutral Goal'; Group = 'Lift'; Glyph = 'L' },
+            @{ Type = 'lift_cup_pin'; Label = 'Lift to Cup and Pin'; Group = 'Lift'; Glyph = 'L' },
+            @{ Type = 'claw_open'; Label = 'Open claw'; Group = 'Claw'; Glyph = 'C' },
+            @{ Type = 'claw_close'; Label = 'Close claw'; Group = 'Claw'; Glyph = 'C' },
+            @{ Type = 'tilt_up'; Label = 'Tilt claw up'; Group = 'Claw'; Glyph = 'C' },
+            @{ Type = 'tilt_down'; Label = 'Tilt claw down'; Group = 'Claw'; Glyph = 'C' },
+            @{ Type = 'drive_backward'; Label = 'Back up along this line'; Group = 'Drive'; Glyph = 'D' },
+            @{ Type = 'wait'; Label = 'Pause'; Group = 'Drive'; Glyph = 'P' }
+        )
+    }
+
+    function Get-PlanActionType {
+        param([string]$Type)
+        foreach ($t in (Get-PlanActionTypes)) { if ($t.Type -ceq $Type) { return $t } }
+        return $null
+    }
+
+    # Two decimal places the way the page rounds (JavaScript Math.round: halves go up,
+    # not to even). Adding 0.0 turns a -0 into 0.
+    function Get-PlanRound {
+        param([double]$V)
+        return ([math]::Floor($V * 100.0 + 0.5) / 100.0) + 0.0
+    }
+
+    function Get-PlanLineLength {
+        param($L)
+        $d = 0.0
+        for ($i = 1; $i -lt $L.X.Length; $i++) {
+            $dx = $L.X[$i] - $L.X[$i - 1]; $dy = $L.Y[$i] - $L.Y[$i - 1]
+            $d += [math]::Sqrt($dx * $dx + $dy * $dy)
+        }
+        return $d
+    }
+
+    # Ramer-Douglas-Peucker: keep the points that bend the line by more than Tol
+    # inches, drop the rest. Uses its own stack, so a long scribble is no problem.
+    function Get-PlanSimplified {
+        param([double[]]$Xs, [double[]]$Ys, [double]$Tol)
+        $n = $Xs.Length
+        if ($n -lt 3) { return @{ X = [double[]]$Xs.Clone(); Y = [double[]]$Ys.Clone() } }
+        $keep = New-Object 'bool[]' $n
+        $keep[0] = $true
+        $keep[$n - 1] = $true
+        $stack = New-Object 'System.Collections.Generic.Stack[int[]]'
+        $stack.Push([int[]]@(0, ($n - 1)))
+        while ($stack.Count -gt 0) {
+            $ab = $stack.Pop()
+            $a = $ab[0]; $b = $ab[1]
+            $ax = $Xs[$a]; $ay = $Ys[$a]
+            $dx = $Xs[$b] - $ax; $dy = $Ys[$b] - $ay
+            $l2 = $dx * $dx + $dy * $dy
+            $far = -1
+            $fd = $Tol
+            for ($i = $a + 1; $i -lt $b; $i++) {
+                $u = 0.0
+                if ($l2 -ne 0) { $u = (($Xs[$i] - $ax) * $dx + ($Ys[$i] - $ay) * $dy) / $l2 }
+                if ($u -lt 0) { $u = 0.0 } elseif ($u -gt 1) { $u = 1.0 }
+                $ex = $Xs[$i] - ($ax + $u * $dx); $ey = $Ys[$i] - ($ay + $u * $dy)
+                $d = [math]::Sqrt($ex * $ex + $ey * $ey)
+                if ($d -gt $fd) { $fd = $d; $far = $i }
+            }
+            if ($far -ge 0) {
+                $keep[$far] = $true
+                $stack.Push([int[]]@($a, $far))
+                $stack.Push([int[]]@($far, $b))
+            }
+        }
+        $ox = New-Object 'System.Collections.Generic.List[double]'
+        $oy = New-Object 'System.Collections.Generic.List[double]'
+        for ($i = 0; $i -lt $n; $i++) { if ($keep[$i]) { $ox.Add($Xs[$i]); $oy.Add($Ys[$i]) } }
+        return @{ X = $ox.ToArray(); Y = $oy.ToArray() }
+    }
+
+    # A drawn stroke becomes a plan line: simplified at 1 in and rounded to 2
+    # places. $null when it is under 1 in long, so nothing is added.
+    function ConvertTo-PlanLine {
+        param([double[]]$Xs, [double[]]$Ys)
+        if ($Xs.Length -lt 2) { return $null }
+        $lim = Get-PlanLimits
+        $s = Get-PlanSimplified $Xs $Ys $lim.Tol
+        $n = $s.X.Length
+        $x = New-Object 'double[]' $n
+        $y = New-Object 'double[]' $n
+        for ($i = 0; $i -lt $n; $i++) { $x[$i] = Get-PlanRound $s.X[$i]; $y[$i] = Get-PlanRound $s.Y[$i] }
+        $line = @{ X = $x; Y = $y }
+        if (($n -lt 2) -or ((Get-PlanLineLength $line) -lt $lim.MinLen)) { return $null }
+        return $line
+    }
+
+    # One more line, or the plain sentence for the limit that stops it. The lines
+    # are never changed when it says no. Returns @{ Lines; Error }.
+    function Add-PlanLine {
+        param($Lines, $Line)
+        $lim = Get-PlanLimits
+        $all = @()
+        if ($null -ne $Lines) { $all = @($Lines) }
+        $total = 0
+        foreach ($l in $all) { $total += $l.X.Length }
+        if ($all.Count -ge $lim.Lines) { return @{ Lines = $all; Error = ('A plan holds up to ' + $lim.Lines + ' lines. Undo or clear a line to draw another.') } }
+        if ($Line.X.Length -gt $lim.PerLine) { return @{ Lines = $all; Error = ('That line has too many bends to keep (over ' + $lim.PerLine + ' points). Draw it with fewer turns.') } }
+        if (($total + $Line.X.Length) -gt $lim.Total) { return @{ Lines = $all; Error = ('This plan has reached its limit of ' + $lim.Total + ' points. Undo or clear a line to draw more.') } }
+        return @{ Lines = @($all + @($Line)); Error = '' }
+    }
+
+    # The spot on a plan line nearest to a click, or $null when no line is within
+    # Reach inches. Within 3 in of a line's end, measured along the line, it snaps
+    # to that exact end. The nearest line wins; on a tie the earlier one does.
+    # Returns @{ Line (from 1); Along; AtX; AtY; AtEnd }.
+    function Find-PlanSnap {
+        param($Lines, [double]$X, [double]$Y, [double]$Reach)
+        $all = @()
+        if ($null -ne $Lines) { $all = @($Lines) }
+        $best = $null
+        for ($li = 0; $li -lt $all.Count; $li++) {
+            $l = $all[$li]
+            $run = 0.0
+            for ($i = 1; $i -lt $l.X.Length; $i++) {
+                $ax = $l.X[$i - 1]; $ay = $l.Y[$i - 1]
+                $dx = $l.X[$i] - $ax; $dy = $l.Y[$i] - $ay
+                $l2 = $dx * $dx + $dy * $dy
+                $len = [math]::Sqrt($l2)
+                $u = 0.0
+                if ($l2 -ne 0) { $u = [math]::Max(0.0, [math]::Min(1.0, ((($X - $ax) * $dx + ($Y - $ay) * $dy) / $l2))) }
+                $px = $ax + $u * $dx; $py = $ay + $u * $dy
+                $d = [math]::Sqrt(($X - $px) * ($X - $px) + ($Y - $py) * ($Y - $py))
+                if (($null -eq $best) -or ($d -lt ($best.D - 1e-9))) { $best = @{ D = $d; Li = $li; Px = $px; Py = $py; Along = ($run + $u * $len) } }
+                $run += $len
+            }
+        }
+        if (($null -eq $best) -or (-not ($best.D -le $Reach))) { return $null }
+        $l = $all[$best.Li]
+        $n = $l.X.Length
+        $total = Get-PlanLineLength $l
+        $toStart = $best.Along
+        $toEnd = $total - $best.Along
+        if (($toEnd -le 3.0) -and ($toEnd -lt $toStart)) {
+            return @{ Line = [int]($best.Li + 1); Along = (Get-PlanRound $total); AtX = (Get-PlanRound $l.X[$n - 1]); AtY = (Get-PlanRound $l.Y[$n - 1]); AtEnd = $true }
+        }
+        if ($toStart -le 3.0) { return @{ Line = [int]($best.Li + 1); Along = 0.0; AtX = (Get-PlanRound $l.X[0]); AtY = (Get-PlanRound $l.Y[0]); AtEnd = $false } }
+        return @{ Line = [int]($best.Li + 1); Along = (Get-PlanRound $best.Along); AtX = (Get-PlanRound $best.Px); AtY = (Get-PlanRound $best.Py); AtEnd = $false }
+    }
+
+    # Route order: by line, then inches along, then the order they were placed.
+    function Sort-PlanActions {
+        param($Actions)
+        $all = @()
+        if ($null -ne $Actions) { $all = @($Actions) }
+        $keyed = New-Object System.Collections.ArrayList
+        for ($i = 0; $i -lt $all.Count; $i++) {
+            [void]$keyed.Add([pscustomobject]@{ A = $all[$i]; L = [int]$all[$i].Line; D = [double]$all[$i].Along; I = $i })
+        }
+        return @(@($keyed.ToArray() | Sort-Object -Property L, D, I) | ForEach-Object { $_.A })
+    }
+
+    # Where an action sits, in words: "Line 2, at the end", "Line 2, 14 in along".
+    function Get-PlanActionPlace {
+        param($Action, $Lines)
+        $all = @()
+        if ($null -ne $Lines) { $all = @($Lines) }
+        $n = [int]$Action.Line
+        $total = 0.0
+        if (($n -ge 1) -and ($n -le $all.Count)) { $total = Get-PlanLineLength $all[$n - 1] }
+        $a = [double]$Action.Along
+        $inv = [System.Globalization.CultureInfo]::InvariantCulture
+        if ($a -ge ($total - 0.005)) { $where = 'at the end' }
+        elseif ($a -le 0.005) { $where = 'at the start' }
+        else {
+            $f = '0'
+            if ($a -lt 10) { $f = '0.0' }
+            $where = $a.ToString($f, $inv) + ' in along'
+        }
+        return ('Line ' + $n + ', ' + $where)
+    }
+
+    # The plan body the relay takes (schema 1), as ordered dictionaries so the JSON
+    # keeps the page's key order. Build is the shown prediction's tag, or empty for
+    # none. actions is left out when there are none.
+    function New-PlanBody {
+        param([string]$Name, [string]$Note, [string]$Side, [string]$Build, $Lines, $Actions)
+        $body = [ordered]@{}
+        $body['schema'] = 1
+        $body['kind'] = 'proposed-auto-plan'
+        $body['name'] = $Name.Trim()
+        if ($Side -ceq 'R') { $body['side'] = 'R' } else { $body['side'] = 'L' }
+        $body['note'] = $Note.Trim()
+        if ($Build) {
+            if ($Build.Length -gt 100) { $Build = $Build.Substring(0, 100) }
+            $body['build'] = $Build
+        } else { $body['build'] = $null }
+        $lineList = New-Object System.Collections.ArrayList
+        if ($null -ne $Lines) {
+            foreach ($l in @($Lines)) {
+                $pts = New-Object System.Collections.ArrayList
+                for ($i = 0; $i -lt $l.X.Length; $i++) { [void]$pts.Add([double[]]@((Get-PlanRound $l.X[$i]), (Get-PlanRound $l.Y[$i]))) }
+                [void]$lineList.Add([ordered]@{ points = $pts })
+            }
+        }
+        $body['lines'] = $lineList
+        $acts = @()
+        if ($null -ne $Actions) { $acts = @($Actions) }
+        if ($acts.Count -gt 0) {
+            $actList = New-Object System.Collections.ArrayList
+            foreach ($a in $acts) {
+                [void]$actList.Add([ordered]@{
+                    type = [string]$a.Type; line = [int]$a.Line; along = (Get-PlanRound ([double]$a.Along))
+                    at = [double[]]@((Get-PlanRound ([double]$a.AtX)), (Get-PlanRound ([double]$a.AtY))); detail = ([string]$a.Detail).Trim()
+                })
+            }
+            $body['actions'] = $actList
+        }
+        return $body
+    }
+
+    function Test-PlanNumber {
+        param($V)
+        if (($V -is [double]) -or ($V -is [int]) -or ($V -is [long]) -or ($V -is [decimal]) -or ($V -is [single])) {
+            $d = [double]$V
+            return (-not ([double]::IsNaN($d) -or [double]::IsInfinity($d)))
+        }
+        return $false
+    }
+
+    function Test-PlanPoint {
+        param($P, [double]$Coord)
+        return (($P -is [System.Collections.IList]) -and ($P.Count -eq 2) -and (Test-PlanNumber $P[0]) -and (Test-PlanNumber $P[1]) -and ([math]::Abs([double]$P[0]) -le $Coord) -and ([math]::Abs([double]$P[1]) -le $Coord))
+    }
+
+    # $null when the plan keeps every limit, else the sentence to show. Checked
+    # right before sending, so a plan that breaks one never goes out.
+    function Test-PlanBody {
+        param($Plan)
+        $lim = Get-PlanLimits
+        if (($null -eq $Plan) -or (-not ($Plan -is [System.Collections.IDictionary])) -or ($Plan['schema'] -isnot [int]) -or ($Plan['schema'] -ne 1) -or ([string]$Plan['kind'] -cne 'proposed-auto-plan')) { return 'This is not a plan this app can send.' }
+        $name = $Plan['name']
+        if (($name -isnot [string]) -or ($name.Length -eq 0)) { return 'Give the plan a name before sending it.' }
+        if ($name.Length -gt $lim.Name) { return ('The name can be up to ' + $lim.Name + ' characters.') }
+        $note = $Plan['note']
+        if (($note -isnot [string]) -or ($note.Length -gt $lim.Note)) { return ('The note can be up to ' + $lim.Note + ' characters.') }
+        if (($Plan['side'] -cne 'L') -and ($Plan['side'] -cne 'R')) { return 'The plan needs a side.' }
+        $build = $Plan['build']
+        if (($null -ne $build) -and (($build -isnot [string]) -or ($build.Length -gt 100))) { return 'The build name is too long.' }
+        $lines = $Plan['lines']
+        if (($lines -isnot [System.Collections.IList]) -or ($lines.Count -eq 0)) { return 'Draw at least one line before sending.' }
+        if ($lines.Count -gt $lim.Lines) { return ('A plan holds up to ' + $lim.Lines + ' lines.') }
+        $total = 0
+        foreach ($l in $lines) {
+            $pts = $null
+            if ($l -is [System.Collections.IDictionary]) { $pts = $l['points'] }
+            if (($pts -isnot [System.Collections.IList]) -or ($pts.Count -lt 2) -or ($pts.Count -gt $lim.PerLine)) { return ('Each line needs 2 to ' + $lim.PerLine + ' points.') }
+            $total += $pts.Count
+            foreach ($p in $pts) { if (-not (Test-PlanPoint $p $lim.Coord)) { return 'A point is outside the field.' } }
+        }
+        if ($total -gt $lim.Total) { return ('A plan holds up to ' + $lim.Total + ' points in all.') }
+        if (@($Plan.Keys) -cnotcontains 'actions') { return $null }
+        $actions = $Plan['actions']
+        if (($actions -isnot [System.Collections.IList]) -or ($actions.Count -gt $lim.Actions)) { return ('A plan holds up to ' + $lim.Actions + ' actions.') }
+        foreach ($a in $actions) {
+            if (($a -isnot [System.Collections.IDictionary]) -or ($a['type'] -isnot [string]) -or ($a['type'] -cnotmatch '^[a-z_]{1,30}\z')) { return 'An action has no usable type.' }
+            $ln = $a['line']
+            $pts = $null
+            if ((($ln -is [int]) -or ($ln -is [long])) -and ($ln -ge 1) -and ($ln -le $lines.Count)) { $pts = $lines[[int]$ln - 1]['points'] }
+            if ($null -eq $pts) { return 'An action points at a line that is not in the plan.' }
+            $len = 0.0
+            for ($i = 1; $i -lt $pts.Count; $i++) {
+                $dx = [double]$pts[$i][0] - [double]$pts[$i - 1][0]; $dy = [double]$pts[$i][1] - [double]$pts[$i - 1][1]
+                $len += [math]::Sqrt($dx * $dx + $dy * $dy)
+            }
+            $along = $a['along']
+            if ((-not (Test-PlanNumber $along)) -or ([double]$along -lt 0) -or ([double]$along -gt ($len + 1))) { return 'An action sits off the end of its line.' }
+            if (-not (Test-PlanPoint $a['at'] $lim.Coord)) { return 'An action is outside the field.' }
+            if (($a['detail'] -isnot [string]) -or ($a['detail'].Length -gt $lim.Detail)) { return ('An action detail can be up to ' + $lim.Detail + ' characters.') }
+        }
+        return $null
+    }
+
+    # JSON text for a plan body: ordered dictionaries, lists, strings, numbers,
+    # true/false and null. Anything past plain ASCII is written as \uXXXX, which
+    # reads back the same, so the bytes on the wire are always plain ASCII.
+    function Add-PlanJson {
+        param($Sb, $V)
+        $inv = [System.Globalization.CultureInfo]::InvariantCulture
+        if ($null -eq $V) { [void]$Sb.Append('null'); return }
+        if ($V -is [bool]) { if ($V) { [void]$Sb.Append('true') } else { [void]$Sb.Append('false') }; return }
+        if ($V -is [string]) {
+            [void]$Sb.Append('"')
+            foreach ($ch in $V.ToCharArray()) {
+                $code = [int]$ch
+                if ($ch -eq '"') { [void]$Sb.Append('\"') }
+                elseif ($ch -eq '\') { [void]$Sb.Append('\\') }
+                elseif ($code -eq 10) { [void]$Sb.Append('\n') }
+                elseif ($code -eq 13) { [void]$Sb.Append('\r') }
+                elseif ($code -eq 9) { [void]$Sb.Append('\t') }
+                elseif (($code -lt 32) -or ($code -gt 126)) { [void]$Sb.Append('\u' + $code.ToString('x4')) }
+                else { [void]$Sb.Append($ch) }
+            }
+            [void]$Sb.Append('"')
+            return
+        }
+        if (($V -is [int]) -or ($V -is [long])) { [void]$Sb.Append($V.ToString($inv)); return }
+        if (($V -is [double]) -or ($V -is [single]) -or ($V -is [decimal])) {
+            $d = [double]$V
+            if ([double]::IsNaN($d) -or [double]::IsInfinity($d)) { [void]$Sb.Append('null') }
+            elseif ($d -eq 0) { [void]$Sb.Append('0') }
+            else { [void]$Sb.Append($d.ToString('R', $inv)) }
+            return
+        }
+        if ($V -is [System.Collections.IDictionary]) {
+            [void]$Sb.Append('{')
+            $first = $true
+            foreach ($k in $V.Keys) {
+                if (-not $first) { [void]$Sb.Append(',') }
+                $first = $false
+                Add-PlanJson $Sb ([string]$k)
+                [void]$Sb.Append(':')
+                Add-PlanJson $Sb $V[$k]
+            }
+            [void]$Sb.Append('}')
+            return
+        }
+        if ($V -is [System.Collections.IList]) {
+            [void]$Sb.Append('[')
+            for ($i = 0; $i -lt $V.Count; $i++) {
+                if ($i -gt 0) { [void]$Sb.Append(',') }
+                Add-PlanJson $Sb $V[$i]
+            }
+            [void]$Sb.Append(']')
+            return
+        }
+        Add-PlanJson $Sb ([string]$V)
+    }
+
+    function ConvertTo-PlanJson {
+        param($Plan)
+        $sb = New-Object System.Text.StringBuilder
+        Add-PlanJson $sb $Plan
+        return $sb.ToString()
+    }
+
+    # What the relay's answer to POST /plans means. Status: sent (with Issue, the
+    # issue number, 0 if the relay gave none), unauthorized (HTTP 401), or error
+    # with Detail, the relay's own error text when it sent one.
+    function ConvertFrom-PlanReply {
+        param([int]$StatusCode, [string]$Text)
+        if ($StatusCode -eq 401) { return @{ Status = 'unauthorized'; Detail = '' } }
+        $reply = $null
+        try {
+            Add-Type -AssemblyName System.Web.Extensions
+            $ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+            $reply = $ser.DeserializeObject($Text)
+        } catch { $reply = $null }
+        if (($StatusCode -lt 200) -or ($StatusCode -gt 299)) {
+            $detail = ''
+            $ev = Get-JsonValue $reply 'error'
+            if ($ev -is [string]) { $detail = ($ev -replace '\p{Cc}', ' ').Trim() }
+            if ($detail.Length -gt 120) { $detail = $detail.Substring(0, 120) }
+            if (-not $detail) { $detail = 'the relay answered ' + $StatusCode }
+            return @{ Status = 'error'; Detail = $detail }
+        }
+        $okV = Get-JsonValue $reply 'ok'
+        if (($okV -isnot [bool]) -or (-not $okV)) { return @{ Status = 'error'; Detail = 'the relay gave an unexpected answer' } }
+        $issue = 0
+        $iv = Get-JsonValue $reply 'issue'
+        if (($iv -is [int]) -or ($iv -is [long])) { $issue = [long]$iv }
+        return @{ Status = 'sent'; Issue = $issue }
+    }
+
+    # Sends a plan's JSON to the relay. The team code goes only in the X-Team-Code
+    # header of this one request, is never logged, and redirects are not followed.
+    # Status: sent, unauthorized, offline (no answer at all), or error with Detail.
+    function Send-ProposedPlan {
+        param([string]$Url, [string]$Code, [string]$Body, [string]$Client, [int]$TimeoutMs = 30000)
+        # Only https, except this computer's own loopback address (used by -SelfTest).
+        if (($Url -notlike 'https://*') -and ($Url -notlike 'http://127.0.0.1:*')) { return @{ Status = 'error'; Detail = 'the relay address is not secure' } }
+        if (-not $Code) { return @{ Status = 'error'; Detail = 'enter the team code first' } }
+        $status = 0
+        $text = ''
+        try {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
+            $req = [System.Net.HttpWebRequest][System.Net.WebRequest]::Create($Url)
+            $req.Method = 'POST'
+            $req.Timeout = $TimeoutMs
+            $req.ReadWriteTimeout = $TimeoutMs
+            $req.AllowAutoRedirect = $false
+            $req.UserAgent = 'ScourgeUploader'
+            $req.Accept = 'application/json'
+            $req.ContentType = 'application/json'
+            $req.Headers.Add('X-Team-Code', $Code)
+            $req.Headers.Add('X-Scourge-Client', $Client)
+            $req.ContentLength = $bytes.Length
+            $rs = $req.GetRequestStream()
+            try { $rs.Write($bytes, 0, $bytes.Length) } finally { $rs.Close() }
+            $resp = $req.GetResponse()
+            try {
+                $status = [int]$resp.StatusCode
+                $sr = New-Object System.IO.StreamReader($resp.GetResponseStream(), [System.Text.Encoding]::UTF8)
+                try { $text = $sr.ReadToEnd() } finally { $sr.Dispose() }
+            } finally { $resp.Close() }
+        } catch [System.Net.WebException] {
+            $er = $_.Exception.Response
+            if ($null -eq $er) { return @{ Status = 'offline'; Detail = '' } }
+            try {
+                $status = [int]$er.StatusCode
+                $sr = New-Object System.IO.StreamReader($er.GetResponseStream(), [System.Text.Encoding]::UTF8)
+                try { $text = $sr.ReadToEnd() } finally { $sr.Dispose() }
+            } catch { } finally { try { $er.Close() } catch { } }
+        } catch {
+            return @{ Status = 'error'; Detail = 'network error' }
+        }
+        return (ConvertFrom-PlanReply $status $text)
+    }
 }
 
 # Make the shared functions available on this (main) thread too.
@@ -1768,6 +2212,7 @@ $DownloadBody = { Save-LatestRelease -ReleasesUrl $A.ReleasesUrl -InstallDir $A.
 $MapBody = { Read-ScourgeResults -Folder $A.Folder -Skip $A.Skip -Cache $A.Cache }
 $CloudBody = { Get-CloudMap -MapUrl $A.MapUrl -Build $A.Build -Code $A.Code -CachePath $A.CachePath }
 $CloudCacheBody = { Read-CloudCache -Path $A.Path }
+$PlanSendBody = { Send-ProposedPlan -Url $A.Url -Code $A.Code -Body $A.Body -Client $A.Client }
 
 # ---------------------------------------------------------------------------
 # Small helpers used by the window and by -SelfTest
@@ -1879,6 +2324,9 @@ function Initialize-Theme {
     $c.Bad         = [System.Drawing.Color]::FromArgb(180, 35, 24)
     $c.Idle        = [System.Drawing.Color]::FromArgb(154, 161, 172)
     $c.LogBack     = [System.Drawing.Color]::FromArgb(247, 248, 250)
+    # Route Map proposed plans, the same colors as the web map: plan lines and their actions.
+    $c.Plan        = [System.Drawing.Color]::FromArgb(194, 87, 12)
+    $c.Act         = [System.Drawing.Color]::FromArgb(74, 63, 181)
 
     $f = $script:Fonts
     $f.Base    = New-Object System.Drawing.Font('Segoe UI', 9)
@@ -1890,6 +2338,8 @@ function Initialize-Theme {
     $f.Button  = New-Object System.Drawing.Font('Segoe UI Semibold', 11)
     $f.Status  = New-Object System.Drawing.Font('Segoe UI', 9.5)
     $f.Mono    = New-Object System.Drawing.Font('Consolas', 8.5)
+    $f.PlanTag = New-Object System.Drawing.Font('Consolas', 7.5, [System.Drawing.FontStyle]::Bold)
+    $f.Glyph   = New-Object System.Drawing.Font('Segoe UI Semibold', 7)
 }
 
 function New-Label {
@@ -2042,6 +2492,21 @@ $script:MapFilling = $false
 $script:MapPaintError = $false
 $script:MapNoteLogged = ''
 $script:MapField = $null
+# A proposed plan being drawn on the Route Map (see "Proposed auto plans" in the shared code).
+# Lines and Actions are replaced, never changed in place, so Undo can keep the old arrays.
+# Side is the side showing when the first line was drawn. Stroke is the drag in progress.
+# Pick is the spot the action menu is open at; PickHit is what a menu click adds to.
+# Hot is the action picked in the list, drawn with a ring. The name and note live in their boxes.
+$script:Plan = @{
+    On = $false; Lines = @(); Actions = @(); Side = ''; Undo = (New-Object System.Collections.ArrayList)
+    Stroke = $null; StrokeLost = $false; Sending = $false; Msg = ''; MsgKind = ''; Pick = $null; PickHit = $null; Hot = -1; Filling = $false; SentCode = ''
+}
+# Where the last paint put the field: screen x = Ox + x * Sc, screen y = Oy - y * Sc.
+$script:PlanView = $null
+# -SelfTest sets this to lay the Route Map out for a short screen (0 = the screen decides).
+$script:MapMaxHeight = 0
+# Which of Update-PlanLayout's room-saving steps the last layout needed (0 = none).
+$script:PlanLayoutLevel = 0
 
 # Converts a size picked at 100% scaling into real pixels for this screen.
 function Px {
@@ -2241,6 +2706,41 @@ function New-MainForm {
         }
     })
     $ui.MapList.Add_SelectedIndexChanged({ Invoke-Safe { Select-MapSession } })
+    # Proposed plan: a drag on the field draws a line, a click on a line opens the action menu.
+    $ui.PlanOpenButton.Add_Click({ Invoke-Safe { Enter-PlanMode } })
+    $ui.PlanDone.Add_Click({ Invoke-Safe { Exit-PlanMode } })
+    $ui.PlanUndo.Add_Click({ Invoke-Safe { Undo-PlanStep } })
+    $ui.PlanClear.Add_Click({ Invoke-Safe { Clear-PlanLines } })
+    $ui.PlanSend.Add_Click({ Invoke-Safe { Send-PlanFromMap } })
+    $ui.PlanRemove.Add_Click({ Invoke-Safe { Remove-PlanAction $script:Plan.Hot } })
+    $ui.PlanNameBox.Add_TextChanged({ Invoke-Safe { Update-PlanTyping } })
+    $ui.PlanNoteBox.Add_TextChanged({ Invoke-Safe { Update-PlanTyping } })
+    $ui.PlanDetailBox.Add_TextChanged({ Invoke-Safe { Set-PlanDetail } })
+    $ui.PlanActList.Add_SelectedIndexChanged({ Invoke-Safe { Select-PlanAction } })
+    $ui.MapCanvas.Add_MouseDown({
+        param($s, $e)
+        if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
+        Invoke-Safe { Start-PlanStroke $e.X $e.Y }
+    })
+    $ui.MapCanvas.Add_MouseMove({
+        param($s, $e)
+        if ($null -eq $script:Plan.Stroke) { return }
+        # The button came up without a MouseUp (Alt+Tab, the Windows key, a popup): the half-drawn line is thrown away.
+        if (($e.Button -band [System.Windows.Forms.MouseButtons]::Left) -eq 0) { Invoke-Safe { Stop-PlanStroke }; return }
+        Invoke-Safe { Add-PlanStrokePoint $e.X $e.Y }
+    })
+    $ui.MapCanvas.Add_MouseCaptureChanged({
+        param($s, $e)
+        # Something else may have taken the mouse in the middle of a drag. WinForms also lets go of the
+        # mouse just before a normal MouseUp, so this only marks the stroke; the job timer's next tick
+        # throws it away if MouseUp has not finished it by then.
+        if (($null -ne $script:Plan.Stroke) -and (-not $s.Capture)) { $script:Plan.StrokeLost = $true }
+    })
+    $ui.MapCanvas.Add_MouseUp({
+        param($s, $e)
+        if (($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) -or ($null -eq $script:Plan.Stroke)) { return }
+        Invoke-Safe { Complete-PlanStroke $e.X $e.Y }
+    })
     # Shown: the controls now have their real sizes, so lay out again. In
     # -SelfTest the window may be shown for a screenshot; do not start the app.
     $form.Add_Shown({
@@ -2490,11 +2990,101 @@ function New-RouteMapControls {
     $ui.MapKeyGood = New-Label 'Under 1 in' 0 0 10 10 $f.Small $c.Good
     $ui.MapKeyWarn = New-Label 'Under 3 in' 0 0 10 10 $f.Small $c.Warn
     $ui.MapKeyBad = New-Label '3 in or more' 0 0 10 10 $f.Small $c.Bad
+    $ui.PlanOpenButton = New-FlatButton 'Draw a plan' 0 0 10 10 $false
 
-    $ui.MapControls = @($ui.MapCanvas, $ui.MapWholeButton, $ui.MapRouteBox, $ui.MapSideL, $ui.MapSideR, $ui.MapCloudNote, $ui.MapCodeBox, $ui.MapCodeButton, $ui.MapSessionsLabel, $ui.MapRefresh, $ui.MapList, $ui.MapRejected,
-        $ui.MapLine, $ui.MapRunLabel, $ui.MapRunSummary, $ui.MapTable, $ui.MapKeyGood, $ui.MapKeyWarn, $ui.MapKeyBad)
+    # Drawing a proposed plan: these take the right column's place while it is open.
+    $ui.PlanLabel = New-Label 'PROPOSED PLAN' 0 0 10 10 $f.Section $c.Muted
+    $ui.PlanDone = New-FlatButton 'Done' 0 0 10 10 $false
+    $ui.PlanSub = New-Label 'A sketch, not a recording. Nothing changes on the robot.' 0 0 10 10 $f.Small $c.Muted
+    $ui.PlanSub.AutoEllipsis = $false
+    $ui.PlanNameLabel = New-Label 'Name' 0 0 10 10 $f.Base $c.Muted
+    $ui.PlanNameBox = New-Object System.Windows.Forms.TextBox
+    $ui.PlanNameBox.AutoSize = $false
+    $ui.PlanNameBox.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $ui.PlanNameBox.MaxLength = 80
+    $ui.PlanNoteLabel = New-Label 'Note, optional' 0 0 10 10 $f.Base $c.Muted
+    $ui.PlanNoteBox = New-Object System.Windows.Forms.TextBox
+    $ui.PlanNoteBox.Multiline = $true
+    $ui.PlanNoteBox.WordWrap = $true
+    $ui.PlanNoteBox.AcceptsReturn = $true
+    $ui.PlanNoteBox.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
+    $ui.PlanNoteBox.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $ui.PlanNoteBox.MaxLength = 2000
+    $ui.PlanCount = New-Label '' 0 0 10 10 $f.Small $c.Muted
+    $ui.PlanCount.AutoEllipsis = $false
+    $ui.PlanActLabel = New-Label 'ACTIONS' 0 0 10 10 $f.Section $c.Muted
+    $ui.PlanActList = New-MapListView @('#', 'Action', 'Where') @((Px 30), (Px 150), (Px 132))
+    $ui.PlanDetailLabel = New-Label 'Detail' 0 0 10 10 $f.Base $c.Muted
+    $ui.PlanDetailBox = New-Object System.Windows.Forms.TextBox
+    $ui.PlanDetailBox.AutoSize = $false
+    $ui.PlanDetailBox.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $ui.PlanDetailBox.MaxLength = 120
+    $ui.PlanRemove = New-FlatButton 'Remove' 0 0 10 10 $false
+    $ui.PlanCodeNote = New-Label 'Enter the team code to send plans.' 0 0 10 10 $f.Small $c.Muted
+    $ui.PlanMsg = New-Label '' 0 0 10 10 $f.Small $c.Muted
+    $ui.PlanMsg.AutoEllipsis = $false
+    $ui.PlanUndo = New-FlatButton 'Undo' 0 0 10 10 $false
+    $ui.PlanClear = New-FlatButton 'Clear' 0 0 10 10 $false
+    $ui.PlanSend = New-FlatButton 'Send plan' 0 0 10 10 $true
+    $ui.PlanSend.Font = $f.Strong
+
+    # The action menu a click on a line opens: the spot, then every action in its group.
+    $ui.PlanPicker = New-Object System.Windows.Forms.ContextMenuStrip
+    $ui.PlanPicker.ShowImageMargin = $true
+    $ui.PlanPicker.ImageScalingSize = New-Object System.Drawing.Size((Px 16), (Px 16))
+    $ui.PlanPickTitle = New-Object System.Windows.Forms.ToolStripLabel
+    $ui.PlanPickTitle.Font = $f.Strong
+    $ui.PlanPickTitle.ForeColor = $c.Text
+    [void]$ui.PlanPicker.Items.Add($ui.PlanPickTitle)
+    $glyphs = @{}
+    $group = ''
+    foreach ($t in (Get-PlanActionTypes)) {
+        if ($t.Group -ne $group) {
+            $group = $t.Group
+            [void]$ui.PlanPicker.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+            $head = New-Object System.Windows.Forms.ToolStripLabel
+            $head.Text = $group.ToUpperInvariant()
+            $head.Font = $f.Section
+            $head.ForeColor = $c.Muted
+            [void]$ui.PlanPicker.Items.Add($head)
+        }
+        if (-not $glyphs.ContainsKey($t.Glyph)) { $glyphs[$t.Glyph] = New-PlanGlyphImage $t.Glyph }
+        $item = New-Object System.Windows.Forms.ToolStripMenuItem($t.Label)
+        $item.Image = $glyphs[$t.Glyph]
+        $item.Tag = $t.Type
+        $item.Add_Click({ param($s, $e) Invoke-Safe { Add-PlanAction ([string]$s.Tag) } })
+        [void]$ui.PlanPicker.Items.Add($item)
+    }
+    # Closing the menu takes the ring off the map. PickHit stays for a click that is still on its way.
+    $ui.PlanPicker.Add_Closed({ Invoke-Safe { $script:Plan.Pick = $null; $script:Ui.MapCanvas.Invalidate() } })
+
+    # Shown in the normal Route Map view, hidden while a plan is being drawn.
+    $ui.MapNormalControls = @($ui.MapWholeButton, $ui.PlanOpenButton, $ui.MapSessionsLabel, $ui.MapRefresh, $ui.MapList, $ui.MapLine, $ui.MapRunLabel, $ui.MapRunSummary, $ui.MapTable, $ui.MapKeyGood, $ui.MapKeyWarn, $ui.MapKeyBad)
+    $ui.PlanControls = @($ui.PlanLabel, $ui.PlanDone, $ui.PlanSub, $ui.PlanNameLabel, $ui.PlanNameBox, $ui.PlanNoteLabel, $ui.PlanNoteBox, $ui.PlanCount, $ui.PlanActLabel, $ui.PlanActList,
+        $ui.PlanDetailLabel, $ui.PlanDetailBox, $ui.PlanRemove, $ui.PlanCodeNote, $ui.PlanMsg, $ui.PlanUndo, $ui.PlanClear, $ui.PlanSend)
+    $ui.MapControls = @($ui.MapCanvas, $ui.MapWholeButton, $ui.PlanOpenButton, $ui.MapRouteBox, $ui.MapSideL, $ui.MapSideR, $ui.MapCloudNote, $ui.MapCodeBox, $ui.MapCodeButton, $ui.MapSessionsLabel, $ui.MapRefresh, $ui.MapList, $ui.MapRejected,
+        $ui.MapLine, $ui.MapRunLabel, $ui.MapRunSummary, $ui.MapTable, $ui.MapKeyGood, $ui.MapKeyWarn, $ui.MapKeyBad) + $ui.PlanControls
     foreach ($ctl in $ui.MapControls) { $ctl.Visible = $false }
     $Form.Controls.AddRange($ui.MapControls)
+}
+
+# A small round badge with an action's letter, for the action menu. Same look as the map's markers.
+function New-PlanGlyphImage {
+    param([string]$Glyph)
+    $size = Px 16
+    $bmp = New-Object System.Drawing.Bitmap($size, $size)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $brush = New-Object System.Drawing.SolidBrush($script:Colors.Act)
+    $fmt = New-Object System.Drawing.StringFormat
+    try {
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+        $g.FillEllipse($brush, 0, 0, ($size - 1), ($size - 1))
+        $fmt.Alignment = [System.Drawing.StringAlignment]::Center
+        $fmt.LineAlignment = [System.Drawing.StringAlignment]::Center
+        $g.DrawString($Glyph, $script:Fonts.Glyph, [System.Drawing.Brushes]::White, (New-Object System.Drawing.RectangleF(0, 0, $size, $size)), $fmt)
+    } finally { $g.Dispose(); $brush.Dispose(); $fmt.Dispose() }
+    return $bmp
 }
 
 # A segment looks selected (accent fill) or plain (white with a border), the
@@ -2551,6 +3141,8 @@ function Update-MapLayout {
         $maxH = $wa.Height - (Px 48)
         if (($H -gt $maxH) -and ($maxH -gt (Px 440))) { $H = $maxH }
     } catch { }
+    # -SelfTest only: lay the view out as a short screen would.
+    if ($script:MapMaxHeight -gt 0) { $H = [math]::Min($H, $script:MapMaxHeight) }
     $M = Px 24
     $form.SuspendLayout()
 
@@ -2574,7 +3166,24 @@ function Update-MapLayout {
     $routeW = $colW - 2 * $sideW - (Px 8)
     $ui.MapRouteBox.SetBounds($x, ($y + [int]((Px 30) - $ui.MapRouteBox.Height) / 2), $routeW, $ui.MapRouteBox.Height)
     $y += (Px 30) + (Px 8)
-    $ui.MapWholeButton.SetBounds($x, $y, $colW, (Px 30))
+    if ($script:Plan.On) {
+        foreach ($ctl in $ui.MapNormalControls) { $ctl.Visible = $false }
+        $ui.MapCloudNote.Visible = $false
+        $ui.MapRejected.Visible = $false
+        # Update-PlanLayout hides the parts that have nothing to show.
+        foreach ($ctl in $ui.PlanControls) { $ctl.Visible = $true }
+        Update-PlanLayout $x $y $colW ($H - $M)
+        $size = New-Object System.Drawing.Size($W, $H)
+        if ($form.ClientSize -ne $size) { $form.ClientSize = $size }
+        $form.ResumeLayout($false)
+        return
+    }
+    foreach ($ctl in $ui.PlanControls) { $ctl.Visible = $false }
+    foreach ($ctl in $ui.MapNormalControls) { $ctl.Visible = $true }
+    # Whole field and Draw a plan share a row.
+    $halfW = [int](($colW - (Px 8)) / 2)
+    $ui.MapWholeButton.SetBounds($x, $y, $halfW, (Px 30))
+    $ui.PlanOpenButton.SetBounds(($x + $halfW + (Px 8)), $y, ($colW - $halfW - (Px 8)), (Px 30))
     $y += (Px 30) + (Px 12)
     $cloudTop = $y
     $hasNote = [bool]$ui.MapCloudNote.Text
@@ -3220,6 +3829,8 @@ function Select-CloudRoute {
 
 function Set-CloudSide {
     param([string]$Side)
+    # A plan has one side, so the side holds while its lines are on the field.
+    if ($script:Plan.On -and (@($script:Plan.Lines).Count -gt 0)) { return }
     $script:Cloud.Side = $Side
     Update-ViewButtons
     $script:Ui.MapCanvas.Invalidate()
@@ -3233,6 +3844,8 @@ function Submit-TeamCode {
     if ($text -notmatch '^[\x21-\x7e]{1,128}$') {
         $ui.MapCloudNote.Text = 'Type the code exactly as the programmer gave it, with no spaces.'
         $ui.MapCloudNote.ForeColor = $script:Colors.Bad
+        # While a plan is open the note is hidden, so the plan's message line says it instead.
+        if ($script:Plan.On) { $script:Plan.Msg = $ui.MapCloudNote.Text; $script:Plan.MsgKind = 'warn'; Update-PlanPanel; return }
         Update-MapLayout
         return
     }
@@ -3242,6 +3855,7 @@ function Submit-TeamCode {
     $cl.Unauthorized = $false
     try { Save-TeamCode $text } catch { Add-LogText 'Route Map: the team code could not be saved on this computer, so it will be asked for again next time.' }
     $ui.MapCodeBox.Clear()
+    if ($script:Plan.On -and (-not $script:Plan.Sending)) { $script:Plan.Msg = ''; Update-PlanPanel }
     # A recording that went out without a code can be sent again now.
     if ($script:NeedsCodeFile -and (-not $script:SendPath) -and (Test-Path -LiteralPath $script:NeedsCodeFile)) {
         $script:SendPath = $script:NeedsCodeFile
@@ -3249,6 +3863,608 @@ function Submit-TeamCode {
         $ui.SendButton.Enabled = (-not $script:Recording) -and (-not $script:Busy) -and (Test-HaveResults)
     }
     Start-CloudFetch
+}
+
+# ---------------------------------------------------------------------------
+# Proposed plans on the Route Map. Draw a plan swaps the right column for the
+# plan's name, note, and actions, and the field for the whole field with the
+# prediction under the lines. A drag draws a line, a click on a line picks what
+# the robot does there, and Send plan posts it to <relay>/plans with the team
+# code. The rules and wording follow the web map (web/map.html).
+# ---------------------------------------------------------------------------
+
+# results_url ends in /results; plans go next to it at /plans.
+function Get-PlansUrl {
+    param([string]$ResultsUrl)
+    if (-not $ResultsUrl) { return '' }
+    $u = $ResultsUrl.TrimEnd('/')
+    if ($u -match '^(.*)/results$') { return $Matches[1] + '/plans' }
+    return $u + '/plans'
+}
+
+# The line shown for a send's result. Ok is true only when the relay filed it.
+function Get-PlanSendMessage {
+    param($R)
+    $status = [string]$R.Status
+    if ($status -eq 'sent') {
+        if ([long]$R.Issue -gt 0) { return @{ Ok = $true; Text = ('Sent as a proposed plan (issue #' + $R.Issue + '). No robot code changed.') } }
+        return @{ Ok = $true; Text = 'Sent as a proposed plan. No robot code changed.' }
+    }
+    if ($status -eq 'unauthorized') { return @{ Ok = $false; Text = 'The team code changed. Enter the new one, then send again.' } }
+    if ($status -eq 'offline') { return @{ Ok = $false; Text = "Couldn't reach the internet. Your drawing is still here, send it when you're online." } }
+    $detail = [string]$R.Detail
+    # A background job that failed outright (see Update-Jobs) gives Error instead of Detail.
+    if ((-not $detail) -and $R.Error) {
+        $detail = ([string]$R.Error -replace '\s+', ' ').Trim()
+        if ($detail.Length -gt 120) { $detail = $detail.Substring(0, 120) }
+    }
+    if (-not $detail) { $detail = 'something went wrong' }
+    return @{ Ok = $false; Text = ("The plan didn't send (" + $detail + '). Your drawing is still here.') }
+}
+
+# "2 lines, 84 in total", or how to start when there are none.
+function Get-PlanCountText {
+    param($Lines, [int]$ActionCount)
+    $all = @($Lines)
+    $n = $all.Count
+    if ($n -eq 0) { return 'Drag on the field to draw a line. Each line runs from its dot to its arrow.' }
+    $len = 0.0
+    foreach ($l in $all) { $len += Get-PlanLineLength $l }
+    $t = $n.ToString() + ' line'
+    if ($n -ne 1) { $t += 's' }
+    $t += ', ' + $len.ToString('0', [System.Globalization.CultureInfo]::InvariantCulture) + ' in total'
+    if ($ActionCount -eq 0) { $t += '. Click a line to add an action.' }
+    return $t
+}
+
+# Where each action's marker sits, in pixels at 100% from its true point: one marker
+# hangs 16 px below it, and markers within 16 px of each other fan out in rows of five,
+# so none hides another. K is inches per pixel at 100%. Indexed like Actions.
+function Get-PlanMarkerOffsets {
+    param($Actions, [double]$K)
+    $all = @($Actions)
+    $groups = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt $all.Count; $i++) {
+        $a = $all[$i]
+        $found = $null
+        foreach ($g in $groups) {
+            $dx = $g.X - [double]$a.AtX; $dy = $g.Y - [double]$a.AtY
+            if ([math]::Sqrt($dx * $dx + $dy * $dy) -lt (16.0 * $K)) { $found = $g; break }
+        }
+        if ($null -ne $found) { [void]$found.Items.Add($i) } else { [void]$groups.Add(@{ X = [double]$a.AtX; Y = [double]$a.AtY; Items = (New-Object System.Collections.Generic.List[int]) }); [void]$groups[$groups.Count - 1].Items.Add($i) }
+    }
+    $out = New-Object 'object[]' $all.Count
+    foreach ($g in $groups) {
+        for ($j = 0; $j -lt $g.Items.Count; $j++) {
+            $row = [math]::Floor($j / 5)
+            $cols = [math]::Min(5, ($g.Items.Count - $row * 5))
+            $out[$g.Items[$j]] = @{ Dx = ((($j % 5) - ($cols - 1) / 2.0) * 19.0); Dy = (16.0 + $row * 19.0) }
+        }
+    }
+    return ,$out
+}
+
+# The field point Len inches back from a line's end, along the line, so the arrow
+# follows where the drag was heading and not a hook of jitter where it stopped.
+function Get-PlanArrowBack {
+    param($L, [double]$Len)
+    $n = $L.X.Length
+    $zx = $L.X[$n - 1]; $zy = $L.Y[$n - 1]
+    $ax = $zx; $ay = $zy
+    $acc = 0.0
+    for ($i = $n - 2; $i -ge 0; $i--) {
+        $px = $L.X[$i]; $py = $L.Y[$i]
+        $d = [math]::Sqrt(($ax - $px) * ($ax - $px) + ($ay - $py) * ($ay - $py))
+        if (($acc + $d) -ge $Len) {
+            $u = 0.0
+            if ($d -gt 0) { $u = ($Len - $acc) / $d }
+            return @(($ax + ($px - $ax) * $u), ($ay + ($py - $ay) * $u))
+        }
+        $acc += $d
+        $ax = $px; $ay = $py
+    }
+    return @($L.X[0], $L.Y[0])
+}
+
+function Enter-PlanMode {
+    $p = $script:Plan
+    if ($p.On) { return }
+    $p.On = $true
+    $p.Msg = ''
+    $p.Stroke = $null
+    # A plan has one side: coming back to a plan brings its side back with it.
+    if ((@($p.Lines).Count -gt 0) -and $p.Side) { $script:Cloud.Side = $p.Side }
+    $script:Ui.MapCanvas.Cursor = [System.Windows.Forms.Cursors]::Cross
+    Update-PlanPanel
+}
+
+function Exit-PlanMode {
+    $p = $script:Plan
+    if ((-not $p.On) -or $p.Sending) { return }
+    $p.On = $false
+    $p.Stroke = $null
+    $p.Pick = $null
+    $p.PickHit = $null
+    $p.Hot = -1
+    try { $script:Ui.PlanPicker.Close() } catch { }
+    $script:Ui.MapCanvas.Cursor = [System.Windows.Forms.Cursors]::Default
+    Update-PlanPanel
+}
+
+# Every change to the lines or actions is one step Undo can take back, Clear included.
+# An action's detail is typed into the action itself, so Undo never brings back an older wording.
+function Set-PlanState {
+    param($Lines, [string]$Side, $Actions)
+    $p = $script:Plan
+    [void]$p.Undo.Add(@{ Lines = $p.Lines; Side = $p.Side; Actions = $p.Actions })
+    if ($p.Undo.Count -gt 100) { $p.Undo.RemoveAt(0) }
+    $p.Lines = @($Lines)
+    if ($p.Lines.Count -gt 0) { $p.Side = $Side } else { $p.Side = '' }
+    $p.Actions = @($Actions)
+    $p.Msg = ''
+    $p.Pick = $null
+    $p.Hot = -1
+    Update-PlanPanel
+}
+
+function Undo-PlanStep {
+    $p = $script:Plan
+    if ($p.Sending -or ($p.Undo.Count -eq 0)) { return }
+    $u = $p.Undo[$p.Undo.Count - 1]
+    $p.Undo.RemoveAt($p.Undo.Count - 1)
+    $p.Lines = @($u.Lines); $p.Side = [string]$u.Side; $p.Actions = @($u.Actions)
+    $p.Msg = ''; $p.Pick = $null; $p.Hot = -1
+    if ($p.On -and ($p.Lines.Count -gt 0) -and $p.Side) { $script:Cloud.Side = $p.Side }
+    Update-PlanPanel
+}
+
+function Clear-PlanLines {
+    $p = $script:Plan
+    if ($p.Sending -or (@($p.Lines).Count -eq 0)) { return }
+    Set-PlanState @() '' @()
+}
+
+# A screen point on the canvas to field inches, clamped to the wall, or $null when
+# it is outside the drawing (above it, or down in the key).
+function Get-PlanFieldPoint {
+    param([double]$Px, [double]$Py)
+    $v = $script:PlanView
+    if (($null -eq $v) -or ($Py -lt $v.Top) -or ($Py -gt $v.Bottom)) { return $null }
+    $w = [double]$v.Wall
+    $x = [math]::Max((0.0 - $w), [math]::Min($w, ($Px - $v.Ox) / $v.Sc)) + 0.0
+    $y = [math]::Max((0.0 - $w), [math]::Min($w, ($v.Oy - $Py) / $v.Sc)) + 0.0
+    return @{ X = $x; Y = $y }
+}
+
+function Start-PlanStroke {
+    param([double]$Px, [double]$Py)
+    $p = $script:Plan
+    if ((-not $p.On) -or $p.Sending) { return }
+    $pt = Get-PlanFieldPoint $Px $Py
+    if ($null -eq $pt) { return }
+    $p.Stroke = @{
+        X = (New-Object 'System.Collections.Generic.List[double]'); Y = (New-Object 'System.Collections.Generic.List[double]')
+        P = (New-Object 'System.Collections.Generic.List[System.Drawing.PointF]'); Sx = $Px; Sy = $Py
+    }
+    Add-PlanStrokeRaw $pt $Px $Py
+    try { $script:Ui.MapCanvas.Capture = $true } catch { }
+    $p.StrokeLost = $false
+    $script:Ui.MapCanvas.Invalidate()
+}
+
+function Add-PlanStrokeRaw {
+    param($Pt, [double]$Px, [double]$Py)
+    $s = $script:Plan.Stroke
+    $s.X.Add([double]$Pt.X); $s.Y.Add([double]$Pt.Y)
+    # The screen copy is drawn while dragging. The field does not move during a drag.
+    $v = $script:PlanView
+    $s.P.Add([System.Drawing.PointF]::new([single]($v.Ox + $Pt.X * $v.Sc), [single]($v.Oy - $Pt.Y * $v.Sc)))
+}
+
+# A drag that lost its mouse: the half-drawn line is thrown away, and nothing is added.
+function Stop-PlanStroke {
+    $p = $script:Plan
+    $p.Stroke = $null
+    $p.StrokeLost = $false
+    try { $script:Ui.MapCanvas.Capture = $false } catch { }
+    $script:Ui.MapCanvas.Invalidate()
+}
+
+# Points under 1.5 px apart add nothing, and a stroke stops growing at 20000 points.
+function Add-PlanStrokePoint {
+    param([double]$Px, [double]$Py)
+    $s = $script:Plan.Stroke
+    if ($null -eq $s) { return }
+    $v = $script:PlanView
+    $x = [math]::Max((0.0 - $v.Wall), [math]::Min($v.Wall, ($Px - $v.Ox) / $v.Sc)) + 0.0
+    $y = [math]::Max((0.0 - $v.Wall), [math]::Min($v.Wall, ($v.Oy - $Py) / $v.Sc)) + 0.0
+    $n = $s.X.Count
+    $dx = $x - $s.X[$n - 1]; $dy = $y - $s.Y[$n - 1]
+    if (($n -ge 20000) -or ([math]::Sqrt($dx * $dx + $dy * $dy) -lt (1.5 * $script:Scale / $v.Sc))) { return }
+    Add-PlanStrokeRaw @{ X = $x; Y = $y } $Px $Py
+    $script:Ui.MapCanvas.Invalidate()
+}
+
+# The end of a drag. Under 1 in of movement (or 6 px, whichever is more) it is a
+# click, which picks a spot on a line and never draws.
+function Complete-PlanStroke {
+    param([double]$Px, [double]$Py)
+    $p = $script:Plan
+    $s = $p.Stroke
+    if ($null -eq $s) { return }
+    Add-PlanStrokePoint $Px $Py
+    $p.Stroke = $null
+    $p.StrokeLost = $false
+    try { $script:Ui.MapCanvas.Capture = $false } catch { }
+    $v = $script:PlanView
+    $xs = $s.X.ToArray(); $ys = $s.Y.ToArray()
+    $moved = 0.0
+    for ($i = 1; $i -lt $xs.Length; $i++) { $moved += [math]::Sqrt(($xs[$i] - $xs[$i - 1]) * ($xs[$i] - $xs[$i - 1]) + ($ys[$i] - $ys[$i - 1]) * ($ys[$i] - $ys[$i - 1])) }
+    $slop = [math]::Max((Get-PlanLimits).MinLen, (6.0 * $script:Scale / $v.Sc))
+    if ($moved -lt $slop) {
+        $script:Ui.MapCanvas.Invalidate()
+        [void](Invoke-PlanTap $xs[0] $ys[0] $s.Sx $s.Sy)
+        return
+    }
+    $line = ConvertTo-PlanLine $xs $ys
+    if ($null -eq $line) { $script:Ui.MapCanvas.Invalidate(); return }
+    $r = Add-PlanLine $p.Lines $line
+    if ($r.Error) {
+        $p.Msg = $r.Error; $p.MsgKind = 'warn'
+        Update-PlanPanel
+        return
+    }
+    $side = $p.Side
+    if (@($p.Lines).Count -eq 0) { $side = [string]$script:Cloud.Side }
+    Set-PlanState $r.Lines $side $p.Actions
+}
+
+# A click near a line opens the action menu beside it; a click near nothing says
+# what to do. Reach is 4 in, or 24 px when that is more, so a line is easy to hit.
+# Returns the spot, or $null.
+function Invoke-PlanTap {
+    param([double]$Fx, [double]$Fy, [double]$Px, [double]$Py)
+    $p = $script:Plan
+    if ($p.Sending -or (@($p.Lines).Count -eq 0)) { return $null }
+    $reach = [math]::Max(4.0, (24.0 * $script:Scale / $script:PlanView.Sc))
+    $hit = Find-PlanSnap $p.Lines $Fx $Fy $reach
+    if ($null -eq $hit) {
+        $p.Msg = 'Click on a line to add what the robot does there.'; $p.MsgKind = 'idle'
+        Update-PlanPanel
+        return $null
+    }
+    $p.Msg = ''
+    $p.Pick = $hit
+    $p.PickHit = $hit
+    Update-PlanPanel
+    $script:Ui.PlanPickTitle.Text = Get-PlanActionPlace $hit $p.Lines
+    # The menu opens beside the spot, so the spot stays in view. Not in -SelfTest, where no one can pick.
+    if (-not $SelfTest) { $script:Ui.PlanPicker.Show($script:Ui.MapCanvas, (New-Object System.Drawing.Point([int]($Px + (Px 14)), [int]($Py + (Px 10))))) }
+    return $hit
+}
+
+function Add-PlanAction {
+    param([string]$Type)
+    $p = $script:Plan
+    $hit = $p.PickHit
+    $p.PickHit = $null
+    $p.Pick = $null
+    if (($null -eq $hit) -or $p.Sending -or ($null -eq (Get-PlanActionType $Type))) { $script:Ui.MapCanvas.Invalidate(); return }
+    $max = (Get-PlanLimits).Actions
+    if (@($p.Actions).Count -ge $max) {
+        $p.Msg = 'A plan holds up to ' + $max + ' actions. Remove one to add another.'; $p.MsgKind = 'warn'
+        Update-PlanPanel
+        return
+    }
+    $new = @{ Type = $Type; Line = [int]$hit.Line; Along = [double]$hit.Along; AtX = [double]$hit.AtX; AtY = [double]$hit.AtY; Detail = '' }
+    $sorted = @(Sort-PlanActions (@($p.Actions) + @($new)))
+    Set-PlanState $p.Lines $p.Side $sorted
+    # The new action is picked in the list, so its detail can be typed straight away.
+    for ($i = 0; $i -lt $sorted.Count; $i++) { if ([object]::ReferenceEquals($sorted[$i], $new)) { $p.Hot = $i } }
+    Update-PlanPanel
+}
+
+function Remove-PlanAction {
+    param([int]$Index)
+    $p = $script:Plan
+    $all = @($p.Actions)
+    if ($p.Sending -or ($Index -lt 0) -or ($Index -ge $all.Count)) { return }
+    $keep = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt $all.Count; $i++) { if ($i -ne $Index) { [void]$keep.Add($all[$i]) } }
+    Set-PlanState $p.Lines $p.Side @($keep.ToArray())
+}
+
+function Select-PlanAction {
+    $p = $script:Plan
+    if ($p.Filling) { return }
+    $lv = $script:Ui.PlanActList
+    if ($lv.SelectedItems.Count -eq 0) { $p.Hot = -1 } else { $p.Hot = [int]$lv.SelectedItems[0].Tag }
+    Update-PlanDetailBox
+    $script:Ui.MapCanvas.Invalidate()
+}
+
+# The detail box edits the picked action. Typing is not an Undo step.
+function Set-PlanDetail {
+    $p = $script:Plan
+    if ($p.Filling -or $p.Sending) { return }
+    $all = @($p.Actions)
+    if (($p.Hot -lt 0) -or ($p.Hot -ge $all.Count)) { return }
+    $a = $all[$p.Hot]
+    $a.Detail = [string]$script:Ui.PlanDetailBox.Text
+    $lv = $script:Ui.PlanActList
+    foreach ($item in $lv.Items) { if ([int]$item.Tag -eq $p.Hot) { $item.SubItems[1].Text = (Get-PlanActionText $a) } }
+}
+
+function Get-PlanActionText {
+    param($A)
+    $t = Get-PlanActionType ([string]$A.Type)
+    $label = [string]$A.Type
+    if ($null -ne $t) { $label = $t.Label }
+    $d = ([string]$A.Detail).Trim()
+    if ($d) { $label += ': ' + $d }
+    return $label
+}
+
+function Update-PlanDetailBox {
+    $p = $script:Plan
+    $ui = $script:Ui
+    $all = @($p.Actions)
+    $has = ($p.Hot -ge 0) -and ($p.Hot -lt $all.Count)
+    $p.Filling = $true
+    try {
+        if ($has) { $want = [string]$all[$p.Hot].Detail } else { $want = '' }
+        if ($ui.PlanDetailBox.Text -ne $want) { $ui.PlanDetailBox.Text = $want }
+    } finally { $p.Filling = $false }
+    $ui.PlanDetailBox.Enabled = $has -and (-not $p.Sending)
+    $ui.PlanRemove.Enabled = $has -and (-not $p.Sending)
+}
+
+# Typing a name or note only clears an old message and turns Send on or off.
+function Update-PlanTyping {
+    $p = $script:Plan
+    if ($p.Filling) { return }
+    if (-not $p.Sending) { $p.Msg = '' }
+    Update-PlanPanel
+}
+
+# Fills the plan column from the plan: the count, the actions list, the message, and
+# which buttons work. Then lays the column out and redraws the field.
+function Update-PlanPanel {
+    $p = $script:Plan
+    $ui = $script:Ui
+    $c = $script:Colors
+    $lines = @($p.Lines)
+    $acts = @($p.Actions)
+    $n = $lines.Count
+    $busy = [bool]$p.Sending
+    $named = $ui.PlanNameBox.Text.Trim().Length -gt 0
+    if ($n -gt 0) { $ui.PlanOpenButton.Text = 'Continue plan' } else { $ui.PlanOpenButton.Text = 'Draw a plan' }
+    $ui.PlanUndo.Enabled = (-not $busy) -and ($p.Undo.Count -gt 0)
+    $ui.PlanClear.Enabled = (-not $busy) -and ($n -gt 0)
+    $ui.PlanDone.Enabled = -not $busy
+    $ui.PlanSend.Enabled = (-not $busy) -and ($n -gt 0) -and $named
+    if ($busy) { $ui.PlanSend.Text = 'Sending...' } else { $ui.PlanSend.Text = 'Send plan' }
+    $ui.PlanNameBox.ReadOnly = $busy
+    $ui.PlanNoteBox.ReadOnly = $busy
+    # The side holds while the plan has lines.
+    $sideFree = -not ($p.On -and ($n -gt 0))
+    $ui.MapSideL.Enabled = $sideFree
+    $ui.MapSideR.Enabled = $sideFree
+    $ui.PlanCount.Text = Get-PlanCountText $lines $acts.Count
+
+    # The actions list, in route order. Each row keeps its place in the plan in Tag.
+    if ($p.Hot -ge $acts.Count) { $p.Hot = -1 }
+    $p.Filling = $true
+    try {
+        $lv = $ui.PlanActList
+        $lv.BeginUpdate()
+        $lv.Items.Clear()
+        for ($i = 0; $i -lt $acts.Count; $i++) {
+            $a = $acts[$i]
+            $item = New-Object System.Windows.Forms.ListViewItem(([string]($i + 1)))
+            [void]$item.SubItems.Add((Get-PlanActionText $a))
+            [void]$item.SubItems.Add((Get-PlanActionPlace $a $lines))
+            $item.Tag = $i
+            [void]$lv.Items.Add($item)
+            if ($i -eq $p.Hot) { $item.Selected = $true; $item.EnsureVisible() }
+        }
+        $lv.EndUpdate()
+    } finally { $p.Filling = $false }
+    if ($acts.Count -gt 0) { $ui.PlanActLabel.Text = 'ACTIONS (' + $acts.Count + ')' } else { $ui.PlanActLabel.Text = 'ACTIONS' }
+    Update-PlanDetailBox
+
+    $msg = [string]$p.Msg
+    $kind = [string]$p.MsgKind
+    if ((-not $msg) -and ($n -gt 0) -and (-not $named)) { $msg = 'Name the plan to send it.'; $kind = 'idle' }
+    $ui.PlanMsg.Text = $msg
+    if ($kind -eq 'good') { $ui.PlanMsg.ForeColor = $c.Good }
+    elseif ($kind -eq 'warn') { $ui.PlanMsg.ForeColor = $c.Bad }
+    else { $ui.PlanMsg.ForeColor = $c.Muted }
+    Update-ViewButtons
+    if ($script:View -eq 'map') { Update-MapLayout }
+    $ui.MapCanvas.Invalidate()
+}
+
+# The plan column, from Top down to Bottom: heading and Done, name, note, the count,
+# the actions with their detail box, then the team code (only when none is saved),
+# the message, and Undo, Clear, and Send plan along the bottom. On a short window it
+# gives up room in steps, so nothing ever overlaps: first the subtitle, then the note
+# box's second line, then the ACTIONS heading, then the count line, then the note box,
+# and last the actions list itself (the Detail row still edits the newest action).
+function Update-PlanLayout {
+    param([int]$X, [int]$Top, [int]$W, [int]$Bottom)
+    $ui = $script:Ui
+    $p = $script:Plan
+
+    # From the bottom up: these always show.
+    $btnH = Px 34
+    $by = $Bottom - $btnH
+    $smallW = Px 72
+    $ui.PlanUndo.SetBounds($X, $by, $smallW, $btnH)
+    $ui.PlanClear.SetBounds(($X + $smallW + (Px 8)), $by, $smallW, $btnH)
+    $sendW = Px 120
+    $ui.PlanSend.SetBounds(($X + $W - $sendW), $by, $sendW, $btnH)
+    $low = $by - (Px 10)
+    $hasMsg = [bool]$ui.PlanMsg.Text
+    $ui.PlanMsg.Visible = $hasMsg
+    if ($hasMsg) {
+        $pref = $ui.PlanMsg.GetPreferredSize((New-Object System.Drawing.Size($W, 0)))
+        $mh = [math]::Min($pref.Height, (Px 48))
+        $ui.PlanMsg.SetBounds($X, ($low - $mh), $W, $mh)
+        $low -= $mh + (Px 8)
+    }
+    $needCode = -not [bool]$script:Cloud.Code
+    $ui.MapCodeBox.Visible = $needCode
+    $ui.MapCodeButton.Visible = $needCode
+    $ui.PlanCodeNote.Visible = $needCode
+    if ($needCode) {
+        $codeBtnW = Px 80
+        $ui.MapCodeBox.SetBounds($X, ($low - (Px 26)), ($W - $codeBtnW - (Px 8)), (Px 26))
+        $ui.MapCodeButton.SetBounds(($X + $W - $codeBtnW), ($low - (Px 26)), $codeBtnW, (Px 26))
+        $low -= (Px 26) + (Px 4)
+        $ui.PlanCodeNote.SetBounds($X, ($low - (Px 16)), $W, (Px 16))
+        $low -= (Px 16) + (Px 10)
+    }
+    $hasActs = @($p.Actions).Count -gt 0
+    $rowY = $low - (Px 26)
+
+    # How much the top part takes at each step, before anything is placed.
+    $subH = ($ui.PlanSub.GetPreferredSize((New-Object System.Drawing.Size($W, 0)))).Height
+    $countH = ($ui.PlanCount.GetPreferredSize((New-Object System.Drawing.Size($W, 0)))).Height
+    $level = 0
+    for (; $level -lt 6; $level++) {
+        $y = $Top + (Px 4) + (Px 26) + (Px 6)
+        if ($level -lt 1) { $y += $subH + (Px 10) }
+        $y += (Px 20) + (Px 26) + (Px 8)
+        if ($level -lt 5) {
+            $y += Px 20
+            if ($level -lt 2) { $y += (Px 46) + (Px 10) } else { $y += (Px 26) + (Px 8) }
+        }
+        if ($level -lt 4) { $y += $countH + (Px 12) }
+        if ($hasActs) {
+            if ($level -lt 3) { $y += Px 22 }
+            $y += (Px 40) + (Px 8)
+            if ($y -le $rowY) { break }
+        } elseif ($y -le $low) { break }
+    }
+
+    $y = $Top + (Px 4)
+    $doneW = Px 72
+    $ui.PlanDone.SetBounds(($X + $W - $doneW), $y, $doneW, (Px 26))
+    $ui.PlanLabel.SetBounds($X, ($y + (Px 5)), ($W - $doneW - (Px 8)), (Px 16))
+    $y += (Px 26) + (Px 6)
+    $ui.PlanSub.Visible = ($level -lt 1)
+    if ($level -lt 1) {
+        Set-WrappedLabel $ui.PlanSub $X $y $W
+        $y += $ui.PlanSub.Height + (Px 10)
+    }
+    $ui.PlanNameLabel.SetBounds($X, $y, $W, (Px 18))
+    $y += Px 20
+    $ui.PlanNameBox.SetBounds($X, $y, $W, (Px 26))
+    $y += (Px 26) + (Px 8)
+    $ui.PlanNoteLabel.Visible = ($level -lt 5)
+    $ui.PlanNoteBox.Visible = ($level -lt 5)
+    if ($level -lt 5) {
+        $ui.PlanNoteLabel.SetBounds($X, $y, $W, (Px 18))
+        $y += Px 20
+        if ($level -lt 2) {
+            $ui.PlanNoteBox.SetBounds($X, $y, $W, (Px 46))
+            $y += (Px 46) + (Px 10)
+        } else {
+            $ui.PlanNoteBox.SetBounds($X, $y, $W, (Px 26))
+            $y += (Px 26) + (Px 8)
+        }
+    }
+    $ui.PlanCount.Visible = ($level -lt 4)
+    if ($level -lt 4) {
+        Set-WrappedLabel $ui.PlanCount $X $y $W
+        $y += $ui.PlanCount.Height + (Px 12)
+    }
+
+    # The actions fill what is left between the count and the bottom.
+    foreach ($ctl in @($ui.PlanActLabel, $ui.PlanActList, $ui.PlanDetailLabel, $ui.PlanDetailBox, $ui.PlanRemove)) { $ctl.Visible = $hasActs }
+    if ($hasActs) {
+        $ui.PlanActLabel.Visible = ($level -lt 3)
+        if ($level -lt 3) {
+            $ui.PlanActLabel.SetBounds($X, $y, $W, (Px 16))
+            $y += Px 22
+        }
+        $labelW = Px 44
+        $removeW = Px 72
+        $ui.PlanDetailLabel.SetBounds($X, ($rowY + (Px 4)), $labelW, (Px 18))
+        $ui.PlanDetailBox.SetBounds(($X + $labelW), $rowY, ($W - $labelW - $removeW - (Px 8)), (Px 26))
+        $ui.PlanRemove.SetBounds(($X + $W - $removeW), $rowY, $removeW, (Px 26))
+        $listH = $rowY - (Px 8) - $y
+        # Under a heading and one row there is no point in a list.
+        $ui.PlanActList.Visible = ($listH -ge (Px 40))
+        if ($listH -ge (Px 40)) { $ui.PlanActList.SetBounds($X, $y, $W, $listH) }
+    }
+    $script:PlanLayoutLevel = $level
+}
+
+# The plan as it would be sent right now. Build is the tag of the prediction on the
+# field, or none when no prediction is showing.
+function Get-PlanBodyNow {
+    $p = $script:Plan
+    $build = ''
+    if (($null -ne (Get-CloudPredicted)) -and ($null -ne $script:Cloud.Data) -and ($null -ne $script:Cloud.Data.Sim)) { $build = [string]$script:Cloud.Data.Sim.Tag }
+    return (New-PlanBody -Name $script:Ui.PlanNameBox.Text -Note $script:Ui.PlanNoteBox.Text -Side $p.Side -Build $build -Lines $p.Lines -Actions $p.Actions)
+}
+
+# Send plan. A plan that breaks a limit never goes out, and a failed send never
+# touches the drawing. The team code is the one saved for the Route Map.
+function Send-PlanFromMap {
+    $p = $script:Plan
+    if ((-not $p.On) -or $p.Sending) { return }
+    $body = Get-PlanBodyNow
+    $bad = Test-PlanBody $body
+    if ($bad) { $p.Msg = $bad; $p.MsgKind = 'warn'; Update-PlanPanel; return }
+    Initialize-Cloud
+    $code = [string]$script:Cloud.Code
+    if (-not $code) { Complete-PlanSend @{ Status = 'error'; Detail = 'enter the team code first' }; return }
+    $url = Get-PlansUrl $script:ResultsUrl
+    if (-not $url) { Complete-PlanSend @{ Status = 'error'; Detail = 'no relay address yet, try again in a moment' }; return }
+    # A late 401 clears the saved code only if it is still the code this send used.
+    $p.SentCode = $code
+    $p.Sending = $true
+    $p.Msg = ''
+    $p.Pick = $null
+    $p.PickHit = $null
+    Update-PlanPanel
+    try {
+        Start-BgJob $PlanSendBody @{ Url = $url; Code = $code; Body = (ConvertTo-PlanJson $body); Client = ('windows-uploader ' + $script:UploaderVersion) } {
+            param($r)
+            Complete-PlanSend $r
+        }
+    } catch {
+        Complete-PlanSend @{ Status = 'error'; Detail = 'the send could not start' }
+    }
+}
+
+# The relay's answer. A good send clears the drawing; anything else keeps it. A
+# refused code is forgotten the same way the map forgets it, so the code box comes back.
+function Complete-PlanSend {
+    param($R)
+    $p = $script:Plan
+    $ui = $script:Ui
+    $p.Sending = $false
+    $m = Get-PlanSendMessage $R
+    $cl = $script:Cloud
+    if (([string]$R.Status -eq 'unauthorized') -and ((-not $cl.Code) -or ($cl.Code -ceq [string]$p.SentCode))) {
+        try { Clear-TeamCode } catch { }
+        $cl.Code = ''; $cl.Unauthorized = $true; $cl.Offline = $false; $cl.Error = ''
+        Update-CloudControls
+    }
+    $p.SentCode = ''
+    if ($m.Ok) {
+        $p.Lines = @(); $p.Actions = @(); $p.Side = ''; $p.Undo.Clear(); $p.Hot = -1
+        $p.Filling = $true
+        try { $ui.PlanNameBox.Text = ''; $ui.PlanNoteBox.Text = '' } finally { $p.Filling = $false }
+    }
+    $p.Msg = $m.Text
+    if ($m.Ok) { $p.MsgKind = 'good' } else { $p.MsgKind = 'warn' }
+    Add-LogText ('Route Map: ' + $m.Text)
+    Update-PlanPanel
 }
 
 # The field with every point reflected for the Right side (the same y = -x reflection
@@ -3357,6 +4573,10 @@ function Show-MapShape {
             [System.Drawing.PointF]::new([single]($X - $R), [single]$Y))
         $G.FillPolygon($Pal.AccentBrush, $pts)
         $G.DrawPolygon($Pal.WhitePen, $pts)
+    } elseif ($Kind -eq 'act') {
+        # A proposed plan's action, in the key.
+        $G.FillEllipse($Pal.ActBrush, $x0, $y0, $d, $d)
+        $G.DrawEllipse($Pal.WhitePen, $x0, $y0, $d, $d)
     } elseif ($Kind -eq 'push') {
         $G.DrawLine($Pal.CrossPen, [single]($X - $R), [single]$Y, [single]($X + $R), [single]$Y)
         $G.DrawLine($Pal.CrossPen, [single]$X, [single]($Y - $R), [single]$X, [single]($Y + $R))
@@ -3452,12 +4672,18 @@ function Show-RouteMapCanvas {
         $pal.WarnPen = & $mkPen $c.Warn (Px 2)
         $pal.BadLine = & $mkPen $c.Bad (Px 2)
         $pal.LinePen = & $mkPen $c.Line $thin
+        $pal.PlanPen = & $mkPen $c.Plan (Px 3)
+        $pal.ActBrush = New-Object System.Drawing.SolidBrush($c.Act)
 
         # What to draw: the selected recording, framed to its path unless Whole field is on.
+        # While a plan is drawn: the whole field with only the prediction under the lines,
+        # so no recording is mistaken for part of the plan.
+        $drawing = [bool]$script:Plan.On
         $sel = $null
-        if (($m.Selected -ge 0) -and ($m.Selected -lt $m.Sessions.Count)) { $sel = Get-ViewSession $m.Sessions[$m.Selected] $vside }
+        if ((-not $drawing) -and ($m.Selected -ge 0) -and ($m.Selected -lt $m.Sessions.Count)) { $sel = Get-ViewSession $m.Sessions[$m.Selected] $vside }
         $pred = Get-CloudPredicted
-        $clean = Get-CloudClean
+        $clean = $null
+        if (-not $drawing) { $clean = Get-CloudClean }
         $boxes = New-Object System.Collections.ArrayList
         if ($null -ne $sel) { [void]$boxes.Add((Get-SessionBounds $sel)) }
         if ($null -ne $pred) { [void]$boxes.Add((Get-SessionBounds $pred)) }
@@ -3478,15 +4704,18 @@ function Show-RouteMapCanvas {
             [void]$lineItems.Add(@('rawline', $rawText))
         }
         if ($null -ne $clean) { [void]$lineItems.Add(@('cleanline', 'Clean')) }
+        if ($drawing) { [void]$lineItems.Add(@('planline', 'Proposed plan')); [void]$lineItems.Add(@('act', 'Action')) }
         $legendExtra = 0.0
-        if ($lineItems.Count -gt 0) { $legendExtra = [double](Px 20) }
+        # While drawing, the key has no row of recording marks, so the line row takes its place.
+        if (($lineItems.Count -gt 0) -and (-not $drawing)) { $legendExtra = [double](Px 20) }
         $areaTop = [double](Px 36)
         $areaBottom = $H - (Px 52) - $legendExtra
         $areaH = $areaBottom - $areaTop
-        $vp = Get-MapViewport -Width $W -Height $areaH -Pad (Px 22) -Whole ([bool]$m.Whole) -Bounds $bounds -Wall $field.Wall
+        $vp = Get-MapViewport -Width $W -Height $areaH -Pad (Px 22) -Whole (([bool]$m.Whole) -or $drawing) -Bounds $bounds -Wall $field.Wall
         $sc = [double]$vp.Scale
         $ox = $W / 2.0 - $vp.Cx * $sc
         $oy = $areaTop + $areaH / 2.0 + $vp.Cy * $sc
+        $script:PlanView = @{ Ox = $ox; Oy = $oy; Sc = $sc; Top = $areaTop; Bottom = $areaBottom; Wall = [double]$field.Wall }
 
         $wall = [double]$field.Wall
         $left = $ox - $wall * $sc
@@ -3536,6 +4765,7 @@ function Show-RouteMapCanvas {
 
         # Recordings: the others faint, the selected one strong.
         $drawn = 0
+        if ($drawing) { $drawn = 30 }
         for ($i = $m.Sessions.Count - 1; ($i -ge 0) -and ($drawn -lt 30); $i--) {
             if ($i -eq $m.Selected) { continue }
             $pts = Get-ScreenPath $m.Sessions[$i] 160 $ox $oy $sc ($vside -eq 'R')
@@ -3610,6 +4840,7 @@ function Show-RouteMapCanvas {
                 $G.DrawLine($pal.PathPen, $fr, $fl)
             }
         }
+        if ($drawing) { Show-PlanLayer $G $ox $oy $sc }
         # Which way is the station? Under the bottom wall when there is room.
         $below = $top + $side + (Px 2)
         if ((($below + (Px 15)) -le $areaBottom) -and ($vside -ne 'R')) {
@@ -3621,7 +4852,12 @@ function Show-RouteMapCanvas {
         # Caption (top) and legend (bottom).
         $caption = ''
         $note = ''
-        if ($null -ne $sel) {
+        if ($drawing) {
+            $caption = 'Proposed plan'
+            $planSide = [string]$script:Plan.Side
+            if (-not $planSide) { $planSide = $vside }
+            if ($planSide -eq 'R') { $note = 'Right side' } else { $note = 'Left side' }
+        } elseif ($null -ne $sel) {
             $caption = (Get-KindLabel ([string]$sel.Kind) 'L') + '   ' + (Format-MapWhen ([string]$sel.When)) + '   ' + $sel.Rows + ' rows'
             if ([string]$sel.WasSide -ne $vside) {
                 if ($sel.WasSide -eq 'R') { $note = 'Recorded on the right side, shown mirrored' } else { $note = 'Recorded on the left side, shown mirrored' }
@@ -3640,7 +4876,7 @@ function Show-RouteMapCanvas {
             $nw = $G.MeasureString($note, $f.Small).Width
             $G.DrawString($note, $f.Small, $pal.MutedBrush, [single]($W - $nw - (Px 14)), [single](Px 11))
         }
-        if (($m.Sessions.Count -eq 0) -and $m.Loaded -and (-not $m.Loading) -and ($null -eq $pred)) {
+        if (($m.Sessions.Count -eq 0) -and $m.Loaded -and (-not $m.Loading) -and ($null -eq $pred) -and (-not $drawing)) {
             $cardW = [double](Px 300)
             $cardH = [double](Px 64)
             $card = [System.Drawing.RectangleF]::new([single]($W / 2.0 - $cardW / 2.0), [single]($areaTop + $areaH / 2.0 - $cardH / 2.0), [single]$cardW, [single]$cardH)
@@ -3657,9 +4893,9 @@ function Show-RouteMapCanvas {
         $r = [double](Px 5)
         $rows = New-Object System.Collections.ArrayList
         if ($lineItems.Count -gt 0) { [void]$rows.Add($lineItems.ToArray()) }
-        [void]$rows.Add(@(@('drop', 'Drop'), @('pin', 'Pin'), @('stack', 'Stack'), @('toggle', 'Toggle'), @('push', 'Push')))
+        if (-not $drawing) { [void]$rows.Add(@(@('drop', 'Drop'), @('pin', 'Pin'), @('stack', 'Stack'), @('toggle', 'Toggle'), @('push', 'Push'))) }
         [void]$rows.Add(@(@('alliance', 'Alliance goal'), @('neutral', 'Neutral goal'), @('opponent', 'Opponent goal'), @('line', 'Autonomous Line')))
-        $linePens = @{ line = $pal.AutoPen; predline = $pal.PredPen; rawline = $pal.PathPen; cleanline = $pal.CleanPen }
+        $linePens = @{ line = $pal.AutoPen; predline = $pal.PredPen; rawline = $pal.PathPen; cleanline = $pal.CleanPen; planline = $pal.PlanPen }
         $rowY = $H - (Px 44) - $legendExtra
         foreach ($row in $rows) {
             $lx = [double](Px 14)
@@ -3682,6 +4918,121 @@ function Show-RouteMapCanvas {
         }
     } finally {
         foreach ($o in @($pal.Values)) { try { $o.Dispose() } catch { } }
+    }
+}
+
+# The plan on the field, sized in pixels like the web map's marks: each line with a
+# dot where it starts, an arrow where it ends, and its number; each action as a
+# lettered badge on a short stem from its true point; the spot the action menu is
+# open at; and the line being dragged right now.
+function Show-PlanLayer {
+    param($G, [double]$Ox, [double]$Oy, [double]$Sc)
+    $c = $script:Colors
+    $p = $script:Plan
+    $k = [double]$script:Scale
+    $res = @{}
+    $fmt = New-Object System.Drawing.StringFormat
+    try {
+        $fmt.Alignment = [System.Drawing.StringAlignment]::Center
+        $fmt.LineAlignment = [System.Drawing.StringAlignment]::Center
+        $res.Pen = New-Object System.Drawing.Pen($c.Plan, [single](3.0 * $k))
+        $res.Draft = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(178, $c.Plan), [single](3.0 * $k))
+        foreach ($pen in @($res.Pen, $res.Draft)) {
+            $pen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+            $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+            $pen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+        }
+        $res.PlanBrush = New-Object System.Drawing.SolidBrush($c.Plan)
+        $res.ActBrush = New-Object System.Drawing.SolidBrush($c.Act)
+        $res.Edge = New-Object System.Drawing.Pen([System.Drawing.Color]::White, [single](1.5 * $k))
+        $res.Stem = New-Object System.Drawing.Pen($c.Act, [single](1.25 * $k))
+        $res.HotPen = New-Object System.Drawing.Pen($c.Text, [single](2.0 * $k))
+        $res.PickFill = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(178, [System.Drawing.Color]::White))
+        $res.PickPen = New-Object System.Drawing.Pen($c.Act, [single](2.0 * $k))
+        $toPt = { param($x, $y) [System.Drawing.PointF]::new([single]($Ox + $x * $Sc), [single]($Oy - $y * $Sc)) }
+        $disc = {
+            param($Brush, $Pen, [double]$Cx, [double]$Cy, [double]$R)
+            $G.FillEllipse($Brush, [single]($Cx - $R), [single]($Cy - $R), [single](2.0 * $R), [single](2.0 * $R))
+            if ($null -ne $Pen) { $G.DrawEllipse($Pen, [single]($Cx - $R), [single]($Cy - $R), [single](2.0 * $R), [single](2.0 * $R)) }
+        }
+        $lines = @($p.Lines)
+        foreach ($l in $lines) {
+            $pts = New-Object 'System.Drawing.PointF[]' $l.X.Length
+            for ($i = 0; $i -lt $l.X.Length; $i++) { $pts[$i] = & $toPt $l.X[$i] $l.Y[$i] }
+            if ($pts.Length -ge 2) { $G.DrawLines($res.Pen, $pts) }
+        }
+        foreach ($l in $lines) {
+            $n = $l.X.Length
+            $a = & $toPt $l.X[0] $l.Y[0]
+            & $disc $res.PlanBrush $res.Edge $a.X $a.Y (4.5 * $k)
+            # The arrow points the way the last 14 px of the line runs.
+            $z = & $toPt $l.X[$n - 1] $l.Y[$n - 1]
+            $bk = Get-PlanArrowBack $l (14.0 * $k / $Sc)
+            $b = & $toPt $bk[0] $bk[1]
+            $dx = [double]($z.X - $b.X); $dy = [double]($z.Y - $b.Y)
+            $dl = [math]::Sqrt($dx * $dx + $dy * $dy)
+            if ($dl -lt 0.001) { $dx = 1.0; $dy = 0.0 } else { $dx /= $dl; $dy /= $dl }
+            $bx = $z.X - 13.0 * $k * $dx; $by = $z.Y - 13.0 * $k * $dy
+            $tri = [System.Drawing.PointF[]]@(
+                $z,
+                [System.Drawing.PointF]::new([single]($bx - 7.0 * $k * $dy), [single]($by + 7.0 * $k * $dx)),
+                [System.Drawing.PointF]::new([single]($bx + 7.0 * $k * $dy), [single]($by - 7.0 * $k * $dx)))
+            $G.FillPolygon($res.PlanBrush, $tri)
+            $G.DrawPolygon($res.Edge, $tri)
+        }
+        # Line numbers above and to the right of each start, on top of every line.
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            $a = & $toPt $lines[$i].X[0] $lines[$i].Y[0]
+            $label = [string]($i + 1)
+            $tw = [math]::Max(15.0, $label.Length * 6.6 + 8.0) * $k
+            $th = 15.0 * $k
+            $tx = $a.X + 12.0 * $k - $tw / 2.0
+            $ty = $a.Y - 12.0 * $k - $th / 2.0
+            $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+            try {
+                $rr = 7.0 * $k
+                $path.AddArc([single]$tx, [single]$ty, [single]$rr, [single]$rr, 180, 90)
+                $path.AddArc([single]($tx + $tw - $rr), [single]$ty, [single]$rr, [single]$rr, 270, 90)
+                $path.AddArc([single]($tx + $tw - $rr), [single]($ty + $th - $rr), [single]$rr, [single]$rr, 0, 90)
+                $path.AddArc([single]$tx, [single]($ty + $th - $rr), [single]$rr, [single]$rr, 90, 90)
+                $path.CloseFigure()
+                $G.FillPath($res.PlanBrush, $path)
+            } finally { $path.Dispose() }
+            $G.DrawString($label, $script:Fonts.PlanTag, [System.Drawing.Brushes]::White, [System.Drawing.RectangleF]::new([single]$tx, [single]$ty, [single]$tw, [single]$th), $fmt)
+        }
+        # Actions. The stem keeps the true point visible when markers fan out.
+        $acts = @($p.Actions)
+        if ($acts.Count -gt 0) {
+            $offs = Get-PlanMarkerOffsets $acts ($k / $Sc)
+            for ($i = 0; $i -lt $acts.Count; $i++) {
+                $act = $acts[$i]
+                $t = Get-PlanActionType ([string]$act.Type)
+                $glyph = '?'
+                if ($null -ne $t) { $glyph = $t.Glyph }
+                $at = & $toPt ([double]$act.AtX) ([double]$act.AtY)
+                $mx = $at.X + $offs[$i].Dx * $k
+                $my = $at.Y + $offs[$i].Dy * $k
+                $G.DrawLine($res.Stem, $at.X, $at.Y, [single]$mx, [single]($my - 8.0 * $k))
+                & $disc $res.ActBrush $null $at.X $at.Y (2.5 * $k)
+                $ring = $res.Edge
+                if ($i -eq $p.Hot) { $ring = $res.HotPen }
+                & $disc $res.ActBrush $ring $mx $my (8.5 * $k)
+                $G.DrawString($glyph, $script:Fonts.Glyph, [System.Drawing.Brushes]::White, [System.Drawing.RectangleF]::new([single]($mx - 9.0 * $k), [single]($my - 9.0 * $k), [single](18.0 * $k), [single](18.0 * $k)), $fmt)
+            }
+        }
+        if ($null -ne $p.Pick) {
+            $pk = & $toPt ([double]$p.Pick.AtX) ([double]$p.Pick.AtY)
+            & $disc $res.PickFill $res.PickPen $pk.X $pk.Y (8.0 * $k)
+            & $disc $res.ActBrush $null $pk.X $pk.Y (3.5 * $k)
+        }
+        $st = $p.Stroke
+        if ($null -ne $st) {
+            if ($st.P.Count -ge 2) { $G.DrawLines($res.Draft, $st.P.ToArray()) }
+            elseif ($st.P.Count -eq 1) { & $disc $res.PlanBrush $res.Edge $st.P[0].X $st.P[0].Y (4.5 * $k) }
+        }
+    } finally {
+        foreach ($o in @($res.Values)) { try { $o.Dispose() } catch { } }
+        $fmt.Dispose()
     }
 }
 
@@ -3973,6 +5324,11 @@ function Start-BgJob {
 
 # Called every 100 ms by JobTimer (UI thread).
 function Update-Jobs {
+    # 0. A plan stroke whose mouse was taken away (see MouseCaptureChanged) and never released here.
+    if ($script:Plan.StrokeLost) {
+        $script:Plan.StrokeLost = $false
+        if ($null -ne $script:Plan.Stroke) { Stop-PlanStroke }
+    }
     # 1. Move new log lines from the background queue into the Details box.
     $line = $null
     $sb = New-Object System.Text.StringBuilder
@@ -5000,6 +6356,187 @@ if ($SelfTest) {
         Write-Host ('  Route Map cloud data: FAIL (' + ($cloudFails -join '; ') + ')')
     }
 
+    # 0c. Route Map plans: the draw tool's rules and the plan body. The expected answers
+    #     are what web/map.html's own functions give for the same input, so the relay gets
+    #     the same plan from either. The send talks to a listener on the loopback address.
+    $planFails = New-Object System.Collections.Generic.List[string]
+    $expectP = { param($ok, $what) if (-not $ok) { [void]$planFails.Add($what) } }
+    $newLine = { param($Pts) $xs = New-Object 'double[]' $Pts.Count; $ys = New-Object 'double[]' $Pts.Count; for ($i = 0; $i -lt $Pts.Count; $i++) { $xs[$i] = $Pts[$i][0]; $ys[$i] = $Pts[$i][1] }; @{ X = $xs; Y = $ys } }
+    $lineText = { param($L) (@(for ($i = 0; $i -lt $L.X.Length; $i++) { '[' + $L.X[$i] + ',' + $L.Y[$i] + ']' }) -join ',') }
+    try {
+        # Rounding: halves go up (21.125 is exact in binary), and there is no -0.
+        & $expectP (((Get-PlanRound 21.125) -eq 21.13) -and ((Get-PlanRound -2.125) -eq -2.12) -and ((Get-PlanRound -52.125) -eq -52.12) -and ((Get-PlanRound 5.555) -eq 5.56)) 'rounding should match JavaScript Math.round'
+        & $expectP ([BitConverter]::DoubleToInt64Bits((Get-PlanRound -0.004)) -eq 0) 'rounding: -0.004 should become 0, not -0'
+
+        # A drag: a nearly straight run, then a right-angle turn, simplifies to its three corners.
+        $sx = New-Object 'System.Collections.Generic.List[double]'
+        $sy = New-Object 'System.Collections.Generic.List[double]'
+        for ($i = 0; $i -lt 50; $i++) { $sx.Add($i * 0.5); $sy.Add(0.0001 * $i) }
+        for ($i = 1; $i -le 40; $i++) { $sx.Add(24.5); $sy.Add($i * 0.5) }
+        $drag = ConvertTo-PlanLine $sx.ToArray() $sy.ToArray()
+        & $expectP (($null -ne $drag) -and ((& $lineText $drag) -eq '[0,0],[24.5,0],[24.5,20]')) ('stroke: expected [0,0],[24.5,0],[24.5,20], got ' + $(if ($null -ne $drag) { & $lineText $drag } else { 'nothing' }))
+        & $expectP ($null -eq (ConvertTo-PlanLine ([double[]]@(0, 0.5)) ([double[]]@(0, 0.5)))) 'stroke: a drag under 1 in should draw nothing'
+
+        # The limits, with the page's sentences.
+        $two = & $newLine @(@(0, 0), @(10, 0))
+        $r1 = Add-PlanLine @() $two
+        & $expectP ((-not $r1.Error) -and ($r1.Lines.Count -eq 1)) 'add line: the first line was not added'
+        $fifty = @(for ($i = 0; $i -lt 50; $i++) { $two })
+        $r50 = Add-PlanLine $fifty $two
+        & $expectP (($r50.Error -eq 'A plan holds up to 50 lines. Undo or clear a line to draw another.') -and ($r50.Lines.Count -eq 50)) 'add line: the 51st line should be refused'
+        $bigPts = @(for ($i = 0; $i -lt 501; $i++) { ,@(($i * 0.1), 0) })
+        $big = & $newLine $bigPts
+        & $expectP ((Add-PlanLine @() $big).Error -eq 'That line has too many bends to keep (over 500 points). Draw it with fewer turns.') 'add line: a 501-point line should be refused'
+        $five = & $newLine @(for ($i = 0; $i -lt 500; $i++) { ,@(($i * 0.1), 0) })
+        $full = @(for ($i = 0; $i -lt 6; $i++) { $five })
+        & $expectP ((Add-PlanLine $full $two).Error -eq 'This plan has reached its limit of 3000 points. Undo or clear a line to draw more.') 'add line: more than 3000 points should be refused'
+
+        # Clicking near a line: the spot, the snap to an end within 3 in, and nothing far away.
+        $seg = @(& $newLine @(@(0, 0), @(20, 0)))
+        $h1 = Find-PlanSnap $seg 10 1 4
+        & $expectP (($null -ne $h1) -and ($h1.Line -eq 1) -and ($h1.Along -eq 10) -and ($h1.AtX -eq 10) -and ($h1.AtY -eq 0) -and (-not $h1.AtEnd)) 'snap: (10, 1) should land on line 1, 10 in along'
+        $h2 = Find-PlanSnap $seg 18.5 0.5 4
+        & $expectP (($null -ne $h2) -and ($h2.Along -eq 20) -and ($h2.AtX -eq 20) -and $h2.AtEnd) 'snap: 1.5 in from the end should snap to the end'
+        $h3 = Find-PlanSnap $seg 2 0 4
+        & $expectP (($null -ne $h3) -and ($h3.Along -eq 0) -and ($h3.AtX -eq 0) -and (-not $h3.AtEnd)) 'snap: 2 in from the start should snap to the start'
+        & $expectP ($null -eq (Find-PlanSnap $seg 10 10 4)) 'snap: a click 10 in away should find nothing'
+
+        # Route order, then the words for where an action is.
+        $order = @(Sort-PlanActions @(@{ Line = 2; Along = 5.0; I = 0 }, @{ Line = 1; Along = 10.0; I = 1 }, @{ Line = 1; Along = 10.0; I = 2 }, @{ Line = 1; Along = 0.0; I = 3 }))
+        & $expectP ((@($order | ForEach-Object { $_.I }) -join ',') -eq '3,1,2,0') 'sort: actions should go by line, then inches, then the order placed'
+        $places = @((Get-PlanActionPlace @{ Line = 1; Along = 0.0 } $seg), (Get-PlanActionPlace @{ Line = 1; Along = 20.0 } $seg), (Get-PlanActionPlace @{ Line = 1; Along = 7.2 } $seg), (Get-PlanActionPlace @{ Line = 1; Along = 14.5 } $seg)) -join '|'
+        & $expectP ($places -eq 'Line 1, at the start|Line 1, at the end|Line 1, 7.2 in along|Line 1, 15 in along') ('place words wrong: ' + $places)
+        $offs = Get-PlanMarkerOffsets @(@{ AtX = 0.0; AtY = 0.0 }, @{ AtX = 0.0; AtY = 0.0 }, @{ AtX = 30.0; AtY = 30.0 }) 0.2
+        & $expectP (($offs[0].Dx -eq -9.5) -and ($offs[1].Dx -eq 9.5) -and ($offs[1].Dy -eq 16) -and ($offs[2].Dx -eq 0)) 'markers: two actions on one spot should fan out side by side'
+
+        # The plan body: the exact JSON web/map.html's buildPlan writes for this input.
+        $bodyLines = @((& $newLine @(@(-52.125, 18.004), @(-30.25, -18), @(0.001, -0.004))), (& $newLine @(@(10, 10), @(20, 10.5))))
+        $bodyActs = @(Sort-PlanActions @(
+            @{ Type = 'score'; Line = 2; Along = 5.555; AtX = 15.005; AtY = 10.25; Detail = ('  second "Pin"' + "`n ") },
+            @{ Type = 'grab_stack'; Line = 1; Along = 0.0; AtX = -52.125; AtY = 18.004; Detail = '' }))
+        $body = New-PlanBody -Name '  Left 2 goal ' -Note (' Grab the stack, then score' + "`n") -Side 'L' -Build 'build-70-abc1234' -Lines $bodyLines -Actions $bodyActs
+        $want = '{"schema":1,"kind":"proposed-auto-plan","name":"Left 2 goal","side":"L","note":"Grab the stack, then score","build":"build-70-abc1234","lines":[{"points":[[-52.12,18],[-30.25,-18],[0,0]]},{"points":[[10,10],[20,10.5]]}],"actions":[{"type":"grab_stack","line":1,"along":0,"at":[-52.12,18],"detail":""},{"type":"score","line":2,"along":5.56,"at":[15.01,10.25],"detail":"second \"Pin\""}]}'
+        $got = ConvertTo-PlanJson $body
+        & $expectP ($got -ceq $want) ('body JSON differs from the web map''s: ' + $got)
+        & $expectP ($null -eq (Test-PlanBody $body)) ('body: a good plan was refused: ' + (Test-PlanBody $body))
+        $bodyR = New-PlanBody -Name 'R plan' -Note '' -Side 'R' -Build '' -Lines @(& $newLine @(@(0, 0), @(1.5, 0))) -Actions @()
+        & $expectP ((ConvertTo-PlanJson $bodyR) -ceq '{"schema":1,"kind":"proposed-auto-plan","name":"R plan","side":"R","note":"","build":null,"lines":[{"points":[[0,0],[1.5,0]]}]}') ('body: no actions and no build: ' + (ConvertTo-PlanJson $bodyR))
+        # Past plain ASCII is escaped, and reads back as the same text.
+        $uName = 'Caf' + [char]0x00E9 + ' ' + [char]0x2192 + ' goal\'
+        $uJson = ConvertTo-PlanJson (New-PlanBody -Name $uName -Note ('line 1' + "`r`n" + 'line 2') -Side 'L' -Build '' -Lines @($two) -Actions @())
+        Add-Type -AssemblyName System.Web.Extensions
+        $uBack = (New-Object System.Web.Script.Serialization.JavaScriptSerializer).DeserializeObject($uJson)
+        & $expectP (($uJson -match '^[\x20-\x7e]+$') -and ($uBack['name'] -ceq $uName) -and ($uBack['note'] -ceq ('line 1' + "`r`n" + 'line 2'))) ('body: escaping did not read back: ' + $uJson)
+
+        # Every limit, with the page's sentence.
+        $okLines = @($two, $two)
+        $okAct = { param($o) $a = @{ Type = 'score'; Line = 1; Along = 5.0; AtX = 5.0; AtY = 0.0; Detail = '' }; foreach ($key in $o.Keys) { $a[$key] = $o[$key] }; $a }
+        $cases = @(
+            @{ Want = 'Give the plan a name before sending it.'; Body = (New-PlanBody -Name '   ' -Note '' -Side 'L' -Build '' -Lines $okLines -Actions @()) },
+            @{ Want = 'The name can be up to 80 characters.'; Body = (New-PlanBody -Name ('n' * 81) -Note '' -Side 'L' -Build '' -Lines $okLines -Actions @()) },
+            @{ Want = 'The note can be up to 2000 characters.'; Body = (New-PlanBody -Name 'p' -Note ('n' * 2001) -Side 'L' -Build '' -Lines $okLines -Actions @()) },
+            @{ Want = 'Draw at least one line before sending.'; Body = (New-PlanBody -Name 'p' -Note '' -Side 'L' -Build '' -Lines @() -Actions @()) },
+            @{ Want = 'A plan holds up to 50 lines.'; Body = (New-PlanBody -Name 'p' -Note '' -Side 'L' -Build '' -Lines @($fifty + @($two)) -Actions @()) },
+            @{ Want = 'A point is outside the field.'; Body = (New-PlanBody -Name 'p' -Note '' -Side 'L' -Build '' -Lines @(& $newLine @(@(0, 0), @(100.5, 0))) -Actions @()) },
+            @{ Want = 'A plan holds up to 3000 points in all.'; Body = (New-PlanBody -Name 'p' -Note '' -Side 'L' -Build '' -Lines @($full + @($two)) -Actions @()) },
+            @{ Want = 'An action has no usable type.'; Body = (New-PlanBody -Name 'p' -Note '' -Side 'L' -Build '' -Lines $okLines -Actions @(& $okAct @{ Type = 'Score' })) },
+            @{ Want = 'An action points at a line that is not in the plan.'; Body = (New-PlanBody -Name 'p' -Note '' -Side 'L' -Build '' -Lines $okLines -Actions @(& $okAct @{ Line = 3 })) },
+            @{ Want = 'An action sits off the end of its line.'; Body = (New-PlanBody -Name 'p' -Note '' -Side 'L' -Build '' -Lines $okLines -Actions @(& $okAct @{ Along = 11.5 })) },
+            @{ Want = 'An action is outside the field.'; Body = (New-PlanBody -Name 'p' -Note '' -Side 'L' -Build '' -Lines $okLines -Actions @(& $okAct @{ AtX = -101.0 })) },
+            @{ Want = 'An action detail can be up to 120 characters.'; Body = (New-PlanBody -Name 'p' -Note '' -Side 'L' -Build '' -Lines $okLines -Actions @(& $okAct @{ Detail = ('d' * 121) })) },
+            @{ Want = 'A plan holds up to 200 actions.'; Body = (New-PlanBody -Name 'p' -Note '' -Side 'L' -Build '' -Lines $okLines -Actions @(for ($i = 0; $i -lt 201; $i++) { & $okAct @{} })) }
+        )
+        foreach ($cs in $cases) {
+            $said = Test-PlanBody $cs.Body
+            & $expectP ($said -ceq $cs.Want) ('limit: expected "' + $cs.Want + '", got "' + $said + '"')
+        }
+        & $expectP ($null -eq (Test-PlanBody (New-PlanBody -Name ('n' * 80) -Note ('n' * 2000) -Side 'R' -Build ('b' * 100) -Lines $okLines -Actions @(& $okAct @{ Along = 11.0; Detail = ('d' * 120) })))) 'limit: a plan right at every limit should be accepted'
+
+        # The relay's answers, and the words for each.
+        $a1 = ConvertFrom-PlanReply 201 '{"ok":true,"issue":12}'
+        & $expectP (($a1.Status -eq 'sent') -and ($a1.Issue -eq 12)) 'reply: 201 with an issue number should be sent'
+        & $expectP ((ConvertFrom-PlanReply 401 '{"ok":false,"error":"wrong team code"}').Status -eq 'unauthorized') 'reply: 401 should be unauthorized'
+        $a3 = ConvertFrom-PlanReply 400 '{"ok":false,"error":"invalid plan"}'
+        & $expectP (($a3.Status -eq 'error') -and ($a3.Detail -eq 'invalid plan')) 'reply: the relay''s own error text should be the detail'
+        & $expectP ((ConvertFrom-PlanReply 502 '<html>bad gateway</html>').Detail -eq 'the relay answered 502') 'reply: a page that is not JSON should give the status'
+        & $expectP ((ConvertFrom-PlanReply 201 'nope').Detail -eq 'the relay gave an unexpected answer') 'reply: a good status with a strange body is not a send'
+        & $expectP ((Get-PlanSendMessage $a1).Text -eq 'Sent as a proposed plan (issue #12). No robot code changed.' -and (Get-PlanSendMessage $a1).Ok) 'message: sent'
+        & $expectP ((Get-PlanSendMessage @{ Status = 'unauthorized' }).Text -eq 'The team code changed. Enter the new one, then send again.') 'message: wrong code'
+        & $expectP ((Get-PlanSendMessage @{ Status = 'offline' }).Text -eq "Couldn't reach the internet. Your drawing is still here, send it when you're online.") 'message: offline'
+        & $expectP ((Get-PlanSendMessage $a3).Text -eq "The plan didn't send (invalid plan). Your drawing is still here." -and (-not (Get-PlanSendMessage $a3).Ok)) 'message: refused'
+        & $expectP (((Get-PlansUrl 'https://x.example.workers.dev/results') -eq 'https://x.example.workers.dev/plans') -and ((Get-PlansUrl 'https://x.example.workers.dev/results/') -eq 'https://x.example.workers.dev/plans') -and ((Get-PlansUrl '') -eq '')) 'plans address from results_url wrong'
+        & $expectP ((Send-ProposedPlan -Url 'http://example.com/plans' -Code 'x' -Body '{}' -Client 'selftest').Status -eq 'error') 'send: a plain http address must be refused'
+        & $expectP ((Send-ProposedPlan -Url 'https://x.example/plans' -Code '' -Body '{}' -Client 'selftest').Detail -eq 'enter the team code first') 'send: no code should send nothing'
+
+        # The real send code against a listener on this computer.
+        $listener = $null
+        try {
+            $port = Get-Random -Minimum 49200 -Maximum 64900
+            $prefix = 'http://127.0.0.1:' + $port + '/'
+            try {
+                $listener = New-Object System.Net.HttpListener
+                $listener.Prefixes.Add($prefix)
+                $listener.Start()
+            } catch { $listener = $null }
+            if ($null -eq $listener) {
+                Write-Host '  (plan send round trip skipped: a listener could not start here)'
+            } else {
+                $planCall = {
+                    param([string]$Code, [int]$Status, [string]$Answer)
+                    $ps = [powershell]::Create()
+                    [void]$ps.AddScript('param($Sync, $A)' + "`n" + $SharedCode.ToString() + "`n" + $PlanSendBody.ToString()).AddArgument($null).AddArgument(@{ Url = ($prefix + 'plans'); Code = $Code; Body = $got; Client = 'windows-uploader selftest' })
+                    $h = $ps.BeginInvoke()
+                    $seen = @{ Got = $false }
+                    $ar = $listener.BeginGetContext($null, $null)
+                    if ($ar.AsyncWaitHandle.WaitOne(30000)) {
+                        $ctx = $listener.EndGetContext($ar)
+                        $seen.Got = $true
+                        $seen.Method = $ctx.Request.HttpMethod
+                        $seen.Path = $ctx.Request.Url.AbsolutePath
+                        $seen.Code = [string]$ctx.Request.Headers['X-Team-Code']
+                        $seen.Client = [string]$ctx.Request.Headers['X-Scourge-Client']
+                        $seen.Type = [string]$ctx.Request.ContentType
+                        $rd = New-Object System.IO.StreamReader($ctx.Request.InputStream, [System.Text.Encoding]::UTF8)
+                        try { $seen.Body = $rd.ReadToEnd() } finally { $rd.Dispose() }
+                        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Answer)
+                        $ctx.Response.StatusCode = $Status
+                        $ctx.Response.ContentType = 'application/json'
+                        $ctx.Response.ContentLength64 = $bytes.Length
+                        $ctx.Response.OutputStream.Write($bytes, 0, $bytes.Length)
+                        $ctx.Response.Close()
+                    }
+                    $res = $null
+                    if ($h.AsyncWaitHandle.WaitOne(30000)) { $o = $ps.EndInvoke($h); if ($o.Count -gt 0) { $res = $o[$o.Count - 1] } } else { $ps.Stop() }
+                    $ps.Dispose()
+                    return @{ Result = $res; Seen = $seen }
+                }
+                $p1 = & $planCall 'sample-code-123' 201 '{"ok":true,"issue":42}'
+                & $expectP ($p1.Seen.Got -and ($p1.Seen.Method -eq 'POST') -and ($p1.Seen.Path -eq '/plans')) 'round trip: the plan should be a POST to /plans'
+                & $expectP (($p1.Seen.Code -eq 'sample-code-123') -and ($p1.Seen.Client -eq 'windows-uploader selftest') -and ($p1.Seen.Type -like 'application/json*')) 'round trip: the team code, client, and content type headers were not sent'
+                & $expectP ($p1.Seen.Body -ceq $got) 'round trip: the body on the wire is not the plan JSON'
+                & $expectP (($null -ne $p1.Result) -and ($p1.Result.Status -eq 'sent') -and ($p1.Result.Issue -eq 42)) 'round trip: 201 should come back as sent, issue 42'
+                $p2 = & $planCall 'wrong' 401 '{"ok":false,"error":"wrong team code"}'
+                & $expectP (($null -ne $p2.Result) -and ($p2.Result.Status -eq 'unauthorized')) 'round trip: 401 should come back as unauthorized'
+                $p3 = & $planCall 'sample-code-123' 413 '{"ok":false,"error":"plan too long for one issue, use fewer points or actions, or shorter details"}'
+                & $expectP (($null -ne $p3.Result) -and ($p3.Result.Status -eq 'error') -and ($p3.Result.Detail -like 'plan too long for one issue*')) 'round trip: the relay''s 413 text should be the detail'
+                $listener.Stop()
+                $listener = $null
+                $off = Send-ProposedPlan -Url ($prefix + 'plans') -Code 'x' -Body $got -Client 'selftest' -TimeoutMs 5000
+                & $expectP ($off.Status -eq 'offline') ('round trip: nothing listening should read as offline, got ' + $off.Status)
+            }
+        } finally {
+            if ($null -ne $listener) { try { $listener.Stop() } catch { } }
+        }
+    } catch {
+        [void]$planFails.Add('plan check threw: ' + $_.Exception.Message + ' at line ' + $_.InvocationInfo.ScriptLineNumber)
+    }
+    if ($planFails.Count -eq 0) {
+        Write-Host '  Route Map plans: OK'
+    } else {
+        foreach ($pf in $planFails) { $failures.Add('route map plans: ' + $pf) }
+        Write-Host ('  Route Map plans: FAIL (' + ($planFails -join '; ') + ')')
+    }
+
     # 1. Build the whole window (catches WinForms mistakes) and fill it in.
     try {
         $testForm = New-MainForm
@@ -5142,6 +6679,186 @@ if ($SelfTest) {
             if ($script:Map.Selected -ne -1) { $failures.Add('Route Map cloud: switching to AWP should let go of the Taught A recording') }
             & $paintCanvas ''
             if ($script:MapPaintError) { $failures.Add('Route Map drawing failed: ' + $script:Ui.Log.Text) }
+
+            # Plan mode: two lines drawn through the same mouse handlers a person uses, an action
+            # added with a click on a line, then the send results. The code file is a temporary one,
+            # so the refused-code case cannot touch this computer's saved code.
+            $savedSettingsP = $script:SettingsPath
+            $script:SettingsPath = Join-Path ([System.IO.Path]::GetTempPath()) ('scourge-settings-' + [Guid]::NewGuid().ToString('N') + '\settings.json')
+            $planUi = New-Object System.Collections.Generic.List[string]
+            try {
+                $ui = $script:Ui
+                Enter-PlanMode
+                if (-not $script:Plan.On) { $planUi.Add('Draw a plan did not open plan mode') }
+                if ($ui.PlanSend.Bottom -gt $testForm.ClientSize.Height) { $planUi.Add('Send plan is below the window: bottom ' + $ui.PlanSend.Bottom + ', window ' + $testForm.ClientSize.Height) }
+                if (($ui.PlanNoteBox.Bottom -gt $ui.PlanCount.Top) -or ($ui.PlanCount.Bottom -gt $ui.PlanUndo.Top)) { $planUi.Add('plan column controls overlap') }
+                # Paint at the canvas's own size, so the mouse maps onto the field the way it does on screen.
+                $cs = $ui.MapCanvas.ClientSize
+                $cvb = New-Object System.Drawing.Bitmap $cs.Width, $cs.Height
+                $cvg = [System.Drawing.Graphics]::FromImage($cvb)
+                try { Show-RouteMapCanvas $cvg $cs } finally { $cvg.Dispose(); $cvb.Dispose() }
+                $v = $script:PlanView
+                $toPx = { param([double]$x, [double]$y) @(($v.Ox + $x * $v.Sc), ($v.Oy - $y * $v.Sc)) }
+                $dragThrough = {
+                    param($Pts)
+                    $a = & $toPx $Pts[0][0] $Pts[0][1]
+                    Start-PlanStroke $a[0] $a[1]
+                    for ($j = 1; $j -lt $Pts.Count; $j++) {
+                        for ($s = 1; $s -le 12; $s++) {
+                            $fx = $Pts[$j - 1][0] + ($Pts[$j][0] - $Pts[$j - 1][0]) * $s / 12.0
+                            $fy = $Pts[$j - 1][1] + ($Pts[$j][1] - $Pts[$j - 1][1]) * $s / 12.0
+                            $b = & $toPx $fx $fy
+                            Add-PlanStrokePoint $b[0] $b[1]
+                        }
+                    }
+                    $z = & $toPx $Pts[$Pts.Count - 1][0] $Pts[$Pts.Count - 1][1]
+                    Complete-PlanStroke $z[0] $z[1]
+                }
+                & $dragThrough @(@(8, -60), @(30, -52), @(44, -30))
+                & $dragThrough @(@(44, -30), @(20, -18), @(-8, -30))
+                if (@($script:Plan.Lines).Count -ne 2) { $planUi.Add('two drags should draw 2 lines, got ' + @($script:Plan.Lines).Count) }
+                if ($script:Plan.Side -ne 'L') { $planUi.Add('the plan should take the Left side it was drawn on') }
+                # A drag whose button comes up somewhere else is thrown away, never drawn: once through a
+                # mouse move with no button held, once through the mouse being taken away.
+                $onMove = [System.Windows.Forms.Control].GetMethod('OnMouseMove', [System.Reflection.BindingFlags]'Instance,NonPublic')
+                foreach ($way in @('move', 'capture')) {
+                    $a = & $toPx -40 -40
+                    Start-PlanStroke $a[0] $a[1]
+                    $b = & $toPx -20 -40
+                    Add-PlanStrokePoint $b[0] $b[1]
+                    if ($way -eq 'move') {
+                        $c2 = & $toPx -10 -40
+                        $mea = [System.Windows.Forms.MouseEventArgs]::new([System.Windows.Forms.MouseButtons]::None, 0, [int]$c2[0], [int]$c2[1], 0)
+                        $moveArgs = New-Object 'object[]' 1
+                        $moveArgs[0] = $mea
+                        [void]$onMove.Invoke($ui.MapCanvas, $moveArgs)
+                    } else {
+                        $script:Plan.StrokeLost = $true
+                        Update-Jobs
+                    }
+                    if (($null -ne $script:Plan.Stroke) -or (@($script:Plan.Lines).Count -ne 2)) { $planUi.Add('a drag that lost its button (' + $way + ') should be thrown away') }
+                }
+                if (@($script:Plan.Lines).Count -ge 1) {
+                    $l1 = @($script:Plan.Lines)[0]
+                    if (($l1.X.Length -ne 3) -or ([math]::Abs($l1.X[0] - 8) -gt 0.6) -or ([math]::Abs($l1.Y[2] + 30) -gt 0.6)) { $planUi.Add('line 1 should keep its 3 corners near (8, -60) and (44, -30), got ' + $l1.X.Length + ' points') }
+                }
+                # A click partway along line 1 picks that spot; a click in open field says what to do.
+                $tap = & $toPx 19 -56
+                Start-PlanStroke $tap[0] $tap[1]
+                Complete-PlanStroke $tap[0] $tap[1]
+                if (($null -eq $script:Plan.PickHit) -or ($script:Plan.PickHit.Line -ne 1)) { $planUi.Add('a click on line 1 did not pick a spot on it') }
+                Add-PlanAction 'score'
+                if ((@($script:Plan.Actions).Count -ne 1) -or ($ui.PlanActList.Items.Count -ne 1) -or ($script:Plan.Hot -ne 0)) { $planUi.Add('the action was not added and picked in the list') }
+                $ui.PlanDetailBox.Text = 'second Pin'
+                if (@($script:Plan.Actions).Count -eq 1 -and ([string]@($script:Plan.Actions)[0].Detail -ne 'second Pin')) { $planUi.Add('the detail box did not change the action') }
+                $endTap = & $toPx -7 -29.5
+                Start-PlanStroke $endTap[0] $endTap[1]
+                Complete-PlanStroke $endTap[0] $endTap[1]
+                Add-PlanAction 'grab_stack'
+                $far = & $toPx -50 50
+                Start-PlanStroke $far[0] $far[1]
+                Complete-PlanStroke $far[0] $far[1]
+                if ($ui.PlanMsg.Text -ne 'Click on a line to add what the robot does there.') { $planUi.Add('a click on open field should say to click a line, got: ' + $ui.PlanMsg.Text) }
+                $acts = @($script:Plan.Actions)
+                if (($acts.Count -ne 2) -or ($acts[1].Type -ne 'grab_stack') -or ($acts[1].Line -ne 2) -or (-not $script:Plan.Undo.Count)) { $planUi.Add('the second action should sit at the end of line 2, in route order') }
+                Set-CloudSide 'R'
+                if ($script:Cloud.Side -ne 'L') { $planUi.Add('the side should hold while the plan has lines') }
+                if ($ui.PlanSend.Enabled) { $planUi.Add('Send plan should wait for a name') }
+                $ui.PlanNameBox.Text = 'Left 2 goal'
+                $ui.PlanNoteBox.Text = 'Score the alliance Goal, then grab the stack.'
+                if (-not $ui.PlanSend.Enabled) { $planUi.Add('Send plan should be on once the plan has a name') }
+                $nowBody = Get-PlanBodyNow
+                $bad = Test-PlanBody $nowBody
+                if ($bad) { $planUi.Add('the drawn plan was refused: ' + $bad) }
+                if ([string]$nowBody['build'] -ne 'build-70-abc1234') { $planUi.Add('the plan should name the build of the prediction on the field') }
+                $nowJson = ConvertTo-PlanJson $nowBody
+                $nowBack = (New-Object System.Web.Script.Serialization.JavaScriptSerializer).DeserializeObject($nowJson)
+                $backActs = @($nowBack['actions'])
+                if (($nowBack['name'] -ne 'Left 2 goal') -or ($nowBack['side'] -ne 'L') -or (@($nowBack['lines']).Count -ne 2) -or ($backActs.Count -ne 2) -or ($backActs[0]['type'] -ne 'score') -or ($backActs[0]['line'] -ne 1) -or ($backActs[0]['detail'] -ne 'second Pin') -or ($backActs[1]['type'] -ne 'grab_stack') -or ($backActs[1]['line'] -ne 2)) { $planUi.Add('the drawn plan body is not the expected shape: ' + $nowJson) }
+                & $paintCanvas 'uploader-route-map-plan-field.png'
+                if ($env:SCOURGE_SCREENSHOT) {
+                    $planShot = Join-Path $shotDir 'uploader-route-map-plan.png'
+                    $testForm.Show()
+                    [System.Windows.Forms.Application]::DoEvents()
+                    $testForm.Refresh()
+                    $bmp = New-Object System.Drawing.Bitmap $testForm.Width, $testForm.Height
+                    $testForm.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle 0, 0, $testForm.Width, $testForm.Height))
+                    $bmp.Save($planShot, [System.Drawing.Imaging.ImageFormat]::Png)
+                    $bmp.Dispose()
+                    Write-Host ('  Route Map plan screenshot saved: ' + $planShot)
+                    $testForm.Hide()
+                }
+                # Undo takes back the last action, then the line before it. Undo again is a no-op past the start.
+                Undo-PlanStep
+                if (@($script:Plan.Actions).Count -ne 1) { $planUi.Add('Undo should take back the last action') }
+                # No code: nothing goes out and the drawing stays. Then the relay's answers.
+                $script:Cloud.Code = ''
+                Send-PlanFromMap
+                if ($script:Plan.Sending -or ($ui.PlanMsg.Text -ne "The plan didn't send (enter the team code first). Your drawing is still here.") -or (@($script:Plan.Lines).Count -ne 2)) { $planUi.Add('with no code the plan should stay and say why, got: ' + $ui.PlanMsg.Text) }
+                if ($ui.MapCodeBox.Bottom -gt $ui.PlanUndo.Top) { $planUi.Add('the team code box overlaps the plan buttons') }
+                # Short screens, with an action, the code box, and a two-line message all showing: the
+                # column gives up room instead of overlapping. Shown, so Visible means what it says.
+                $testForm.Show()
+                [System.Windows.Forms.Application]::DoEvents()
+                foreach ($short in @(560, 500, 440)) {
+                    $script:MapMaxHeight = Px $short
+                    Update-MapLayout
+                    [System.Windows.Forms.Application]::DoEvents()
+                    $col = @(@($ui.PlanControls) + @($ui.MapCodeBox, $ui.MapCodeButton, $ui.MapRouteBox) | Where-Object { $_.Visible })
+                    for ($i = 0; $i -lt $col.Count; $i++) {
+                        if ($col[$i].Bottom -gt $testForm.ClientSize.Height) { $planUi.Add('at ' + $short + ' px ' + $col[$i].Text + ' is below the window') }
+                        for ($j = $i + 1; $j -lt $col.Count; $j++) {
+                            if ($col[$i].Bounds.IntersectsWith($col[$j].Bounds)) { $planUi.Add('at ' + $short + ' px two plan controls overlap: ' + $col[$i].GetType().Name + ' "' + $col[$i].Text + '" and ' + $col[$j].GetType().Name + ' "' + $col[$j].Text + '"') }
+                        }
+                    }
+                    Write-Host ('  Plan column at ' + $short + ' px tall: room-saving step ' + $script:PlanLayoutLevel)
+                    if (($short -eq 500) -and $env:SCOURGE_SCREENSHOT) {
+                        $testForm.Refresh()
+                        $bmp = New-Object System.Drawing.Bitmap $testForm.Width, $testForm.Height
+                        $testForm.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle 0, 0, $testForm.Width, $testForm.Height))
+                        $shortShot = Join-Path $shotDir 'uploader-route-map-plan-short.png'
+                        $bmp.Save($shortShot, [System.Drawing.Imaging.ImageFormat]::Png)
+                        $bmp.Dispose()
+                        Write-Host ('  Route Map plan short-screen screenshot saved: ' + $shortShot)
+                    }
+                }
+                $script:MapMaxHeight = 0
+                Update-MapLayout
+                $testForm.Hide()
+                $script:Cloud.Code = 'sample'
+                Save-TeamCode 'sample'
+                # A late 401 from a send made with an older code leaves a newer code alone.
+                $script:Plan.SentCode = 'older'
+                Complete-PlanSend @{ Status = 'unauthorized' }
+                if (($script:Cloud.Code -ne 'sample') -or ((Read-TeamCode) -ne 'sample')) { $planUi.Add('a late 401 for an older code cleared the code entered since') }
+                # A background job that failed outright reports Error, not Detail.
+                $jobFail = Get-PlanSendMessage @{ Status = 'error'; Error = "The pipeline was stopped.`r`n" }
+                if ($jobFail.Text -ne "The plan didn't send (The pipeline was stopped.). Your drawing is still here.") { $planUi.Add('a failed job should say why, got: ' + $jobFail.Text) }
+                $script:Plan.SentCode = 'sample'
+                Complete-PlanSend @{ Status = 'unauthorized' }
+                if ($script:Cloud.Code -or (-not $script:Cloud.Unauthorized) -or ((Read-TeamCode) -ne '') -or (@($script:Plan.Lines).Count -ne 2)) { $planUi.Add('a refused code should be forgotten and the drawing kept') }
+                if ($ui.PlanMsg.Text -ne 'The team code changed. Enter the new one, then send again.') { $planUi.Add('wrong-code text was: ' + $ui.PlanMsg.Text) }
+                $script:Cloud.Code = 'sample'; $script:Cloud.Unauthorized = $false
+                Complete-PlanSend @{ Status = 'sent'; Issue = 42 }
+                if ((@($script:Plan.Lines).Count -ne 0) -or (@($script:Plan.Actions).Count -ne 0) -or $ui.PlanNameBox.Text -or $ui.PlanNoteBox.Text) { $planUi.Add('a good send should clear the drawing, name, and note') }
+                if (($ui.PlanMsg.Text -ne 'Sent as a proposed plan (issue #42). No robot code changed.') -or ($ui.PlanMsg.ForeColor -ne $script:Colors.Good)) { $planUi.Add('sent text was: ' + $ui.PlanMsg.Text) }
+                Exit-PlanMode
+                if ($script:Plan.On) { $planUi.Add('Done did not leave plan mode') }
+                Set-CloudSide 'R'
+                if ($script:Cloud.Side -ne 'R') { $planUi.Add('the side should be free again after Done') }
+                Set-CloudSide 'L'
+                & $paintCanvas ''
+                if ($script:MapPaintError) { $planUi.Add('drawing failed: ' + $script:Ui.Log.Text) }
+            } catch {
+                $planUi.Add('threw: ' + $_.Exception.Message + ' at line ' + $_.InvocationInfo.ScriptLineNumber)
+            } finally {
+                Remove-Item -LiteralPath (Split-Path $script:SettingsPath -Parent) -Recurse -Force -ErrorAction SilentlyContinue
+                $script:SettingsPath = $savedSettingsP
+            }
+            if ($planUi.Count -eq 0) { Write-Host '  Route Map plan mode: OK' } else {
+                foreach ($pu in $planUi) { $failures.Add('Route Map plan mode: ' + $pu) }
+                Write-Host ('  Route Map plan mode: FAIL (' + ($planUi -join '; ') + ')')
+            }
             Set-View 'upload'
             Write-Host ('  Upload view size: layout ' + $uploadSize + ' before and ' + $script:UploadLayoutSize + ' after, window ' + $uploadActual + ' before and ' + $testForm.ClientSize + ' after')
             if ($script:UploadLayoutSize -ne $uploadSize) { $failures.Add('Upload view size changed after visiting Route Map: ' + $uploadSize + ' became ' + $script:UploadLayoutSize) }

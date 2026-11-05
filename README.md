@@ -154,6 +154,7 @@ The **Route Map** tab at the top right of the window shows the path recordings t
 - Marks on a path have their own shapes: Drop, Pin, Stack, Toggle, and Push. The small box is the robot at its last position. A recording made on the right side is shown mirrored onto the left side, and its list row ends in (R).
 - **Last run** lists how far each step ended from where it aimed. Green is under 1 in, amber is under 3 in, and red is 3 in or more.
 - A recording with missing rows is left out, and the tab says which rows are missing. If the same recording was sent twice, it shows once.
+- **Draw a plan** sketches a proposed autonomous route on the whole field, over the predicted route. Drag to draw a line (each runs from its dot to its arrow). Click a line to add what the robot does there, like Score on Goal or Grab stack, and give it a detail if you like. Name the plan, then click **Send plan**. It goes to the programmer as an issue, using the team code saved for the Route Map. A plan is only a proposal: it never changes a route or the robot code. The drawing is kept until you close the app, and a plan that fails to send stays on the field.
 
 The tab reads the files when you open it, when you click **Refresh**, and when **Stop recording** finishes.
 

@@ -436,6 +436,20 @@ test("POST /plans drops unknown fields, trims the name, and rounds to 2 places",
   assert.deepEqual(plan.lines, [{ points: [[-52.13, 18], [0.01, 0]] }]);
 });
 
+test("POST /plans keeps field only when it is override or pinnacle", async () => {
+  const pin = await sendPlanWith(plansPost({ ...goodPlan, field: "pinnacle" }));
+  assert.equal(fencedPlan(pin.sent[0].body).field, "pinnacle");
+  assert.match(pin.sent[0].body.split("\n")[0], /Pinnacle field\.$/);
+  const ov = await sendPlanWith(plansPost({ ...goodPlan, field: "override" }));
+  assert.equal(fencedPlan(ov.sent[0].body).field, "override");
+  assert.doesNotMatch(ov.sent[0].body.split("\n")[0], /Pinnacle/);
+  for (const bad of ["Pinnacle", "other", 1, null, ["pinnacle"]]) {
+    const r = await sendPlanWith(plansPost({ ...goodPlan, field: bad }));
+    assert.equal(r.response.status, 201);
+    assert.equal("field" in fencedPlan(r.sent[0].body), false);
+  }
+});
+
 test("POST /plans: backticks in a note or name cannot close the fence, and read back unchanged", async () => {
   const note = "before\n```\n@everyone ` ``` after";
   const name = "a```b";

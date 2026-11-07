@@ -88,7 +88,7 @@ $script:Modes = @(
     @{ Label = 'Drive Test';   Asset = 'drive-test-hot.package.bin'; Slot = 3; Name = 'Scourge Drive Test' },
     @{ Label = 'Auto Pathing'; Asset = 'autopath-hot.package.bin';   Slot = 4; Name = 'Scourge Auto Pathing' }
 )
-$script:UploaderVersion = '2.6.2'
+$script:UploaderVersion = '2.6.3'
 $script:UploaderScriptPath = $PSCommandPath
 $script:UploaderManifestUrl = 'https://raw.githubusercontent.com/Whyater/40217S-Uploader/main/uploader.json'
 $script:ProjectDir = Join-Path $InstallDir 'project'
@@ -1538,7 +1538,7 @@ $SharedCode = {
     # Turns the text of a GET /map answer into plain data.
     # Returns @{ Status = 'ok'; Sim; SimIsLatest; Recorded; RecordedUpdated; Note } or
     # @{ Status = 'error'; Error }. Sim and Recorded are $null when the service had none.
-    #   Sim      = @{ Tag; Build; Routes = @( @{ Key; Side; Name; Id; TotalMs; T; X; Y; H; Marks; Events } ) }
+    #   Sim      = @{ Tag; Build; Routes = @( @{ Key; Side; Field ('override' or 'pinnacle'); Name; Id; TotalMs; T; X; Y; H; Marks; Events } ) }
     #              Key is the route slot ('A'), 'AWP' for the built-in routine, or 'skills' (one fixed start, Left frame only).
     #   Recorded = @{ Routes = @( @{ Slot; HasStart; StartX; StartY; Wp = @( @{ X; Y; H; Step } ) } ); Sessions }
     function ConvertFrom-CloudMap {
@@ -1570,9 +1570,12 @@ $SharedCode = {
                         # Skills runs once from a fixed start in field coordinates, so it is always the Left frame.
                         if ($key -ieq 'skills') { $key = 'skills'; $side = 'L' }
                         if (($side -cne 'L') -and ($side -cne 'R')) { continue }
+                        # A Pinnacle route is in true field coordinates, so it is never mirrored.
+                        $fieldName = 'override'
+                        if ([string](Get-JsonValue $r 'field') -ceq 'pinnacle') { $fieldName = 'pinnacle' }
                         $pts = ConvertFrom-CloudSamples (Get-JsonValue $r 'samples') 0.001
                         [void]$routes.Add(@{
-                            Key = $key; Side = $side; Name = [string](Get-JsonValue $r 'name'); Id = [string](Get-JsonValue $r 'id'); TotalMs = (Get-JsonNumber (Get-JsonValue $r 'total_ms'))
+                            Key = $key; Side = $side; Field = $fieldName; Name = [string](Get-JsonValue $r 'name'); Id = [string](Get-JsonValue $r 'id'); TotalMs = (Get-JsonNumber (Get-JsonValue $r 'total_ms'))
                             T = $pts.T; X = $pts.X; Y = $pts.Y; H = $pts.H; Marks = @(); Events = @()
                         })
                     }
@@ -1917,9 +1920,9 @@ $SharedCode = {
 
     # The plan body the relay takes (schema 1), as ordered dictionaries so the JSON
     # keeps the page's key order. Build is the shown prediction's tag, or empty for
-    # none. actions is left out when there are none.
+    # none. actions is left out when there are none, field unless it is 'pinnacle'.
     function New-PlanBody {
-        param([string]$Name, [string]$Note, [string]$Side, [string]$Build, $Lines, $Actions)
+        param([string]$Name, [string]$Note, [string]$Side, [string]$Build, $Lines, $Actions, [string]$Field = '')
         $body = [ordered]@{}
         $body['schema'] = 1
         $body['kind'] = 'proposed-auto-plan'
@@ -1951,6 +1954,8 @@ $SharedCode = {
             }
             $body['actions'] = $actList
         }
+        # Only a Pinnacle plan says its field, so a plan on the Override field is the same bytes as before.
+        if ($Field -ceq 'pinnacle') { $body['field'] = 'pinnacle' }
         return $body
     }
 
@@ -1980,6 +1985,8 @@ $SharedCode = {
         $note = $Plan['note']
         if (($note -isnot [string]) -or ($note.Length -gt $lim.Note)) { return ('The note can be up to ' + $lim.Note + ' characters.') }
         if (($Plan['side'] -cne 'L') -and ($Plan['side'] -cne 'R')) { return 'The plan needs a side.' }
+        if ((@($Plan.Keys) -ccontains 'field') -and ($Plan['field'] -cne 'override') -and ($Plan['field'] -cne 'pinnacle')) { return 'The plan names a field this app does not know.' }
+        if ((@($Plan.Keys) -ccontains 'field') -and ($Plan['field'] -ceq 'pinnacle') -and ($Plan['side'] -cne 'L')) { return 'A Pinnacle plan is drawn in true field coordinates, so its side is L.' }
         $build = $Plan['build']
         if (($null -ne $build) -and (($build -isnot [string]) -or ($build.Length -gt 100))) { return 'The build name is too long.' }
         $lines = $Plan['lines']
@@ -2485,6 +2492,7 @@ $script:Cloud = @{
 $script:CloudFilling = $false
 $script:MirrorCache = @{}
 $script:MapFieldR = $null
+$script:PinnacleField = $null
 # Where the team code is kept: encrypted for this Windows user, never in the repo or the log.
 $script:SettingsPath = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'ScourgeUploader\settings.json'
 $script:MapCache = [hashtable]::Synchronized(@{})
@@ -2496,11 +2504,11 @@ $script:MapNoteLogged = ''
 $script:MapField = $null
 # A proposed plan being drawn on the Route Map (see "Proposed auto plans" in the shared code).
 # Lines and Actions are replaced, never changed in place, so Undo can keep the old arrays.
-# Side is the side showing when the first line was drawn. Stroke is the drag in progress.
+# Side and Field are the side and field showing when the first line was drawn. Stroke is the drag in progress.
 # Pick is the spot the action menu is open at; PickHit is what a menu click adds to.
 # Hot is the action picked in the list, drawn with a ring. The name and note live in their boxes.
 $script:Plan = @{
-    On = $false; Lines = @(); Actions = @(); Side = ''; Undo = (New-Object System.Collections.ArrayList)
+    On = $false; Lines = @(); Actions = @(); Side = ''; Field = ''; Undo = (New-Object System.Collections.ArrayList)
     Stroke = $null; StrokeLost = $false; Sending = $false; Msg = ''; MsgKind = ''; Pick = $null; PickHit = $null; Hot = -1; Filling = $false; SentCode = ''
 }
 # Where the last paint put the field: screen x = Ox + x * Sc, screen y = Oy - y * Sc.
@@ -3118,7 +3126,7 @@ function Update-ViewButtons {
     Set-SegmentStyle $ui.MapWholeButton ([bool]$script:Map.Whole)
     # Skills has one fixed start: Left shows as the only side and neither button works. Drawing a plan still picks a side.
     $p = $script:Plan
-    $fixed = (Test-CloudFixedRoute) -and (-not $p.On)
+    $fixed = (((Test-CloudFixedRoute) -and (-not $p.On)) -or ((Get-ViewFieldName) -ceq 'pinnacle'))
     Set-SegmentStyle $ui.MapSideL ($fixed -or ($script:Cloud.Side -eq 'L'))
     Set-SegmentStyle $ui.MapSideR ((-not $fixed) -and ($script:Cloud.Side -eq 'R'))
     $sideFree = (-not $fixed) -and (-not ($p.On -and (@($p.Lines).Count -gt 0)))
@@ -3575,23 +3583,30 @@ function Get-BuildTagLabel {
     return $Tag
 }
 
-# AWP first, then Skills when the prediction has it, then each taught route found in the prediction or the recordings.
+# AWP first, then the fixed-start routes the prediction has (Skills, then Pinnacle ones such as RECF),
+# then each taught route found in the prediction or the recordings.
 function Get-CloudRoutes {
     $cl = $script:Cloud
     $list = New-Object System.Collections.ArrayList
     [void]$list.Add(@{ Key = 'AWP'; Label = 'AWP' })
     $keys = @{}
     $skillsLabel = ''
+    $pinnacle = @{}
     if ($null -ne $cl.Data) {
         if ($null -ne $cl.Data.Sim) {
             foreach ($r in $cl.Data.Sim.Routes) {
-                if ([string]$r.Key -ieq 'skills') { $skillsLabel = 'Skills'; if ([string]$r.Name) { $skillsLabel = [string]$r.Name } }
-                elseif ([string]$r.Key -ine 'AWP') { $keys[[string]$r.Key] = $true }
+                $label = [string]$r.Name
+                if ([string]$r.Key -ieq 'skills') { $skillsLabel = 'Skills'; if ($label) { $skillsLabel = $label } }
+                elseif ([string]$r.Field -ceq 'pinnacle') {
+                    if (-not $label) { $label = [string]$r.Key }
+                    $pinnacle[[string]$r.Key] = $label
+                } elseif ([string]$r.Key -ine 'AWP') { $keys[[string]$r.Key] = $true }
             }
         }
-        if ($null -ne $cl.Data.Recorded) { foreach ($r in $cl.Data.Recorded.Routes) { if (([string]$r.Slot -ine 'AWP') -and ([string]$r.Slot -ine 'skills')) { $keys[[string]$r.Slot] = $true } } }
+        if ($null -ne $cl.Data.Recorded) { foreach ($r in $cl.Data.Recorded.Routes) { if (([string]$r.Slot -ine 'AWP') -and ([string]$r.Slot -ine 'skills') -and (-not $pinnacle.ContainsKey([string]$r.Slot))) { $keys[[string]$r.Slot] = $true } } }
     }
     if ($skillsLabel) { [void]$list.Add(@{ Key = 'skills'; Label = $skillsLabel }) }
+    foreach ($k in @($pinnacle.Keys | Sort-Object)) { [void]$list.Add(@{ Key = [string]$k; Label = [string]$pinnacle[$k] }) }
     foreach ($k in @($keys.Keys | Sort-Object)) { [void]$list.Add(@{ Key = [string]$k; Label = ('Taught ' + $k) }) }
     return $list
 }
@@ -3602,14 +3617,32 @@ function Test-CloudRouteKnown {
     return $false
 }
 
-# Skills runs once from a fixed start, so it has no side to pick and is never mirrored.
-function Test-CloudFixedRoute {
-    return ([string]$script:Cloud.Route -ieq 'skills')
+# The field a route is on, 'override' unless the prediction says it is a Pinnacle route.
+function Get-CloudRouteField {
+    $cl = $script:Cloud
+    if (($null -ne $cl.Data) -and ($null -ne $cl.Data.Sim)) {
+        foreach ($r in $cl.Data.Sim.Routes) {
+            if (([string]$r.Key -ieq [string]$cl.Route) -and ([string]$r.Field -ceq 'pinnacle')) { return 'pinnacle' }
+        }
+    }
+    return 'override'
 }
 
-# The side the field is drawn from: Left for Skills, otherwise the picked side.
+# The field on screen: while a plan has lines it stays on the plan's field, otherwise it follows the picked route.
+function Get-ViewFieldName {
+    $p = $script:Plan
+    if ($p.On -and (@($p.Lines).Count -gt 0) -and $p.Field) { return [string]$p.Field }
+    return (Get-CloudRouteField)
+}
+
+# Skills and the Pinnacle routes run once from a fixed start, so they have no side to pick and are never mirrored.
+function Test-CloudFixedRoute {
+    return (([string]$script:Cloud.Route -ieq 'skills') -or ((Get-CloudRouteField) -ceq 'pinnacle'))
+}
+
+# The side the field is drawn from: Left for Skills and Pinnacle, otherwise the picked side.
 function Get-CloudViewSide {
-    if (Test-CloudFixedRoute) { return 'L' }
+    if ((Test-CloudFixedRoute) -or ((Get-ViewFieldName) -ceq 'pinnacle')) { return 'L' }
     return [string]$script:Cloud.Side
 }
 
@@ -3618,8 +3651,11 @@ function Get-CloudPredicted {
     $cl = $script:Cloud
     if (($null -eq $cl.Data) -or ($null -eq $cl.Data.Sim)) { return $null }
     $wantSide = Get-CloudViewSide
+    $fixed = Test-CloudFixedRoute
     foreach ($r in $cl.Data.Sim.Routes) {
-        if (([string]$r.Key -ieq [string]$cl.Route) -and ([string]$r.Side -ceq $wantSide)) {
+        # A fixed route has one entry, so its side does not have to match the picker.
+        if (([string]$r.Key -ieq [string]$cl.Route) -and ($fixed -or ([string]$r.Side -ceq $wantSide))) {
+            if ($fixed) { return $r }
             # The service sends every route in the LEFT frame, the Right entry equal to the Left one.
             # Recordings are drawn on the Right by mirroring them, so the prediction is mirrored the same way.
             if ($wantSide -eq 'R') { return (Get-MirroredSession $r) }
@@ -3692,7 +3728,10 @@ function Get-CloudNote {
         $lines.Add('The prediction is for ' + (Get-BuildTagLabel ([string]$cl.Data.Sim.Tag)) + ', this computer has ' + (Get-BuildTagLabel ([string]$script:InstalledTag)) + '.')
     }
     if ($have -and $cl.Data.Note) { $lines.Add([string]$cl.Data.Note) }
-    if ((Test-CloudFixedRoute) -and (-not $script:Plan.On)) { $lines.Add('Skills runs once from a fixed start, so it has one side.') }
+    if ((Test-CloudFixedRoute) -and (-not $script:Plan.On)) {
+        if ((Get-CloudRouteField) -ceq 'pinnacle') { $lines.Add('This route is on the Pinnacle field and runs once from a fixed start, so it has one side.') }
+        else { $lines.Add('Skills runs once from a fixed start, so it has one side.') }
+    }
     return ($lines.ToArray() -join "`n")
 }
 
@@ -4024,10 +4063,10 @@ function Exit-PlanMode {
 function Set-PlanState {
     param($Lines, [string]$Side, $Actions)
     $p = $script:Plan
-    [void]$p.Undo.Add(@{ Lines = $p.Lines; Side = $p.Side; Actions = $p.Actions })
+    [void]$p.Undo.Add(@{ Lines = $p.Lines; Side = $p.Side; Actions = $p.Actions; Field = $p.Field })
     if ($p.Undo.Count -gt 100) { $p.Undo.RemoveAt(0) }
     $p.Lines = @($Lines)
-    if ($p.Lines.Count -gt 0) { $p.Side = $Side } else { $p.Side = '' }
+    if ($p.Lines.Count -gt 0) { $p.Side = $Side } else { $p.Side = ''; $p.Field = '' }
     $p.Actions = @($Actions)
     $p.Msg = ''
     $p.Pick = $null
@@ -4040,7 +4079,7 @@ function Undo-PlanStep {
     if ($p.Sending -or ($p.Undo.Count -eq 0)) { return }
     $u = $p.Undo[$p.Undo.Count - 1]
     $p.Undo.RemoveAt($p.Undo.Count - 1)
-    $p.Lines = @($u.Lines); $p.Side = [string]$u.Side; $p.Actions = @($u.Actions)
+    $p.Lines = @($u.Lines); $p.Side = [string]$u.Side; $p.Actions = @($u.Actions); $p.Field = [string]$u.Field
     $p.Msg = ''; $p.Pick = $null; $p.Hot = -1
     if ($p.On -and ($p.Lines.Count -gt 0) -and $p.Side) { $script:Cloud.Side = $p.Side }
     Update-PlanPanel
@@ -4143,8 +4182,12 @@ function Complete-PlanStroke {
         return
     }
     $side = $p.Side
-    if (@($p.Lines).Count -eq 0) { $side = [string]$script:Cloud.Side }
+    $first = (@($p.Lines).Count -eq 0)
+    if ($first) { $side = [string]$script:Cloud.Side }
+    $fieldNow = Get-CloudRouteField
     Set-PlanState $r.Lines $side $p.Actions
+    # The first line fixes the plan's field, the way it fixes the side.
+    if ($first) { $p.Field = $fieldNow }
 }
 
 # A click near a line opens the action menu beside it; a click near nothing says
@@ -4275,7 +4318,7 @@ function Update-PlanPanel {
     $ui.PlanNameBox.ReadOnly = $busy
     $ui.PlanNoteBox.ReadOnly = $busy
     # The side holds while the plan has lines.
-    $sideFree = -not ($p.On -and ($n -gt 0))
+    $sideFree = (-not ($p.On -and ($n -gt 0))) -and ((Get-ViewFieldName) -cne 'pinnacle')
     $ui.MapSideL.Enabled = $sideFree
     $ui.MapSideR.Enabled = $sideFree
     $ui.PlanCount.Text = Get-PlanCountText $lines $acts.Count
@@ -4436,7 +4479,11 @@ function Get-PlanBodyNow {
     $p = $script:Plan
     $build = ''
     if (($null -ne (Get-CloudPredicted)) -and ($null -ne $script:Cloud.Data) -and ($null -ne $script:Cloud.Data.Sim)) { $build = [string]$script:Cloud.Data.Sim.Tag }
-    return (New-PlanBody -Name $script:Ui.PlanNameBox.Text -Note $script:Ui.PlanNoteBox.Text -Side $p.Side -Build $build -Lines $p.Lines -Actions $p.Actions)
+    # Pinnacle plans are in true field coordinates with no side to pick. They say L, because the tools that read plans
+    # (autopath.py plans) fold an R plan into the Override left frame, which would move every point.
+    $side = $p.Side
+    if ([string]$p.Field -ceq 'pinnacle') { $side = 'L' }
+    return (New-PlanBody -Name $script:Ui.PlanNameBox.Text -Note $script:Ui.PlanNoteBox.Text -Side $side -Build $build -Lines $p.Lines -Actions $p.Actions -Field ([string]$p.Field))
 }
 
 # Send plan. A plan that breaks a limit never goes out, and a failed send never
@@ -4485,7 +4532,7 @@ function Complete-PlanSend {
     }
     $p.SentCode = ''
     if ($m.Ok) {
-        $p.Lines = @(); $p.Actions = @(); $p.Side = ''; $p.Undo.Clear(); $p.Hot = -1
+        $p.Lines = @(); $p.Actions = @(); $p.Side = ''; $p.Field = ''; $p.Undo.Clear(); $p.Hot = -1
         $p.Filling = $true
         try { $ui.PlanNameBox.Text = ''; $ui.PlanNoteBox.Text = '' } finally { $p.Filling = $false }
     }
@@ -4570,6 +4617,114 @@ function Get-MapField {
     return $script:MapField
 }
 
+# The Pinnacle field, in true field coordinates (never mirrored, unlike the Override field).
+# Positions are read off the figures in the Pinnacle manual v2.0, so they are good to about
+# 1 in. Goals are (kind, x, y); rollers and loaders are (x, y); Pins are (x, y, angle in
+# degrees from +X); tape lines are (x1, y1, x2, y2).
+function Get-PinnacleField {
+    if ($null -ne $script:PinnacleField) { return $script:PinnacleField }
+    $goals = New-Object System.Collections.ArrayList
+    $rollers = New-Object System.Collections.ArrayList
+    $loaders = New-Object System.Collections.ArrayList
+    $cups = New-Object System.Collections.ArrayList
+    $pins = New-Object System.Collections.ArrayList
+    $clusters = New-Object System.Collections.ArrayList
+    $tape = New-Object System.Collections.ArrayList
+    foreach ($sx in @(-1.0, 1.0)) {
+        [void]$goals.Add(@('alliance', ($sx * 23.6), -47.2))
+        [void]$goals.Add(@('opponent', ($sx * 23.6), 47.2))
+        [void]$goals.Add(@('neutral', ($sx * 47.2), 0.0))
+        [void]$rollers.Add(@(0.0, ($sx * 70.1)))
+        [void]$rollers.Add(@(($sx * 70.1), 0.0))
+        [void]$cups.Add(@(0.0, ($sx * 47.2)))
+        [void]$cups.Add(@(($sx * 23.6), 0.0))
+        [void]$tape.Add(@(-70.1, ($sx * 23.6), 70.1, ($sx * 23.6)))
+        [void]$tape.Add(@(($sx * 23.6), -23.6, ($sx * 23.6), 23.6))
+        foreach ($sy in @(-1.0, 1.0)) {
+            [void]$loaders.Add(@(($sx * 59.0), ($sy * 68.2)))
+            [void]$pins.Add(@(($sx * 47.2), ($sy * 47.2), 0.0))
+            # These four lie on the diagonals, pointing at the corners.
+            [void]$pins.Add(@(($sx * 23.6), ($sy * 23.6), ([math]::Atan2(($sy * 23.6), ($sx * 23.6)) * 180.0 / [math]::PI)))
+            foreach ($cx in @(30.9, 35.0, 39.1)) { [void]$clusters.Add(@(($sx * $cx), ($sy * 68.3))) }
+        }
+    }
+    [void]$goals.Add(@('neutral', 0.0, 0.0))
+    $script:PinnacleField = @{
+        Wall = 70.1
+        RobotLength = 17.0; RobotWidth = 16.0; RobotFront = 7.0; RobotBack = 10.0
+        Goals = @($goals.ToArray()); Rollers = @($rollers.ToArray()); Loaders = @($loaders.ToArray())
+        Cups = @($cups.ToArray()); Pins = @($pins.ToArray()); Clusters = @($clusters.ToArray()); Tape = @($tape.ToArray())
+    }
+    return $script:PinnacleField
+}
+
+# Paints the Pinnacle field the way the Override one is painted: same floor, wall,
+# and Goal symbols; tape lines, rollers on the walls, loaders, and loose objects.
+function Show-PinnacleField {
+    param($G, $Pal, $Field, [double]$Ox, [double]$Oy, [double]$Sc)
+    $wall = [double]$Field.Wall
+    $left = $Ox - $wall * $Sc
+    $top = $Oy - $wall * $Sc
+    $side = 2.0 * $wall * $Sc
+    $G.FillRectangle($Pal.BackBrush, [single]$left, [single]$top, [single]$side, [single]$side)
+    $tapePen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(130, $script:Colors.Idle), [single][math]::Max(1, (Px 2)))
+    try {
+        foreach ($t in $Field.Tape) {
+            $G.DrawLine($tapePen, [single]($Ox + $t[0] * $Sc), [single]($Oy - $t[1] * $Sc), [single]($Ox + $t[2] * $Sc), [single]($Oy - $t[3] * $Sc))
+        }
+    } finally { $tapePen.Dispose() }
+    $G.DrawRectangle($Pal.BorderPen, [single]$left, [single]$top, [single]$side, [single]$side)
+    # Roller bars sit on the walls, 25.8 in long.
+    $half = 12.9 * $Sc
+    foreach ($t in $Field.Rollers) {
+        $tx = $Ox + $t[0] * $Sc
+        $ty = $Oy - $t[1] * $Sc
+        if ([math]::Abs($t[1]) -gt [math]::Abs($t[0])) {
+            $G.DrawLine($Pal.TogglePen, [single]($tx - $half), [single]$ty, [single]($tx + $half), [single]$ty)
+        } else {
+            $G.DrawLine($Pal.TogglePen, [single]$tx, [single]($ty - $half), [single]$tx, [single]($ty + $half))
+        }
+    }
+    # Loaders, about 5.2 in wide by 3.9 in deep.
+    $lw = [math]::Max((Px 4), 5.2 * $Sc)
+    $lh = [math]::Max((Px 3), 3.9 * $Sc)
+    foreach ($l in $Field.Loaders) {
+        $G.FillRectangle($Pal.ObjBrush, [single]($Ox + $l[0] * $Sc - $lw / 2.0), [single]($Oy - $l[1] * $Sc - $lh / 2.0), [single]$lw, [single]$lh)
+        $G.DrawRectangle($Pal.GridPen, [single]($Ox + $l[0] * $Sc - $lw / 2.0), [single]($Oy - $l[1] * $Sc - $lh / 2.0), [single]$lw, [single]$lh)
+    }
+    # Clusters of three 3.2 in objects against the walls, then single Cups, as small dots.
+    $cr = [math]::Max((Px 2), 1.6 * $Sc)
+    foreach ($o in $Field.Clusters) {
+        $G.FillEllipse($Pal.ObjBrush, [single]($Ox + $o[0] * $Sc - $cr), [single]($Oy - $o[1] * $Sc - $cr), [single](2.0 * $cr), [single](2.0 * $cr))
+    }
+    $dot = [math]::Max((Px 2), 0.9 * $Sc)
+    foreach ($o in $Field.Cups) {
+        $G.FillEllipse($Pal.ObjBrush, [single]($Ox + $o[0] * $Sc - $dot), [single]($Oy - $o[1] * $Sc - $dot), [single](2.0 * $dot), [single](2.0 * $dot))
+    }
+    # Pins lying down, 6.5 in by 3.02 in, turned to their angle.
+    $hl = [math]::Max((Px 3), 3.25 * $Sc)
+    $hw = [math]::Max((Px 1.5), 1.51 * $Sc)
+    foreach ($pn in $Field.Pins) {
+        $a = [double]$pn[2] * [math]::PI / 180.0
+        $ux = [math]::Cos($a); $uy = -[math]::Sin($a)
+        $vx = -$uy; $vy = $ux
+        $cx = $Ox + $pn[0] * $Sc
+        $cy = $Oy - $pn[1] * $Sc
+        $box = [System.Drawing.PointF[]]@(
+            [System.Drawing.PointF]::new([single]($cx + $ux * $hl + $vx * $hw), [single]($cy + $uy * $hl + $vy * $hw)),
+            [System.Drawing.PointF]::new([single]($cx + $ux * $hl - $vx * $hw), [single]($cy + $uy * $hl - $vy * $hw)),
+            [System.Drawing.PointF]::new([single]($cx - $ux * $hl - $vx * $hw), [single]($cy - $uy * $hl - $vy * $hw)),
+            [System.Drawing.PointF]::new([single]($cx - $ux * $hl + $vx * $hw), [single]($cy - $uy * $hl + $vy * $hw)))
+        $G.FillPolygon($Pal.ObjBrush, $box)
+        $G.DrawPolygon($Pal.GridPen, $box)
+    }
+    # Goals: ours filled, theirs a square, neutral open (the same symbols as the Override field).
+    $goalR = [math]::Max((Px 5), 2.4 * $Sc)
+    foreach ($gl in $Field.Goals) {
+        Show-MapShape $G $Pal ([string]$gl[0]) ($Ox + $gl[1] * $Sc) ($Oy - $gl[2] * $Sc) $goalR
+    }
+}
+
 # One small symbol, centered on (X, Y), R pixels from center to edge. Goals use
 # alliance, neutral, opponent. Marks use drop, pin, stack, toggle, push.
 function Show-MapShape {
@@ -4650,7 +4805,9 @@ function Show-RouteMapCanvas {
     $f = $script:Fonts
     $m = $script:Map
     $vside = Get-CloudViewSide
-    $field = Get-ViewField $vside
+    # The Pinnacle field is never mirrored; the Override field is drawn from the picked side.
+    $pin = ((Get-ViewFieldName) -ceq 'pinnacle')
+    if ($pin) { $field = Get-PinnacleField } else { $field = Get-ViewField $vside }
     $inv = [System.Globalization.CultureInfo]::InvariantCulture
     $G.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
     $G.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
@@ -4713,8 +4870,10 @@ function Show-RouteMapCanvas {
         $sel = $null
         if ((-not $drawing) -and ($m.Selected -ge 0) -and ($m.Selected -lt $m.Sessions.Count)) { $sel = Get-ViewSession $m.Sessions[$m.Selected] $vside }
         $pred = Get-CloudPredicted
+        # A prediction from the other field would sit in the wrong place, so it stays hidden.
+        if (($null -ne $pred) -and (([string]$pred.Field -ceq 'pinnacle') -ne $pin)) { $pred = $null }
         $clean = $null
-        if (-not $drawing) { $clean = Get-CloudClean }
+        if ((-not $drawing) -and (-not $pin)) { $clean = Get-CloudClean }
         $boxes = New-Object System.Collections.ArrayList
         if ($null -ne $sel) { [void]$boxes.Add((Get-SessionBounds $sel)) }
         if ($null -ne $pred) { [void]$boxes.Add((Get-SessionBounds $pred)) }
@@ -4754,6 +4913,9 @@ function Show-RouteMapCanvas {
         $side = 2.0 * $wall * $sc
         $G.SetClip([System.Drawing.RectangleF]::new(0, [single]$areaTop, [single]$W, [single]$areaH))
 
+        if ($pin) {
+            Show-PinnacleField $G $pal $field $ox $oy $sc
+        } else {
         # Floor, our side of the Autonomous Line (below y = x), tile seams, wall.
         $G.FillRectangle($pal.BackBrush, [single]$left, [single]$top, [single]$side, [single]$side)
         $tint = [System.Drawing.PointF[]]@(
@@ -4792,6 +4954,7 @@ function Show-RouteMapCanvas {
         $goalR = [math]::Max((Px 5), 2.4 * $sc)
         foreach ($gl in $field.Goals) {
             Show-MapShape $G $pal ([string]$gl[0]) ($ox + $gl[1] * $sc) ($oy - $gl[2] * $sc) $goalR
+        }
         }
 
         # Recordings: the others faint, the selected one strong.
@@ -4926,7 +5089,10 @@ function Show-RouteMapCanvas {
         $rows = New-Object System.Collections.ArrayList
         if ($lineItems.Count -gt 0) { [void]$rows.Add($lineItems.ToArray()) }
         if (-not $drawing) { [void]$rows.Add(@(@('drop', 'Drop'), @('pin', 'Pin'), @('stack', 'Stack'), @('toggle', 'Toggle'), @('push', 'Push'))) }
-        [void]$rows.Add(@(@('alliance', 'Alliance goal'), @('neutral', 'Neutral goal'), @('opponent', 'Opponent goal'), @('line', 'Autonomous Line')))
+        $goalRow = @(@('alliance', 'Alliance goal'), @('neutral', 'Neutral goal'), @('opponent', 'Opponent goal'))
+        # The Autonomous Line is Override's; the Pinnacle field has none.
+        if (-not $pin) { $goalRow += ,@('line', 'Autonomous Line') }
+        [void]$rows.Add($goalRow)
         $linePens = @{ line = $pal.AutoPen; predline = $pal.PredPen; rawline = $pal.PathPen; cleanline = $pal.CleanPen; planline = $pal.PlanPen }
         $rowY = $H - (Px 44) - $legendExtra
         foreach ($row in $rows) {
@@ -6458,6 +6624,14 @@ if ($SelfTest) {
         & $expectP ($null -eq (Test-PlanBody $body)) ('body: a good plan was refused: ' + (Test-PlanBody $body))
         $bodyR = New-PlanBody -Name 'R plan' -Note '' -Side 'R' -Build '' -Lines @(& $newLine @(@(0, 0), @(1.5, 0))) -Actions @()
         & $expectP ((ConvertTo-PlanJson $bodyR) -ceq '{"schema":1,"kind":"proposed-auto-plan","name":"R plan","side":"R","note":"","build":null,"lines":[{"points":[[0,0],[1.5,0]]}]}') ('body: no actions and no build: ' + (ConvertTo-PlanJson $bodyR))
+        $bodyP = New-PlanBody -Name 'P plan' -Note '' -Side 'L' -Build '' -Lines @(& $newLine @(@(0, 0), @(1.5, 0))) -Actions @() -Field 'pinnacle'
+        & $expectP ((ConvertTo-PlanJson $bodyP) -ceq '{"schema":1,"kind":"proposed-auto-plan","name":"P plan","side":"L","note":"","build":null,"lines":[{"points":[[0,0],[1.5,0]]}],"field":"pinnacle"}') ('body: a Pinnacle plan names its field last: ' + (ConvertTo-PlanJson $bodyP))
+        & $expectP ($null -eq (Test-PlanBody $bodyP)) 'body: a Pinnacle plan was refused'
+        $bodyO = New-PlanBody -Name 'O plan' -Note '' -Side 'L' -Build '' -Lines @(& $newLine @(@(0, 0), @(1.5, 0))) -Actions @() -Field 'override'
+        & $expectP ((ConvertTo-PlanJson $bodyO) -cnotmatch 'field') 'body: an Override plan should leave the field out'
+        $bodyX = New-PlanBody -Name 'X plan' -Note '' -Side 'L' -Build '' -Lines @(& $newLine @(@(0, 0), @(1.5, 0))) -Actions @()
+        $bodyX['field'] = 'other'
+        & $expectP ((Test-PlanBody $bodyX) -eq 'The plan names a field this app does not know.') 'body: an unknown field should be refused'
         # Past plain ASCII is escaped, and reads back as the same text.
         $uName = 'Caf' + [char]0x00E9 + ' ' + [char]0x2192 + ' goal\'
         $uJson = ConvertTo-PlanJson (New-PlanBody -Name $uName -Note ('line 1' + "`r`n" + 'line 2') -Side 'L' -Build '' -Lines @($two) -Actions @())
@@ -6698,6 +6872,65 @@ if ($SelfTest) {
             & $paintCanvas ''
             Set-CloudRoute 'AWP'
             if ((-not $script:Ui.MapSideL.Enabled) -or (-not $script:Ui.MapSideR.Enabled)) { $failures.Add('Route Map cloud: side buttons should come back for AWP') }
+            Set-CloudSide 'L'
+            Set-CloudData $simOnly '2026-10-30T23:05:00Z'
+
+            # RECF: a fixed-start route on the Pinnacle field, listed after Skills, never mirrored, and a plan drawn on it says so.
+            $recfJson = $skillsJson.Replace('{"id":"taught-A-L"', '{"id":"recf","slot":"recf","name":"RECF: right Goal + roller","side":"R","field":"pinnacle","total_ms":30000,"samples":[{"t":0,"x":40,"y":-62,"h":0},{"t":15000,"x":23,"y":-35,"h":0},{"t":30000,"x":10,"y":-55,"h":90}],"events":[]},{"id":"taught-A-L"')
+            $recfOnly = ConvertFrom-CloudMap $recfJson
+            $recfOnly.Recorded = $null
+            Set-CloudData $recfOnly '2026-10-30T23:07:00Z'
+            $rcRoutes = @(Get-CloudRoutes)
+            if (($rcRoutes.Count -ne 4) -or ($rcRoutes[1].Key -ne 'skills') -or ($rcRoutes[2].Key -ne 'recf') -or ($rcRoutes[2].Label -ne 'RECF: right Goal + roller') -or ($rcRoutes[3].Key -ne 'A')) { $failures.Add('Route Map cloud: the picker should list AWP, Skills, RECF, Taught A') }
+            $rcParsed = $recfOnly.Sim.Routes | Where-Object { $_.Key -eq 'recf' }
+            if (($rcParsed.Field -ne 'pinnacle') -or ($rcParsed.Side -ne 'R') -or (@($recfOnly.Sim.Routes | Where-Object { $_.Field -eq 'pinnacle' }).Count -ne 1)) { $failures.Add('Route Map cloud: only the RECF entry should be on the Pinnacle field, with its own side kept') }
+            foreach ($rcSide in @('L', 'R')) {
+                Set-CloudSide $rcSide
+                Set-CloudRoute 'recf'
+                $rcPred = Get-CloudPredicted
+                if (($null -eq $rcPred) -or (-not (& $near $rcPred.X[0] 40.0)) -or (-not (& $near $rcPred.Y[0] -62.0)) -or (-not (& $near $rcPred.T[2] 30.0))) { $failures.Add('Route Map cloud: RECF must be drawn unmirrored with ' + $rcSide + ' picked') }
+            }
+            if (((Get-ViewFieldName) -ne 'pinnacle') -or ((Get-CloudViewSide) -ne 'L') -or $script:Ui.MapSideL.Enabled -or $script:Ui.MapSideR.Enabled) { $failures.Add('Route Map cloud: RECF should show the Pinnacle field with both side buttons off') }
+            $pf = Get-PinnacleField
+            if (($pf.Goals.Count -ne 7) -or ($pf.Rollers.Count -ne 4) -or ($pf.Loaders.Count -ne 4) -or ($pf.Cups.Count -ne 4) -or ($pf.Pins.Count -ne 8) -or ($pf.Clusters.Count -ne 12) -or ($pf.Tape.Count -ne 4)) { $failures.Add('Route Map cloud: the Pinnacle field has the wrong element counts') }
+            $pfDiag = @($pf.Pins | Where-Object { [math]::Abs([double]$_[0]) -lt 30 })
+            $pfSE = @($pfDiag | Where-Object { ($_[0] -gt 0) -and ($_[1] -lt 0) })
+            $pfNW = @($pfDiag | Where-Object { ($_[0] -lt 0) -and ($_[1] -gt 0) })
+            if (($pfDiag.Count -ne 4) -or ($pfSE.Count -ne 1) -or ($pfNW.Count -ne 1) -or (-not (& $near $pfSE[0][2] -45.0)) -or (-not (& $near $pfNW[0][2] 135.0))) { $failures.Add('Route Map cloud: the diagonal Pins should point at the corners') }
+            $wasWhole = $script:Map.Whole
+            $script:Map.Whole = $true
+            & $paintCanvas 'uploader-route-map-pinnacle.png'
+            $script:Map.Whole = $wasWhole
+            if ($script:MapPaintError) { $failures.Add('Route Map drawing failed on the Pinnacle field: ' + $script:Ui.Log.Text) }
+            $savedNameText = $script:Ui.PlanNameBox.Text
+            try {
+                Enter-PlanMode
+                $script:Ui.PlanNameBox.Text = 'RECF test'
+                $pcs = $script:Ui.MapCanvas.ClientSize
+                $pcb = New-Object System.Drawing.Bitmap $pcs.Width, $pcs.Height
+                $pcg = [System.Drawing.Graphics]::FromImage($pcb)
+                try { Show-RouteMapCanvas $pcg $pcs } finally { $pcg.Dispose(); $pcb.Dispose() }
+                $pv = $script:PlanView
+                $pp = @(@(40.0, -62.0), @(31.0, -48.0), @(23.0, -35.0))
+                Start-PlanStroke ($pv.Ox + $pp[0][0] * $pv.Sc) ($pv.Oy - $pp[0][1] * $pv.Sc)
+                for ($j = 1; $j -lt $pp.Count; $j++) { Add-PlanStrokePoint ($pv.Ox + $pp[$j][0] * $pv.Sc) ($pv.Oy - $pp[$j][1] * $pv.Sc) }
+                Complete-PlanStroke ($pv.Ox + $pp[2][0] * $pv.Sc) ($pv.Oy - $pp[2][1] * $pv.Sc)
+                if (@($script:Plan.Lines).Count -ne 1) { $failures.Add('Route Map plan: the line drawn on the Pinnacle field was not kept') }
+                if ($script:Plan.Field -ne 'pinnacle') { $failures.Add('Route Map plan: a plan started on RECF should be on the Pinnacle field, got "' + $script:Plan.Field + '"') }
+                $pinBody = Get-PlanBodyNow
+                if (($pinBody['field'] -ne 'pinnacle') -or ($pinBody['side'] -ne 'L') -or ($null -ne (Test-PlanBody $pinBody)) -or ((ConvertTo-PlanJson $pinBody) -notmatch '"field":"pinnacle"\}$')) { $failures.Add('Route Map plan: a Pinnacle plan body should carry field pinnacle, side L, and pass the checks: ' + (ConvertTo-PlanJson $pinBody)) }
+                # The field holds while the plan has lines, whatever route is picked.
+                Set-CloudRoute 'AWP'
+                if ((Get-ViewFieldName) -ne 'pinnacle') { $failures.Add('Route Map plan: the field should hold on Pinnacle while the plan has lines') }
+                Undo-PlanStep
+                if ($script:Plan.Field -ne '') { $failures.Add('Route Map plan: undoing the only line should free the field') }
+                if ((Get-ViewFieldName) -ne 'override') { $failures.Add('Route Map plan: with no lines the field should follow the AWP route back to Override') }
+            } finally {
+                $script:Plan.Undo.Clear()
+                Exit-PlanMode
+                $script:Ui.PlanNameBox.Text = $savedNameText
+            }
+            Set-CloudRoute 'AWP'
             Set-CloudSide 'L'
             Set-CloudData $simOnly '2026-10-30T23:05:00Z'
 

@@ -150,6 +150,7 @@ The results are also saved on the laptop in `Documents\Scourge Robot Data`. The 
 The **Route Map** tab at the top right of the window shows the path recordings that the robot sends over USB. The **Upload** tab is the same as always.
 
 - The field is drawn to scale with the tile seams, the Goals, the Toggles, and the Autonomous Line. Alliance Goals are filled circles, neutral Goals are open circles, and the opponent's are squares.
+- Picking the **RECF** route (under AWP and Skills) switches to the Pinnacle field: the same Goal symbols, plus the tape lines, roller bars, loaders, Cups, Pins, and wall objects. It is drawn as the field really is, never mirrored, and its positions are read off the manual's figures, so they are good to about 1 in. A plan whose first line is drawn on the Pinnacle field is sent as a Pinnacle plan.
 - The list on the right has every recording in `Documents\Scourge Robot Data` (all the `results-*.csv` files), newest first. Click one to draw it. The view frames the path. **Whole field** shows the entire field instead.
 - Marks on a path have their own shapes: Drop, Pin, Stack, Toggle, and Push. The small box is the robot at its last position. A recording made on the right side is shown mirrored onto the left side, and its list row ends in (R).
 - **Last run** lists how far each step ended from where it aimed. Green is under 1 in, amber is under 3 in, and red is 3 in or more.

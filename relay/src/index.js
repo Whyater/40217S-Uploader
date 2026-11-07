@@ -213,7 +213,10 @@ function cleanPlan(payload) {
   }
   const actions = cleanActions(payload.actions, lines);
   if (!actions) return null;
-  return { schema: 1, kind: PLAN_KIND, name, side: payload.side, note: payload.note, build: payload.build, lines, actions };
+  const plan = { schema: 1, kind: PLAN_KIND, name, side: payload.side, note: payload.note, build: payload.build, lines, actions };
+  // Absent means the Override field, so only a known value is kept and old plans stay unchanged.
+  if (payload.field === "override" || payload.field === "pinnacle") plan.field = payload.field;
+  return plan;
 }
 
 function lineInches(points) {
@@ -251,8 +254,9 @@ function planIssueBody(plan) {
   const acted = plan.actions.length;
   // JSON only holds a backtick inside a string, where \u0060 reads back the same and can't close the fence.
   const json = JSON.stringify(plan).replace(/`/g, "\\u0060");
+  const fieldNote = plan.field === "pinnacle" ? " Pinnacle field." : "";
   return `Proposal only, not run on a robot. Side ${plan.side}, ${count} ${count === 1 ? "line" : "lines"}, ` +
-    `${acted} ${acted === 1 ? "action" : "actions"}, ${inches.toFixed(1)} in total.\n\n\`\`\`json\n${json}\n\`\`\`\n`;
+    `${acted} ${acted === 1 ? "action" : "actions"}, ${inches.toFixed(1)} in total.${fieldNote}\n\n\`\`\`json\n${json}\n\`\`\`\n`;
 }
 
 async function handlePlans(request, env) {

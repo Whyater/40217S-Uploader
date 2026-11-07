@@ -1,0 +1,17 @@
+{
+  "tag": "build-304-497d4f7",
+  "title": "Build 304 (497d4f7)",
+  "notes": "Built from 497d4f7: Build 304",
+  "built_at": "2026-11-07T08:47:47Z",
+  "sha256": {
+    "hot.package.bin": "587f18f558f21199e4146963208337b80c37133230e80d1349538c6993abc76c",
+    "cold.package.bin": "b28fcf607e274ac602351fa15b6dec116d64da9863784c7d623d07cbca4e31ad",
+    "project.pros": "3334ee11d05552c44076bd6a7b41db6058a44761af0fd01a6d67eedcc6868294",
+    "tester-hot.package.bin": "e2cca39bac7c5ff8f0dce76a0f5310bdf923240707901c3d514b834a498afdd8",
+    "tester-cold.package.bin": "b28fcf607e274ac602351fa15b6dec116d64da9863784c7d623d07cbca4e31ad",
+    "tester-project.pros": "b3895679e64c30a5e99ed0787b4d8808ed263a8d706730221e6f7f5f9cc904da",
+    "auton-test-hot.package.bin": "a7d251371e9a52731481d850d08a9ee132b7fa911f0d1a3513d79edcfd6e98bf",
+    "drive-test-hot.package.bin": "02cef1bac4893f36263e564994d716eaa8a0fdb9f0d07452cc4ee91bfae094b3",
+    "autopath-hot.package.bin": "bb3c758611fa03a60246f01f7f2ca580a09fa0c67582204a5758a29f60cac1d5"
+  }
+}

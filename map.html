@@ -40,6 +40,7 @@
   --field-grid: #E7E8EB;
   --field-seam: #CACCD2;
   --opp: rgba(0, 0, 0, 0.035);
+  --zone-own: rgba(48, 86, 211, 0.045);
   --wall: #3A3D44;
   --route: #3056D3;
   --pred: #0E7C86;
@@ -76,6 +77,7 @@
     --field-grid: #272727;
     --field-seam: #3C3C3C;
     --opp: rgba(255, 255, 255, 0.035);
+    --zone-own: rgba(122, 152, 255, 0.07);
     --wall: #8E8E93;
     --route: #7A98FF;
     --pred: #5CC8D6;
@@ -283,6 +285,12 @@ svg text { font-family: var(--font); }
 .toggle-bar { fill: var(--toggle); }
 .toggle-bar.other { fill: none; stroke: var(--toggle); stroke-width: 1.2; stroke-dasharray: 3 2; }
 .loader { fill: none; stroke: var(--text-2); stroke-width: 1.5; }
+.pin-flat { fill: var(--obj); fill-opacity: 0.3; stroke: var(--obj); stroke-width: 1.2; }
+.tape { stroke: var(--field-seam); stroke-width: 2; fill: none; }
+.zone-ours { fill: var(--zone-own); }
+.zone-theirs { fill: var(--opp); }
+.zone-neutral, .zone-center { fill: none; }
+.start-area { fill: none; stroke: var(--field-seam); stroke-width: 1; stroke-dasharray: 4 3; }
 .zone { fill: none; stroke: var(--field-seam); stroke-width: 1; stroke-dasharray: 4 3; }
 .pred-line { fill: none; stroke: var(--pred); stroke-width: 2.4; stroke-dasharray: 7 5; stroke-linejoin: round; stroke-linecap: round; }
 .pred-start { fill: var(--field); stroke: var(--pred); stroke-width: 2.2; }
@@ -686,14 +694,17 @@ const worse = (a, b) => (a == null ? b : b == null ? a : ORDER[b] > ORDER[a] ? b
 function normPt(o) {
   o = o && typeof o === 'object' ? o : {};
   const zone = o.zone && typeof o.zone === 'object' ? { w: nn(o.zone.w), h: nn(o.zone.h) } : null;
-  return { name: String(o.name || ''), kind: String(o.kind || ''), x: nn(o.x), y: nn(o.y), r: nn(o.r), w: nn(o.w), h: nn(o.h), len: nn(o.len), zone };
+  return { name: String(o.name || ''), kind: String(o.kind || ''), x: nn(o.x), y: nn(o.y), r: nn(o.r), w: nn(o.w), h: nn(o.h), len: nn(o.len), a: nn(o.angle), zone };
 }
 const hasXY = (p) => p.x !== null && p.y !== null;
 
 function normField(f) {
   f = f && typeof f === 'object' ? f : {};
   const rb = f.robot && typeof f.robot === 'object' ? f.robot : {};
+  const box = (b) => ({ x0: nn(b && b.x0), y0: nn(b && b.y0), x1: nn(b && b.x1), y1: nn(b && b.y1), kind: String((b && b.kind) || ''), name: String((b && b.name) || '') });
+  const whole = (b) => b.x0 !== null && b.y0 !== null && b.x1 !== null && b.y1 !== null;
   return {
+    id: f.id === 'pinnacle' ? 'pinnacle' : 'override',
     wall: nn(f.wall) != null ? f.wall : 70.1,
     // Against the robot's footprint. The laptop tool's 5.0 in [VERIFY] is against the robot's center: different checks, so both stay.
     goalRadius: nn(f.goal_radius) != null ? f.goal_radius : 2.4,
@@ -702,6 +713,10 @@ function normField(f) {
     toggles: arr(f.toggles).map(normPt).filter(hasXY),
     objects: arr(f.objects).map(normPt).filter(hasXY),
     loaders: arr(f.loaders).map(normPt).filter(hasXY),
+    // Pinnacle only: tape lines, the zone tints and the start boxes. Override sends none of them.
+    tape: arr(f.tape).map((t) => ({ x1: nn(t && t.x1), y1: nn(t && t.y1), x2: nn(t && t.x2), y2: nn(t && t.y2) })).filter((t) => t.x1 !== null && t.y1 !== null && t.x2 !== null && t.y2 !== null),
+    zones: arr(f.zones).map(box).filter(whole),
+    startAreas: arr(f.start_areas).map(box).filter(whole),
   };
 }
 
@@ -816,14 +831,16 @@ function normSim(raw) {
   raw.routes.forEach((r, i) => {
     if (!r || typeof r !== 'object') return;
     const fromId = /-([LR])$/.exec(String(r.id || ''));
-    // Skills runs once from a fixed start in field coordinates: it is always the Left frame and is never mirrored.
-    const fixed = String(r.slot) === 'skills' || String(r.id) === 'skills';
+    // Skills and RECF (the Pinnacle field) run once from a fixed start in true field coordinates: always the Left frame, never mirrored.
+    const pin = r.field === 'pinnacle' || String(r.slot) === 'recf' || String(r.id) === 'recf';
+    const fixed = pin || String(r.slot) === 'skills' || String(r.id) === 'skills';
     const side = fixed ? 'L' : /^[LR]$/i.test(String(r.side)) ? String(r.side).toUpperCase() : fromId ? fromId[1] : 'L';
     const s = normSession({ id: r.id != null ? r.id : 'sim-' + (i + 1), kind: 'sim', side, samples: r.samples, events: r.events }, i, 'ms');
     if (s.samples.length < 2) return; // a line needs two points
-    s.slot = fixed ? 'skills' : r.slot != null ? String(r.slot) : null;
+    s.slot = pin ? (r.slot != null ? String(r.slot) : 'recf') : fixed ? 'skills' : r.slot != null ? String(r.slot) : null;
     s.fixed = fixed;
-    s.name = r.name ? String(r.name) : fixed ? 'Skills' : s.slot ? 'Taught ' + s.slot : 'AWP';
+    s.field = pin ? 'pinnacle' : 'override';
+    s.name = r.name ? String(r.name) : pin ? 'RECF' : fixed ? 'Skills' : s.slot ? 'Taught ' + s.slot : 'AWP';
     s.total = isNum(r.total_ms) && r.total_ms > 0 ? r.total_ms / 1000 : s.duration;
     byId.set(s.id, s);
   });
@@ -838,17 +855,19 @@ function normSim(raw) {
 // The route picker: AWP first, then Skills (one fixed start, no sides), then every taught slot the prediction or the cleaned routes know about. entry.sim holds the L and R predictions.
 const entryMemo = new WeakMap();
 function routeEntries(model) {
+  model = model.base || model; // the field view shares its model's picker
   if (entryMemo.has(model)) return entryMemo.get(model);
   const map = new Map();
-  const get = (slot, name) => {
-    const key = slot == null ? 'awp' : slot === 'skills' ? 'skills' : 't-' + slot;
-    if (!map.has(key)) map.set(key, { key, slot: slot == null ? null : slot, label: slot == null ? 'AWP' : slot === 'skills' ? name || 'Skills' : 'Taught ' + slot, routeIdx: -1, sim: {}, fixed: slot === 'skills' });
+  // A Pinnacle (RECF) route runs once from a fixed start in true field coordinates, like Skills, and keeps its own name.
+  const get = (slot, name, field) => {
+    const pin = field === 'pinnacle', key = slot == null ? 'awp' : slot === 'skills' ? 'skills' : pin ? 'p-' + slot : 't-' + slot;
+    if (!map.has(key)) map.set(key, { key, slot: slot == null ? null : slot, label: slot == null ? 'AWP' : slot === 'skills' || pin ? name || (pin ? 'RECF' : 'Skills') : 'Taught ' + slot, routeIdx: -1, sim: {}, fixed: slot === 'skills' || pin, field: pin ? 'pinnacle' : 'override' });
     return map.get(key);
   };
   get(null);
-  if (model.sim) model.sim.routes.forEach((r) => { get(r.slot, r.name).sim[r.side] = r; });
+  if (model.sim) model.sim.routes.forEach((r) => { get(r.slot, r.name, r.field).sim[r.side] = r; });
   model.routes.forEach((r, i) => { get(r.slot).routeIdx = i; });
-  const rank = (e) => (e.slot === null ? 0 : e.fixed ? 1 : 2);
+  const rank = (e) => (e.slot === null ? 0 : e.slot === 'skills' ? 1 : e.field === 'pinnacle' ? 2 : 3);
   const list = Array.from(map.values()).sort((a, b) => (rank(a) !== rank(b) ? rank(a) - rank(b) : a.slot < b.slot ? -1 : a.slot > b.slot ? 1 : 0));
   entryMemo.set(model, list);
   return list;
@@ -1406,6 +1425,7 @@ function uniqueIds(sessions) {
 
 // The Goals and walls, the same numbers the laptop tool uses (a test compares them), so results files alone still get a real field.
 const DEFAULT_FIELD = {
+  id: 'override',
   wall: 70.1,
   goals: [
     { name: 'ALLIANCE_GOAL_NEAR', kind: 'alliance', x: 23.6, y: -47.2 }, { name: 'ALLIANCE_GOAL_SIDE', kind: 'alliance', x: 47.2, y: -23.6 },
@@ -1423,11 +1443,82 @@ const DEFAULT_FIELD = {
   robot: { length: 17, width: 16, front: 7, back: 10 }, // front/back: claw end and intake end, measured from the turning center
 };
 
+// The RECF Pinnacle field, same frame as the Override one. A test compares it with the laptop tool's copy; positions are good to about 1 in.
+const PINNACLE_FIELD = {
+  id: 'pinnacle', wall: 70.1,
+  goals: [
+    {"name": "ALLIANCE_GOAL_LEFT", "kind": "alliance", "x": -23.6, "y": -47.2, "height": 3.25},
+    {"name": "ALLIANCE_GOAL_RIGHT", "kind": "alliance", "x": 23.6, "y": -47.2, "height": 3.25},
+    {"name": "OPP_ALLIANCE_GOAL_LEFT", "kind": "opponent", "x": -23.6, "y": 47.2, "height": 3.25},
+    {"name": "OPP_ALLIANCE_GOAL_RIGHT", "kind": "opponent", "x": 23.6, "y": 47.2, "height": 3.25},
+    {"name": "NEUTRAL_GOAL_LEFT", "kind": "neutral", "x": -47.2, "y": 0.0, "height": 5.77},
+    {"name": "NEUTRAL_GOAL_RIGHT", "kind": "neutral", "x": 47.2, "y": 0.0, "height": 5.77},
+    {"name": "CENTER_GOAL", "kind": "center", "x": 0.0, "y": 0.0, "height": 8.77},
+  ],
+  toggles: [
+    {"name": "ROLLER_NEAR", "x": 0.0, "y": -70.1, "kind": "roller"},
+    {"name": "ROLLER_FAR", "x": 0.0, "y": 70.1, "kind": "roller"},
+    {"name": "ROLLER_LEFT", "x": -70.1, "y": 0.0, "kind": "roller"},
+    {"name": "ROLLER_RIGHT", "x": 70.1, "y": 0.0, "kind": "roller"},
+  ],
+  loaders: [
+    {"name": "LOADER_NEAR_LEFT", "x": -59.0, "y": -68.2, "w": 5.2, "h": 3.9},
+    {"name": "LOADER_NEAR_RIGHT", "x": 59.0, "y": -68.2, "w": 5.2, "h": 3.9},
+    {"name": "LOADER_FAR_LEFT", "x": -59.0, "y": 68.2, "w": 5.2, "h": 3.9},
+    {"name": "LOADER_FAR_RIGHT", "x": 59.0, "y": 68.2, "w": 5.2, "h": 3.9},
+  ],
+  objects: [
+    {"name": "CUP_NEAR", "x": 0.0, "y": -47.2, "kind": "cup"},
+    {"name": "CUP_FAR", "x": 0.0, "y": 47.2, "kind": "cup"},
+    {"name": "CUP_LEFT", "x": -23.6, "y": 0.0, "kind": "cup"},
+    {"name": "CUP_RIGHT", "x": 23.6, "y": 0.0, "kind": "cup"},
+    {"name": "PIN_FLAT_NEAR_LEFT", "x": -47.2, "y": -47.2, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 0.0},
+    {"name": "PIN_DIAG_NEAR_LEFT", "x": -23.6, "y": -23.6, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 45.0},
+    {"name": "PIN_FLAT_NEAR_RIGHT", "x": 47.2, "y": -47.2, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 0.0},
+    {"name": "PIN_DIAG_NEAR_RIGHT", "x": 23.6, "y": -23.6, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 135.0},
+    {"name": "PIN_FLAT_FAR_LEFT", "x": -47.2, "y": 47.2, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 0.0},
+    {"name": "PIN_DIAG_FAR_LEFT", "x": -23.6, "y": 23.6, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 135.0},
+    {"name": "PIN_FLAT_FAR_RIGHT", "x": 47.2, "y": 47.2, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 0.0},
+    {"name": "PIN_DIAG_FAR_RIGHT", "x": 23.6, "y": 23.6, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 45.0},
+    {"name": "WALL_NEAR_LEFT_1", "x": -30.9, "y": -68.3, "kind": "pin", "r": 1.6},
+    {"name": "WALL_NEAR_LEFT_2", "x": -35.0, "y": -68.3, "kind": "pin", "r": 1.6},
+    {"name": "WALL_NEAR_LEFT_3", "x": -39.1, "y": -68.3, "kind": "pin", "r": 1.6},
+    {"name": "WALL_NEAR_RIGHT_1", "x": 30.9, "y": -68.3, "kind": "pin", "r": 1.6},
+    {"name": "WALL_NEAR_RIGHT_2", "x": 35.0, "y": -68.3, "kind": "pin", "r": 1.6},
+    {"name": "WALL_NEAR_RIGHT_3", "x": 39.1, "y": -68.3, "kind": "pin", "r": 1.6},
+    {"name": "WALL_FAR_LEFT_1", "x": -30.9, "y": 68.3, "kind": "pin", "r": 1.6},
+    {"name": "WALL_FAR_LEFT_2", "x": -35.0, "y": 68.3, "kind": "pin", "r": 1.6},
+    {"name": "WALL_FAR_LEFT_3", "x": -39.1, "y": 68.3, "kind": "pin", "r": 1.6},
+    {"name": "WALL_FAR_RIGHT_1", "x": 30.9, "y": 68.3, "kind": "pin", "r": 1.6},
+    {"name": "WALL_FAR_RIGHT_2", "x": 35.0, "y": 68.3, "kind": "pin", "r": 1.6},
+    {"name": "WALL_FAR_RIGHT_3", "x": 39.1, "y": 68.3, "kind": "pin", "r": 1.6},
+  ],
+  tape: [
+    {"x1": -70.1, "y1": -23.6, "x2": 70.1, "y2": -23.6},
+    {"x1": -70.1, "y1": 23.6, "x2": 70.1, "y2": 23.6},
+    {"x1": -23.6, "y1": -23.6, "x2": -23.6, "y2": 23.6},
+    {"x1": 23.6, "y1": -23.6, "x2": 23.6, "y2": 23.6},
+  ],
+  zones: [
+    {"name": "OUR_ZONE", "kind": "ours", "x0": -70.1, "y0": -70.1, "x1": 70.1, "y1": -23.6},
+    {"name": "THEIR_ZONE", "kind": "theirs", "x0": -70.1, "y0": 23.6, "x1": 70.1, "y1": 70.1},
+    {"name": "NEUTRAL_ZONE_1", "kind": "neutral", "x0": -70.1, "y0": -23.6, "x1": -23.6, "y1": 23.6},
+    {"name": "NEUTRAL_ZONE_2", "kind": "neutral", "x0": 23.6, "y0": -23.6, "x1": 70.1, "y1": 23.6},
+    {"name": "CENTER_ZONE", "kind": "center", "x0": -23.6, "y0": -23.6, "x1": 23.6, "y1": 23.6},
+  ],
+  start_areas: [
+    {"name": "START_LEFT", "x0": -70.1, "y0": -70.1, "x1": -41.0, "y1": -48.0},
+    {"name": "START_RIGHT", "x0": 41.0, "y0": -70.1, "x1": 70.1, "y1": -48.0},
+  ],
+  robot: {"length": 17.0, "width": 16.0, "front": 7.0, "back": 10.0},
+};
+
 // What window.ScourgeMap.load gets: { mapData, csvTexts: [{ name, text }], simulated, note, build }. Routes only ever come from mapData.
 function buildModel(input) {
   const i = input && typeof input === 'object' ? input : {};
   const m = normalize(i.mapData);
   if (!(i.mapData && i.mapData.field && typeof i.mapData.field === 'object')) m.field = normField(DEFAULT_FIELD);
+  m.fields = { override: m.field, pinnacle: normField(PINNACLE_FIELD) };
   const notes = [i.note, m.note].filter(Boolean).map(String); // the host's line and the data's own line, once each
   m.note = notes.filter((x, j) => notes.indexOf(x) === j).join(' ');
   m.sim = normSim(i.simulated);
@@ -1571,6 +1662,13 @@ function frameCtx(model, sel, W, fit, layers) {
   return { predSegs, frame: 'field', k, span, win, fit: span < 2 * wall - 0.01, vb: [win.x0 - mg, -win.y1 - mg, span + 2 * mg, span + 2 * mg], grid: 24, wall, W: wide, pins };
 }
 
+// The model with the other field swapped in, so every drawing and check that reads model.field sees the field being shown. Built once per model.
+function fieldModel(model, id) {
+  if (id !== 'pinnacle' || !model.fields) return model;
+  if (!model.fieldView) model.fieldView = Object.assign(Object.create(model), { field: model.fields.pinnacle, base: model });
+  return model.fieldView;
+}
+
 function resolveSel(model, state) {
   const session = state.session != null ? model.sessions.find((s) => s.id === state.session) || null : null;
   let baseRoute = state.route != null && model.routes[state.route] ? model.routes[state.route] : null;
@@ -1583,18 +1681,22 @@ function resolveSel(model, state) {
   const rows = runSession ? missRows(route, runSession) : null;
   const entries = routeEntries(model);
   const entry = state.pick != null ? entries.find((x) => x.key === state.pick) || null : state.route != null ? entries.find((x) => x.routeIdx === state.route) || null : null;
-  const sim = frame === 'field' ? simFor(entry, state.side || 'L') : null;
+  // The field on screen: the draw tool's own choice, else the picked route's field. A prediction is only drawn on the field it was made for.
+  const entryField = entry && entry.field === 'pinnacle' ? 'pinnacle' : 'override';
+  const fieldId = state.fieldId === 'pinnacle' || state.fieldId === 'override' ? state.fieldId : entryField;
+  const sim = frame === 'field' && fieldId === entryField ? simFor(entry, state.side || 'L') : null;
   // The transport plays the prediction unless the recording was asked for (and has a path to play).
   const hasPath = !!(session && session.samples.length);
   const playSim = !!sim && state.layers.pred !== false && !(state.play === 'rec' && hasPath);
   const scrub0 = playSim ? sim : hasPath ? (isHand(session) ? travelOf(session) : session) : null; // a hand recording plays on travel, never on its clock
   // Right shows true field position: the prediction and every recorded layer are mirrored together, so they always share a frame.
-  const mirror = frame === 'field' && (sim ? sim.side : state.side || 'L') === 'R';
+  const mirror = frame === 'field' && fieldId === 'override' && (sim ? sim.side : state.side || 'L') === 'R';
   const M = (x) => (mirror ? mirroredSession(x) : x), mroute = mirror ? mirroredRoute(route, model.field) : route;
   const mrows = runSession && mirror ? missRows(mroute, M(runSession)) : rows; // a miss distance is the same under the mirror, but its target fallbacks are not
-  const list = frame === 'field' ? contacts(model, mroute) : [];
+  const fm = fieldModel(model, fieldId);
+  const list = frame === 'field' ? contacts(fm, mroute) : [];
   const viewMode = state.view || (route || session || rawSession ? 'fit' : 'field'); // no recording: show the whole field, it reads at a glance
-  return { route: mroute, session: M(session), frame, rawSession: M(rawSession), runSession: M(runSession), rows: mrows, scrub: M(scrub0), contactList: list, entry, sim: M(sim), mirror, viewMode };
+  return { route: mroute, session: M(session), frame, rawSession: M(rawSession), runSession: M(runSession), rows: mrows, scrub: M(scrub0), contactList: list, entry, sim: M(sim), mirror, viewMode, fieldId, fm };
 }
 
 /* ---------- map layers ---------- */
@@ -1610,9 +1712,10 @@ function renderBase(model, sel, ctx) {
     p.push(at(x1, y0, k, '<text class="station" x="-6" y="-22" text-anchor="end">START POSE IS THE ORIGIN, NOT A FIELD SPOT</text>'));
     return p.join('');
   }
-  const w = F.wall, g = ctx.grid, win = ctx.win;
+  const w = F.wall, g = ctx.grid, win = ctx.win, pin = F.id === 'pinnacle';
   p.push('<rect class="field-bg" x="' + f3(-w) + '" y="' + f3(-w) + '" width="' + f3(2 * w) + '" height="' + f3(2 * w) + '"/>');
-  p.push('<polygon class="opp-side" points="' + f3(-w) + ',' + f3(w) + ' ' + f3(w) + ',' + f3(-w) + ' ' + f3(-w) + ',' + f3(-w) + '"/>');
+  if (pin) F.zones.forEach((z) => p.push('<rect class="zone-' + esc(z.kind) + '" x="' + f3(z.x0) + '" y="' + f3(-z.y1) + '" width="' + f3(z.x1 - z.x0) + '" height="' + f3(z.y1 - z.y0) + '"><title>' + esc(z.name) + '</title></rect>'));
+  else p.push('<polygon class="opp-side" points="' + f3(-w) + ',' + f3(w) + ' ' + f3(w) + ',' + f3(-w) + ' ' + f3(-w) + ',' + f3(-w) + '"/>');
   // Grid lines span the whole field (the view clips them); axis numbers sit on the edge of what is shown.
   for (let v = -Math.floor(w / g) * g; v <= w; v += g) {
     const cls = (v === 0 ? 'seam' : 'grid') + ' ns';
@@ -1628,7 +1731,11 @@ function renderBase(model, sel, ctx) {
     p.push(at(win.x1, win.y0, k, '<text class="axis" y="27" text-anchor="end">+X right, in</text>'));
     p.push(at(win.x0, win.y1, k, '<text class="axis" y="-18" text-anchor="start">+Y up, in</text>'));
   }
-  p.push('<line class="aline ns" x1="' + f3(-w) + '" y1="' + f3(w) + '" x2="' + f3(w) + '" y2="' + f3(-w) + '"/>');
+  if (pin) {
+    // Tape sits over the grid; the start boxes are drawn light, since RECF robots start touching a Loader rather than in the box.
+    F.tape.forEach((t) => p.push('<line class="tape ns" x1="' + f3(t.x1) + '" y1="' + f3(-t.y1) + '" x2="' + f3(t.x2) + '" y2="' + f3(-t.y2) + '"/>'));
+    F.startAreas.forEach((z) => p.push('<rect class="start-area ns" x="' + f3(z.x0) + '" y="' + f3(-z.y1) + '" width="' + f3(z.x1 - z.x0) + '" height="' + f3(z.y1 - z.y0) + '"><title>Starting area</title></rect>'));
+  } else p.push('<line class="aline ns" x1="' + f3(-w) + '" y1="' + f3(w) + '" x2="' + f3(w) + '" y2="' + f3(-w) + '"/>');
   // Our side is below the line, the other alliance's side above. A caption is left out when no stretch of the line in view is clear.
   fieldLabels(F, ctx).caps.forEach((c) => p.push(at(c.t, c.t, k, '<g transform="rotate(-45)"><text class="lbl halo' + (c.muted ? ' muted' : '') + '" y="' + c.off + '" text-anchor="middle">' + c.text + '</text></g>')));
   p.push('<rect class="wall ns" x="' + f3(-w) + '" y="' + f3(-w) + '" width="' + f3(2 * w) + '" height="' + f3(2 * w) + '"/>');
@@ -1681,7 +1788,7 @@ function fieldLabels(F, ctx) {
   }
   // The captions go first, on the stretch of y = x in view that is clear of every Goal and its default name.
   const lo = Math.max(win.x0, win.y0), hi = Math.min(win.x1, win.y1), caps = [];
-  if (hi - lo > 24) {
+  if (hi - lo > 24 && F.id !== 'pinnacle') { // the captions name the Override Autonomous Line, which Pinnacle does not have
     CAPTIONS.forEach((c) => {
       const len = c.text.length * c.cw, half = (len * k) / (2 * Math.SQRT2); // half the text's length as a stretch of t on the line
       let best = null;
@@ -1732,6 +1839,12 @@ function renderFieldObjects(model, route, ctx) {
       const w = o.zone.w, h = o.zone.h, left = o.x < 0;
       p.push('<rect class="zone ns" x="' + f3(left ? -F.wall : F.wall - w) + '" y="' + f3(-(-F.wall + h)) + '" width="' + f3(w) + '" height="' + f3(h) + '"><title>Load Zone near ' + esc(o.name || 'Loader') + '</title></rect>');
     }
+    if (o.w !== null && o.h !== null) {
+      // A Pinnacle Loader: its real footprint, w along the wall and h deep, so it reads as a small bay on the wall.
+      const horiz = Math.abs(Math.abs(o.y) - F.wall) < Math.abs(Math.abs(o.x) - F.wall), lw = horiz ? o.w : o.h, lh = horiz ? o.h : o.w;
+      p.push('<rect class="loader ns" x="' + f3(o.x - lw / 2) + '" y="' + f3(-o.y - lh / 2) + '" width="' + f3(lw) + '" height="' + f3(lh) + '" rx="0.4"><title>' + esc(o.name || 'Loader') + '</title></rect>');
+      return;
+    }
     p.push(at(o.x, o.y, k, '<rect class="loader" x="-6" y="-6" width="12" height="12" rx="1.5" transform="rotate(45)"/><title>' + esc(o.name || 'Loader') + '</title>'));
   });
   F.toggles.forEach((o) => {
@@ -1740,6 +1853,11 @@ function renderFieldObjects(model, route, ctx) {
     p.push('<rect class="' + cls + '" x="' + f3(o.x - w / 2) + '" y="' + f3(-o.y - h / 2) + '" width="' + f3(w) + '" height="' + f3(h) + '" rx="0.5"><title>' + esc(o.name || 'Toggle') + '</title></rect>');
   });
   F.objects.forEach((o) => {
+    if (o.kind === 'pin_flat' && o.len !== null && o.w !== null) {
+      // A Pin lying down: len by w inches, long axis o.a degrees counter-clockwise from +X (the page's y runs down, so the turn is negated).
+      p.push('<g transform="translate(' + f3(o.x) + ' ' + f3(-o.y) + ') rotate(' + f3(-(o.a !== null ? o.a : 0)) + ')"><rect class="pin-flat ns" x="' + f3(-o.len / 2) + '" y="' + f3(-o.w / 2) + '" width="' + f3(o.len) + '" height="' + f3(o.w) + '" rx="' + f3(o.w / 2) + '"><title>' + esc(o.name || 'Pin') + ' (lying Pin)</title></rect></g>');
+      return;
+    }
     const R = Math.max((o.r !== null ? o.r : 1.6) / k, 3);
     let inner;
     if (o.kind === 'cup') inner = '<circle class="obj-ring" r="' + f3(R) + '"/>';
@@ -2086,10 +2204,11 @@ function nearestGoal(field, x, y) {
 function buildPlan(o) {
   const text = (v) => String(v == null ? '' : v).trim();
   const plan = {
-    schema: 1, kind: 'proposed-auto-plan', name: text(o.name), side: o.side === 'R' ? 'R' : 'L', note: text(o.note),
+    schema: 1, kind: 'proposed-auto-plan', name: text(o.name), side: o.side === 'R' && o.field !== 'pinnacle' ? 'R' : 'L', note: text(o.note),
     build: typeof o.build === 'string' && o.build ? o.build.slice(0, 100) : null,
     lines: arr(o.lines).map((l) => ({ points: arr(l).map((p) => [round2(p[0]), round2(p[1])]) })),
   };
+  if (o.field === 'pinnacle') plan.field = 'pinnacle'; // left out for Override, so an Override plan is exactly what it was before
   if (arr(o.actions).length) plan.actions = arr(o.actions).map((a) => ({ type: a.type, line: a.line, along: round2(a.along), at: [round2(a.at[0]), round2(a.at[1])], detail: text(a.detail) }));
   return plan;
 }
@@ -2100,6 +2219,8 @@ function validatePlan(plan) {
   if (plan.name.length > PLAN_LIMITS.name) return 'The name can be up to ' + PLAN_LIMITS.name + ' characters.';
   if (typeof plan.note !== 'string' || plan.note.length > PLAN_LIMITS.note) return 'The note can be up to ' + PLAN_LIMITS.note + ' characters.';
   if (plan.side !== 'L' && plan.side !== 'R') return 'The plan needs a side.';
+  if (plan.field !== undefined && plan.field !== 'override' && plan.field !== 'pinnacle') return 'The plan names a field this page does not know.';
+  if (plan.field === 'pinnacle' && plan.side !== 'L') return 'A Pinnacle plan is drawn in true field coordinates, so its side is L.';
   if (plan.build !== null && (typeof plan.build !== 'string' || plan.build.length > 100)) return 'The build name is too long.';
   if (!Array.isArray(plan.lines) || !plan.lines.length) return 'Draw at least one line before sending.';
   if (plan.lines.length > PLAN_LIMITS.lines) return 'A plan holds up to ' + PLAN_LIMITS.lines + ' lines.';
@@ -2145,14 +2266,14 @@ function sanitizeDraft(raw) {
     if (off > 0.5) return; // the spec says the point is always on the line
     actions.push({ type: a.type, line: n, along: round2(a.along), at: [round2(a.at[0]), round2(a.at[1])], detail: typeof a.detail === 'string' ? a.detail.slice(0, PLAN_LIMITS.detail) : '' });
   });
-  return {
+  return Object.assign({
     lines, actions: sortActions(actions), name: typeof d.name === 'string' ? d.name.slice(0, PLAN_LIMITS.name) : '', note: typeof d.note === 'string' ? d.note.slice(0, PLAN_LIMITS.note) : '',
-    side: lines.length ? (d.side === 'R' ? 'R' : 'L') : null,
-  };
+    side: lines.length ? (d.side === 'R' && d.field !== 'pinnacle' ? 'R' : 'L') : null,
+  }, d.field === 'pinnacle' ? { field: 'pinnacle' } : {});
 }
 // What the map draws while drawing: the whole field with only the prediction under the lines, so no route, recording or step mark is mistaken for one.
 function drawState(state) {
-  return Object.assign({}, state, { route: null, session: null, step: null, hover: null, view: 'field', layers: Object.assign({}, state.layers, { pred: true }) });
+  return Object.assign({}, state, { fieldId: state.draw && state.draw.field === 'pinnacle' ? 'pinnacle' : 'override', route: null, session: null, step: null, hover: null, view: 'field', layers: Object.assign({}, state.layers, { pred: true }) });
 }
 // Each line: its path, a dot where it starts, an arrow where it ends, and its order number. Sized in px through ctx.k like every other mark.
 function planTag(n) {
@@ -2407,14 +2528,17 @@ function renderLayers(model, state, sel) {
   const entries = routeEntries(model), sides = sel.entry && !sel.entry.fixed ? ['L', 'R'].filter((sd) => sel.entry.sim[sd]) : [];
   const pick = entries.length > 1 ? '<div class="seg" role="group" aria-label="Route">' + entries.map((x) => '<button type="button" data-key="pick-' + esc(x.key) + '" data-pick="' + esc(x.key) + '" aria-pressed="' + (sel.entry === x) + '">' + esc(x.label) + '</button>').join('') + '</div>' : '';
   // Drawing with nothing predicted still needs a side to pick; a plan has one side, so the control locks once there is a line.
-  const drawing = !!state.draw, locked = drawing && state.draft > 0;
-  const side = sides.length > 1 || (drawing && !sides.length) ? '<div class="seg" role="group" aria-label="Side">' + ['L', 'R'].map((sd) => '<button type="button" data-key="side-' + sd + '" data-side="' + sd + '" aria-pressed="' + (sel.sim ? sel.sim.side === sd : (state.side || 'L') === sd) + '"' + (locked ? ' disabled' : '') + '>' + (sd === 'L' ? 'Left' : 'Right') + '</button>').join('') + '</div>' : sel.entry && sel.entry.fixed && sel.sim && !drawing ? '<div class="seg fixed" role="group" aria-label="Side"><button type="button" data-key="side-fixed" aria-pressed="true" disabled title="Skills runs once from a fixed start on the field, so it has one side only">Fixed start</button></div>' : '';
+  const drawing = !!state.draw, locked = drawing && state.draft > 0, pinDraw = drawing && state.draw.field === 'pinnacle';
+  const fseg = (id, label) => '<button type="button" data-key="field-' + id + '" data-field="' + id + '" aria-pressed="' + ((state.draw.field === 'pinnacle') === (id === 'pinnacle')) + '"' + (locked ? ' disabled' : '') + '>' + label + '</button>';
+  // The field choice sits in the draw toolbar only; it locks with the first line, like the side.
+  const fieldSw = drawing ? '<div class="seg" role="group" aria-label="Field">' + fseg('override', 'Override') + fseg('pinnacle', 'Pinnacle') + '</div>' : '';
+  const side = pinDraw ? '' : sides.length > 1 || (drawing && !sides.length) ? '<div class="seg" role="group" aria-label="Side">' + ['L', 'R'].map((sd) => '<button type="button" data-key="side-' + sd + '" data-side="' + sd + '" aria-pressed="' + (sel.sim ? sel.sim.side === sd : (state.side || 'L') === sd) + '"' + (locked ? ' disabled' : '') + '>' + (sd === 'L' ? 'Left' : 'Right') + '</button>').join('') + '</div>' : sel.entry && sel.entry.fixed && sel.sim && !drawing ? '<div class="seg fixed" role="group" aria-label="Side"><button type="button" data-key="side-fixed" aria-pressed="true" disabled title="This route runs once from a fixed start on the field, so it has one side only">Fixed start</button></div>' : '';
   const view = '<div class="seg" role="group" aria-label="Map view">' + seg('fit', 'Fit route', sel.viewMode !== 'field') + seg('field', 'Whole field', sel.viewMode === 'field') + '</div>';
   const av = layerAvail(sel), defs = LAYER_DEFS.filter((d) => av[d[0]]);
   const rows = defs.map((d) => '<button type="button" class="menu-row" data-key="layer-' + d[0] + '" data-layer="' + d[0] + '" aria-pressed="' + !!state.layers[d[0]] + '"><svg class="chk" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6.5 5 9.5 10 3"/></svg>' + layerSwatch(d[0]) + '<span>' + esc(d[1]) + '</span></button>').join('');
   const menu = defs.length > 1 ? '<details class="menu" data-keep="layers"' + isOpen(state, 'layers') + '><summary><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1.5 13 4.7 7 8 1 4.7z"/><path d="M1 7.6 7 10.9 13 7.6"/></svg>Layers</summary><div class="menu-pop" role="group" aria-label="Map layers">' + rows + '</div></details>' : '';
   const draw = state.canDraw ? '<button type="button" class="drawbtn" data-key="draw" data-opendraw="1"><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M2.2 11.8 2.8 9 9.6 2.2a1.1 1.1 0 0 1 1.6 0l.6.6a1.1 1.1 0 0 1 0 1.6L5 11.2z"/><path d="M8.4 3.4l2.2 2.2"/></svg>' + (state.draft ? 'Continue plan' : 'Draw a plan') + '</button>' : '';
-  if (drawing) return pick + side ? '<div class="tb tb-left">' + pick + side + '</div>' : '';
+  if (drawing) return '<div class="tb tb-left">' + pick + fieldSw + side + '</div>';
   return '<div class="tb tb-left">' + pick + side + '</div><div class="tb tb-right">' + view + menu + draw + '</div>';
 }
 // One chip per line that is drawn, under the map, so the dashed line always has its own entry.
@@ -2645,18 +2769,18 @@ function renderEmpty(model, state) {
 function renderAll(model, state, W) {
   const sel = resolveSel(model, state), drawing = !!state.draw;
   const mst = drawing ? drawState(state) : state, msel = drawing ? resolveSel(model, mst) : sel;
-  const ctx = frameCtx(model, msel, W, msel.viewMode !== 'field', mst.layers);
+  const ctx = frameCtx(msel.fm, msel, W, msel.viewMode !== 'field', mst.layers);
   const cur = currentStepAt(sel, state.t || 0);
   return {
     sel, msel, ctx, viewBox: ctx.vb.map(f3).join(' '),
-    static: renderStatic(model, mst, msel, ctx), selLayer: renderSel(model, mst, msel, ctx), play: drawing ? '' : renderPlay(model, state, sel, ctx), plan: renderPlan(state.draw, ctx),
+    static: renderStatic(msel.fm, mst, msel, ctx), selLayer: renderSel(msel.fm, mst, msel, ctx), play: drawing ? '' : renderPlay(sel.fm, state, sel, ctx), plan: renderPlan(state.draw, ctx),
     summary: renderSummary(model, state, sel), warn: renderWarn(model, sel, state), lists: renderLists(model, state, sel), layers: renderLayers(model, state, msel), inspector: renderInspector(model, state, sel),
     steps: renderSteps(model, state, sel, cur), ticks: renderTicks(sel), playinfo: playInfoText(sel, state.t || 0),
     key: renderKey(mst, msel), playsrc: renderPlaySrc(state, sel), empty: state.draw ? '' : renderEmpty(model, state), listed: listedSessions(model, sel.entry).length,
   };
 }
 
-const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normalize, resolveWaypoints, missRows, runSummary, pushDistances, footprintCorners, hull, areaOf, interpPose, circleHitsHull, sweepPoints, contacts, rawSessionFor, layoutTags, fitWindow, openingPoint, displayRoute, startPoseOf, frameCtx, resolveSel, renderAll, renderPlay, fmt, esc, activeEvent, shortName, parseWire, leftFrame, rejectionText, buildModel, sameSession, lastRun, pickSelection, slotFromBuild, runMatchesRoute, whenFine, openingLabel, hostAllowed, thinPath, drawnPath, DEFAULT_FIELD, mirroredSession, mirroredRoute, normSim, buildNum, routeEntries, pickView, simFor, belongs, fieldLabels, renderEmpty,
+const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normalize, resolveWaypoints, missRows, runSummary, pushDistances, footprintCorners, hull, areaOf, interpPose, circleHitsHull, sweepPoints, contacts, rawSessionFor, layoutTags, fitWindow, openingPoint, displayRoute, startPoseOf, frameCtx, resolveSel, renderAll, renderPlay, fmt, esc, activeEvent, shortName, parseWire, leftFrame, rejectionText, buildModel, sameSession, lastRun, pickSelection, slotFromBuild, runMatchesRoute, whenFine, openingLabel, hostAllowed, thinPath, drawnPath, DEFAULT_FIELD, PINNACLE_FIELD, normField, fieldModel, mirroredSession, mirroredRoute, normSim, buildNum, routeEntries, pickView, simFor, belongs, fieldLabels, renderEmpty,
   samplesUpTo, TRAVEL_DEG, TRAVEL_RATE, isHand, travelOf, inchesAt, fmtIn, readoutText, playRate, PLAN_LIMITS, fieldFromScreen, simplifyLine, strokeToLine, addPlanLine, buildPlan, validatePlan, sanitizeDraft, planLength, lineLength, renderPlan, drawState, renderLayers, endHeading,
   PLAN_ACTIONS, snapToLines, sortActions, actionPlace, nearestGoal, actionMarkers, renderActions, renderPicker, placePicker, renderActionRows };
 /*</pure>*/
@@ -2683,11 +2807,11 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   if (model.generated) $('gen').textContent = 'Built ' + model.generated;
 
   // Draw tool state. It lives here, not in the model, so a load() (Refresh) repaints around a drawing in progress and never drops it.
-  const plan = { on: false, lines: [], actions: [], side: null, name: '', note: '', undo: [], stroke: null, pointer: null, sending: false, sendId: null, timer: 0, msg: null, pick: null, pickAt: 0, hot: null };
+  const plan = { on: false, field: 'override', lines: [], actions: [], side: null, name: '', note: '', undo: [], stroke: null, pointer: null, sending: false, sendId: null, timer: 0, msg: null, pick: null, pickAt: 0, hot: null };
   const planHost = () => (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.scourgePlan) || null;
   // Draw is offered only with someone to hand the plan to: the web page's frame, or the Mac app's own handler. A page opened by hand has neither.
   const canDraw = () => EMBED && (window.parent !== window || !!planHost());
-  const drawNow = () => ({ lines: plan.lines, stroke: plan.stroke, actions: plan.actions, pick: plan.pick, hot: plan.hot });
+  const drawNow = () => ({ field: plan.field, lines: plan.lines, stroke: plan.stroke, actions: plan.actions, pick: plan.pick, hot: plan.hot });
   const view = () => {
     state.canDraw = canDraw(); state.draft = plan.lines.length;
     state.draw = plan.on ? drawNow() : null;
@@ -2795,6 +2919,11 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     state.hover = null; state.t = 0; state.cleared = false; state.play = defaultPlay();
     refresh();
   }
+  function selectField(id) {
+    if (!plan.on || plan.lines.length || plan.sending || plan.field === id) return; // a plan has one field
+    plan.field = id; plan.msg = null;
+    saveDraft(); refresh();
+  }
   function selectSide(side) {
     if (plan.on && plan.lines.length) return; // a plan has one side
     stop();
@@ -2862,7 +2991,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   // The draft (lines, actions, name, note, side) is kept where storage works; a blocked or full store just means it is not kept.
   function saveDraft() {
     try {
-      if (plan.lines.length || plan.name || plan.note) localStorage.setItem(DRAFT_KEY, JSON.stringify({ lines: plan.lines, actions: plan.actions, name: plan.name, note: plan.note, side: plan.side }));
+      if (plan.lines.length || plan.name || plan.note) localStorage.setItem(DRAFT_KEY, JSON.stringify({ lines: plan.lines, actions: plan.actions, name: plan.name, note: plan.note, side: plan.side, field: plan.field }));
       else localStorage.removeItem(DRAFT_KEY);
     } catch (err) { /* no storage here */ }
   }
@@ -2870,7 +2999,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     if (!canDraw()) return;
     try {
       const raw = localStorage.getItem(DRAFT_KEY), d = raw ? sanitizeDraft(JSON.parse(raw)) : null;
-      if (d) { plan.lines = d.lines; plan.actions = d.actions; plan.name = d.name; plan.note = d.note; plan.side = d.side; nameIn.value = d.name; noteIn.value = d.note; }
+      if (d) { plan.lines = d.lines; plan.actions = d.actions; plan.name = d.name; plan.note = d.note; plan.side = d.side; plan.field = d.field || 'override'; nameIn.value = d.name; noteIn.value = d.note; }
     } catch (err) { /* nothing saved, or not readable */ }
   }
   // Which side the lines belong to is the side showing when the first one was drawn; after that the page holds it.
@@ -2902,7 +3031,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     $('actbox').hidden = !a.length;
     $('actcount').textContent = a.length ? plural(a.length, 'action') : '';
     const was = document.activeElement, typing = was && was.dataset && was.dataset.aid !== undefined, from = typing ? was.selectionStart : null, to = typing ? was.selectionEnd : null;
-    keepFocus(() => put(list, renderActionRows(a, plan.lines, model.field)));
+    keepFocus(() => put(list, renderActionRows(a, plan.lines, last.msel.fm.field)));
     list.querySelectorAll('input[data-aid]').forEach((inp) => {
       const x = a[+inp.dataset.aid];
       if (x && inp.value !== x.detail) inp.value = x.detail;
@@ -2934,6 +3063,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     if (plan.on || !canDraw()) return;
     stop();
     plan.on = true; plan.msg = null;
+    if (!plan.lines.length) plan.field = last.sel.fieldId; // start on the field being looked at
     keepPlanSide();
     state.hover = null;
     refresh();
@@ -3036,7 +3166,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   }
   function sendPlan() {
     if (!plan.on || plan.sending) return;
-    const body = buildPlan({ name: plan.name, note: plan.note, side: plan.side, build: last.msel.sim && model.sim ? model.sim.tag : null, lines: plan.lines, actions: plan.actions });
+    const body = buildPlan({ name: plan.name, note: plan.note, side: plan.side, field: plan.field, build: last.msel.sim && model.sim ? model.sim.tag : null, lines: plan.lines, actions: plan.actions });
     const bad = validatePlan(body);
     if (bad) { setMsg(bad, 'warn'); paintDraw(); return; }
     const id = newId();
@@ -3127,6 +3257,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     if (el.closest('[data-opendraw]')) return enterDraw();
     if ((n = el.closest('[data-pick]'))) return selectEntry(n.dataset.pick);
     if ((n = el.closest('[data-side]'))) return selectSide(n.dataset.side);
+    if ((n = el.closest('[data-field]'))) return selectField(n.dataset.field);
     if ((n = el.closest('[data-play]'))) return setPlay(n.dataset.play);
     if ((n = el.closest('[data-session]'))) return selectSession(n.dataset.session);
     if (el.closest('[data-clear]')) { if (state.session) selectSession(state.session); return; }

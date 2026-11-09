@@ -140,6 +140,31 @@
         <ul class="msgs" id="map-cloud-msgs" role="status" aria-live="polite"></ul>
       </section>
 
+      <section class="panel" id="map-share" aria-label="Share with an alliance partner" hidden>
+        <details class="disc" id="share-disc">
+          <summary>Share with an Alliance Partner</summary>
+          <div class="disc-body">
+            <p class="caption secondary share-lead">Partners see only our match auton, nothing else. Each team opens it with its own password.</p>
+            <ul class="msgs" id="share-msgs" role="status" aria-live="polite"></ul>
+            <ul class="share-list" id="share-list" aria-label="Partner teams"></ul>
+            <p class="caption share-empty" id="share-empty" hidden>No teams yet. Add your alliance partner below.</p>
+            <form class="share-form" id="share-form" autocomplete="off" novalidate>
+              <div class="form">
+                <label for="share-name">Team</label>
+                <input id="share-name" name="partner-team" type="text" maxlength="40" placeholder="Team name" autocomplete="off" autocapitalize="words" autocorrect="off" spellcheck="false" enterkeyhint="go">
+                <label for="share-code">Password</label>
+                <input id="share-code" name="partner-password" type="text" maxlength="64" placeholder="Their team name" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="done" aria-describedby="share-code-hint">
+                <p class="hint" id="share-code-hint" data-kind="warn" hidden></p>
+                <label for="share-build">Build</label>
+                <select id="share-build" name="partner-build"></select>
+              </div>
+              <p class="hint" id="share-form-hint" data-kind="bad" role="alert" hidden></p>
+              <div class="btn-row"><button type="submit" class="btn prominent" id="share-add">Add Team</button></div>
+            </form>
+          </div>
+        </details>
+      </section>
+
       <section class="panel" aria-label="Route data">
         <input id="map-file" type="file" multiple accept=".csv,.json,text/csv,application/json,text/plain" hidden>
 

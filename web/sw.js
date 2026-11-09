@@ -15,6 +15,8 @@ const SHELL = [
   './mapstore.js',
   './maptab.js',
   './mapcloud.js',
+  './mapshare.js',
+  './partnerdata.js',
   './manifest.webmanifest',
   './protocol/index.js',
   './protocol/connection.js',
@@ -69,7 +71,15 @@ self.addEventListener('fetch', (event) => {
   // bypasses this worker. This keeps it that way if the relay is ever proxied
   // under this origin: it is never cached here.
   if (url.pathname.endsWith('/map')) return;
+  // The alliance partner page never uses this cache. It is not part of the offline app, and a
+  // map.html cached from an older deploy may not have partner mode. Its map frame asks with
+  // ?partner=1; its own files and the styles and modules it loads go to the network below.
+  if (url.searchParams.get('partner') === '1' || /\/partner\.(html|js)$/.test(url.pathname)) return;
   event.respondWith((async () => {
+    if (event.clientId) {
+      const client = await self.clients.get(event.clientId);
+      if (client && new URL(client.url).pathname.endsWith('/partner.html')) return fetch(req);
+    }
     const shell = await caches.open(CACHE);
     const hit = await shell.match(req, { ignoreSearch: true });
     if (hit) return hit;

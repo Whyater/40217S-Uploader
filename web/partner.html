@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Match Auton | 40217S Scourge</title>
+  <meta name="description" content="40217S Scourge's match autonomous route, for alliance partners.">
+  <meta name="robots" content="noindex">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#ECECEC" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1E1E1E" media="(prefers-color-scheme: dark)">
+  <link rel="icon" href="icons/icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+    <symbol id="i-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8 7.2v3.9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" fill="none"/><circle cx="8" cy="4.9" r=".85" fill="currentColor"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 1.6c.5 0 .9.3 1.2.7l5.2 9.3c.5.9-.1 2-1.2 2H2.8c-1.1 0-1.7-1.1-1.2-2l5.2-9.3c.3-.4.7-.7 1.2-.7z" fill="currentColor"/><path d="M8 6v3.4" stroke="var(--knock)" stroke-width="1.4" stroke-linecap="round" fill="none"/><circle cx="8" cy="11.4" r=".8" fill="var(--knock)"/></symbol>
+    <symbol id="i-check" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="currentColor"/><path d="M4.9 8.2l2.2 2.2 4-4.6" stroke="var(--knock)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></symbol>
+    <symbol id="i-route" viewBox="0 0 32 32"><circle cx="7" cy="25" r="3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 25h9.5a4.5 4.5 0 0 0 0-9h-7a4.5 4.5 0 0 1 0-9H22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M22 3.6l4.4 3.4L22 10.4z" fill="currentColor"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8 4.4V8l2.4 1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></symbol>
+  </svg>
+
+  <div class="page partner-page" id="page" data-screen="lock">
+    <header class="pbar" id="bar" hidden>
+      <div class="pbar-text">
+        <h1 class="headline">40217S Scourge</h1>
+        <p class="callout secondary" id="bar-detail">Match autonomous</p>
+      </div>
+      <button type="button" class="link" id="sign-out">Sign Out</button>
+    </header>
+
+    <section class="panel" id="lock" aria-labelledby="lock-title">
+      <div class="empty">
+        <svg class="ico-lg" aria-hidden="true"><use href="#i-route"/></svg>
+        <h1 class="headline" id="lock-title">40217S Scourge match auton</h1>
+        <p class="callout secondary">Our predicted route for the 15 second autonomous, shared with our alliance partners. Enter the password we gave your team.</p>
+      </div>
+      <form class="code-row" id="lock-form" autocomplete="off" novalidate>
+        <label class="sr-only" for="code">Password</label>
+        <input id="code" name="partner-password" type="text" placeholder="Password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go" maxlength="64" aria-describedby="lock-hint">
+        <button type="submit" class="btn prominent" id="go"><span class="spin" aria-hidden="true"></span><span id="go-label">View Route</span></button>
+      </form>
+      <p class="hint" id="lock-hint" role="alert" hidden></p>
+    </section>
+
+    <section class="panel" id="info" aria-label="About this route" hidden>
+      <div class="build">
+        <div class="build-text">
+          <p class="headline" id="info-title"></p>
+          <p class="callout secondary" id="info-detail"></p>
+        </div>
+        <button type="button" class="btn bordered accent-text" id="refresh">Refresh</button>
+      </div>
+      <p class="line note">
+        <svg class="ico" aria-hidden="true"><use href="#i-info"/></svg>
+        <span>A simulation from our code, not a recording. The robot may not follow this line exactly.</span>
+      </p>
+      <ul class="msgs" id="msgs" role="status" aria-live="polite"></ul>
+    </section>
+
+    <section class="panel" id="none" aria-labelledby="none-title" hidden>
+      <div class="empty">
+        <svg class="ico-lg muted-ico" aria-hidden="true"><use href="#i-clock"/></svg>
+        <h2 class="headline" id="none-title">No route shared yet</h2>
+        <p class="callout secondary">40217S hasn't shared a route yet. Check back before your match, or ask them.</p>
+        <button type="button" class="btn bordered accent-text" id="none-refresh">Check Again</button>
+      </div>
+      <ul class="msgs" id="none-msgs" role="status" aria-live="polite"></ul>
+    </section>
+
+    <div class="map-card" id="card" hidden>
+      <iframe id="frame" title="Match auton route on the field" scrolling="no"></iframe>
+    </div>
+  </div>
+  <script type="module" src="partner.js"></script>
+</body>
+</html>

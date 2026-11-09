@@ -3,6 +3,7 @@ import { readTab, planAdd, buildInput, summaryText, formatBytes, acceptHeight, M
 import { listFiles, putFiles, removeFile, loadCloud, saveCloud, clearCloud, state as storeState } from './mapstore.js';
 import { acceptPlanSend, checkCode, cleanResponse, describe, replyToPlanPage, sendPlan, syncCloud } from './mapcloud.js';
 import { storedTag } from './releases.js';
+import { initShare } from './mapshare.js';
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -208,6 +209,8 @@ function renderCloud() {
   el.codeHint.textContent = c.hint;
   el.refresh.disabled = c.syncing;
   el.refresh.textContent = c.syncing ? 'Refreshing…' : 'Refresh';
+  share.setVisible(c.hasCode);
+  share.sync();
   if (!c.hasCode) { showMessages([], el.cloudMsgs); el.cloudDetail.textContent = ''; return; }
   if (c.result) {
     const d = describe(c.result, c.tag);
@@ -349,6 +352,24 @@ async function onPlanSend({ id, plan }) {
 window.addEventListener('message', (e) => {
   const send = acceptPlanSend(e, el.frame.contentWindow, location.origin);
   if (send) onPlanSend(send);
+});
+
+/* ---------- sharing with alliance partners ---------- */
+
+// A 401 here means the same as one on the map: the code is cleared and asked for again.
+async function onShareUnauthorized(message) {
+  try { await clearCloud(); } catch { /* the answer is still no */ }
+  applyResult({ status: 'bad-code', reason: null, response: null, fetched: null });
+  M.cloud.hint = message;
+  renderCloud();
+}
+
+const share = initShare({
+  viewedTag: () => {
+    const sim = M.cloud.response && M.cloud.response.sim;
+    return sim && typeof sim.tag === 'string' ? sim.tag : null;
+  },
+  onUnauthorized: onShareUnauthorized,
 });
 
 /* ---------- start ---------- */

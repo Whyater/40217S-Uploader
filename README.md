@@ -57,7 +57,11 @@ The web version also has a **Route Map** tab beside **Upload**. It shows the rob
 5. Check the **Program name** box. This is the name the brain shows for the program. In Competition it starts as `Scourge`. Names can use letters, numbers, spaces, `_`, `.`, and `-`, up to 20 characters, and must start with a letter or number.
 6. Click **Upload to robot** and keep the cable plugged in until it finishes.
 
-When it is done, the program shows on the brain. Run it from the brain screen.
+When it is done, the program shows on the brain. Run it from the brain screen. The message names the build that went on, for example "Uploaded Competition build 308 to slot 1".
+
+### Pick a build (Windows)
+
+The Windows app keeps the three newest published builds on the laptop. **Get latest code** downloads any it does not have yet and removes the oldest, so after one online click you can upload any of the three with no internet. Once there are two or more builds, the **Robot code** section shows a drop-down in place of the build title, for example "Build 313 (latest)", "Build 308" and "Build 304", each with the time it was built. Pick one and the title, **Upload to robot**, **Put tester on robot** and the Route Map prediction all switch to that build. The app remembers your pick. If you pick an older build on purpose, **Get latest code** leaves it picked; if you were on the newest, it moves up to the new newest. Going back to an older build puts older code on the brain, so check the build number in the drop-down before you click **Upload to robot**.
 
 ## Modes
 
@@ -70,7 +74,7 @@ The same robot code is built four ways. The **Mode** box picks which one goes on
 | Drive Test | 3 | Driving only. Autonomous does nothing |
 | Auto Pathing | 4 | The auto pathing program, for working on autonomous paths |
 
-If a mode says the build does not have it, the newest release is older than that mode. Click **Get latest code**, or ask the programmer.
+If a mode says the build does not have it, that build is older than the mode. Click **Get latest code**, pick a newer build in the drop-down (Windows), or ask the programmer.
 
 ## Check the drive (first time, and after any rewiring)
 
@@ -189,11 +193,11 @@ The tests:
 
 The robot source code is private. Each time the programmer pushes to the main branch of the private repository, GitHub Actions builds it and publishes the compiled program to this repository's [Releases](https://github.com/Whyater/40217S-Uploader/releases). A release has the robot program (`hot.package.bin`, `cold.package.bin`, `project.pros`, plus `auton-test-hot.package.bin`, `drive-test-hot.package.bin`, and `autopath-hot.package.bin` for the other modes in newer builds), the Scourge Tester (`tester-hot.package.bin`, `tester-cold.package.bin`, `tester-project.pros`, in newer builds), and `release.json` (the build's tag, title, notes, and time, plus SHA-256 hashes of the other files).
 
-**Get latest code** first checks for a newer uploader (see [Update the uploader](#update-the-uploader)). Then it downloads the newest release and, when the release lists SHA-256 hashes, checks each file before using it. Nothing is built on your laptop. **Upload to robot** hands those files to the official PROS command line tool, pros-cli 3.5.6.
+**Get latest code** first checks for a newer uploader (see [Update the uploader](#update-the-uploader)). Then it downloads the newest release, plus on Windows the two builds before it (found through the releases feed at `releases.atom`; if the feed cannot be read, only the newest is fetched and the builds already on the laptop stay), and, when the release lists SHA-256 hashes, checks each file before using it. Nothing is built on your laptop. **Upload to robot** hands those files to the official PROS command line tool, pros-cli 3.5.6.
 
 The web version is in `web/` and is published with GitHub Pages. Browsers can't download release files from GitHub directly, so `scripts/publish-web.sh` copies the latest release's files onto the site (the `gh-pages` branch) and checks their hashes. It runs on the programmer's computer after each new build. Until it runs, the web version keeps the previous build. The web app sends them to the brain with its own port of the pros-cli 3.5.6 upload code. Its tests replay real pros-cli uploads and check every byte matches. The Route Map tab is the same page the laptop apps use (`web/map.html`), shown in a frame, with the file handling in `web/mapdata.js`, `web/mapstore.js`, and `web/maptab.js`.
 
-The installer downloads pros-cli from [github.com/purduesigbots/pros-cli](https://github.com/purduesigbots/pros-cli) and checks its SHA-256 hash before using it. The app and its files go into `%LOCALAPPDATA%\ScourgeUploader`. pros-cli also writes a small settings folder at `%APPDATA%\PROS`. Apart from those two folders and the two shortcuts, nothing else on your system changes.
+The installer downloads pros-cli from [github.com/purduesigbots/pros-cli](https://github.com/purduesigbots/pros-cli) and checks its SHA-256 hash before using it. The app and its files go into `%LOCALAPPDATA%\ScourgeUploader` (the builds sit in its `builds` folder, one folder per build, and `selected.json` remembers the pick). pros-cli also writes a small settings folder at `%APPDATA%\PROS`. Apart from those two folders and the two shortcuts, nothing else on your system changes.
 
 ## Status
 

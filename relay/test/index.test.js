@@ -767,3 +767,303 @@ test("PUT /map/sim refuses bad tags, bad JSON, other methods, and a missing toke
   delete open.INGEST_TOKEN;
   assert.equal((await worker.fetch(simPut("build-1-a", "{}"), open)).status, 500);
 });
+
+/* ---------- alliance partners ---------- */
+
+const partnersUrl = "https://relay.example/partners";
+const partnerMapUrl = "https://relay.example/partner/map";
+const samplePoints = (n, x0) => Array.from({ length: n }, (_, i) => ({ t: i * 100, x: x0 + i, y: -60 + i, h: 0 }));
+const opening = { t: 2970, step: -1, type: "opening", tx: 1.48, ty: -45.35, th: 90.57, x: 1.48, y: -45.35, h: 90.57, ok: true };
+// The shape sim_export.py writes, with every kind of route it can hold. The commit is the tag's short hash, as in a real export.
+function simBlob(tag = "build-70-abc1234", build = 70) {
+  return JSON.stringify({
+    schema: 1, tag, build, commit: tag.split("-").pop(), generated: "2026-11-09T20:37:44Z", assumptions: "calibrated to Build 251",
+    routes: [
+      { id: "awp-L", slot: null, name: "AWP", side: "L", total_ms: 13050, samples: samplePoints(5, 8), events: [opening], secret: "x" },
+      { id: "awp-R", slot: null, name: "AWP", side: "R", total_ms: 13050, samples: samplePoints(5, 8), events: [opening] },
+      { id: "taught-A-L", slot: "A", name: "Taught A", side: "L", total_ms: 9000, samples: samplePoints(5, 20), events: [] },
+      { id: "taught-A-R", slot: "A", name: "Taught A", side: "R", total_ms: 9000, samples: samplePoints(5, 20), events: [] },
+      { id: "recf", slot: "recf", name: "RECF: right Goal + roller", side: "R", field: "pinnacle", total_ms: 8100, samples: samplePoints(5, 60), events: [] },
+      { id: "skills", slot: "skills", name: "Skills", side: "L", field: "skills", total_ms: 52800, samples: samplePoints(5, 30), events: [opening] },
+      { id: "future-route", slot: null, name: "New", side: "L", samples: samplePoints(5, 0), events: [] },
+    ],
+  });
+}
+
+function partnerEnv(values = {}, teams = null) {
+  const env = mapEnv({ "sim/latest": simBlob("build-71-def5678", 71), "sim/build-70-abc1234": simBlob(), recorded: '{"sessions":[{"id":"run-1"}]}', ...values });
+  if (teams) env.MAP.store.set("partners", JSON.stringify({ version: 1, teams }));
+  return env;
+}
+const archive = { name: "Archive", code: "archive", build: "latest", added: "2026-11-09T00:00:00.000Z" };
+
+function partnerGet(code, url = partnerMapUrl) {
+  return new Request(url, { headers: code === null ? {} : { "X-Partner-Code": code } });
+}
+function partnersCall(method, { body, query = "", code = "code-1234", headers = {} } = {}) {
+  return new Request(partnersUrl + query, {
+    method,
+    headers: { ...(code === null ? {} : { "X-Team-Code": code }), ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...headers },
+    body: body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body),
+  });
+}
+const addTeam = (env, body) => worker.fetch(partnersCall("POST", { body }), env);
+
+test("GET /partner/map with the right code returns only the match auton routes", async () => {
+  const env = partnerEnv({}, [archive]);
+  for (const code of ["archive", "Archive ", "  ARCHIVE"]) {
+    const response = await worker.fetch(partnerGet(code), env);
+    assert.equal(response.status, 200, code);
+    assert.equal(response.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+    assert.equal(response.headers.get("Cache-Control"), "no-store");
+    const text = await response.text();
+    const body = JSON.parse(text);
+    assert.deepEqual(Object.keys(body).sort(), ["build", "generated", "ok", "routes", "tag", "team"]);
+    assert.equal(body.team, "Archive");
+    assert.equal(body.tag, "build-71-def5678");
+    assert.equal(body.build, 71);
+    assert.equal(body.generated, "2026-11-09T20:37:44.000Z");
+    assert.deepEqual(body.routes.map((r) => r.id), ["awp-L", "awp-R"]);
+    assert.deepEqual(Object.keys(body.routes[0]).sort(), ["events", "id", "name", "samples", "side", "total_ms"]);
+    assert.deepEqual(body.routes[0].events, [opening]);
+    for (const leak of ["taught", "recf", "skills", "Skills", "RECF", "future-route", "recorded", "sessions", "run-1", "assumptions", "secret", "code-1234", "archive"]) {
+      assert.doesNotMatch(text, new RegExp(leak), leak);
+    }
+    // The commit field is left out, but the tag carries the same short hash, as the public release names do.
+    assert.equal("commit" in body, false);
+    assert.equal(JSON.parse(env.MAP.store.get("sim/latest")).commit, "def5678");
+    assert.ok(body.tag.endsWith("-def5678"));
+  }
+});
+
+test("GET /partner/map with a wrong, missing or team code is 401 with one body", async () => {
+  const env = partnerEnv({}, [archive]);
+  const bodies = new Set();
+  for (const code of [null, "", "archiv", "archive2", "code-1234", "ingest-1234", "x".repeat(5000)]) {
+    const response = await worker.fetch(partnerGet(code), env);
+    assert.equal(response.status, 401, String(code).slice(0, 10));
+    assert.equal(response.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+    bodies.add(await response.text());
+  }
+  assert.deepEqual([...bodies], ['{"ok":false,"error":"wrong password"}']);
+  const none = await worker.fetch(partnerGet("archive"), partnerEnv());
+  assert.equal(none.status, 401, "no partner list means no partner gets in");
+});
+
+test("a partner code is refused by every other endpoint", async () => {
+  const env = partnerEnv({}, [archive]);
+  const map = await worker.fetch(mapGet("", { "X-Team-Code": "archive" }), env);
+  assert.equal(map.status, 401);
+  const partners = await worker.fetch(partnersCall("GET", { code: "archive" }), env);
+  assert.equal(partners.status, 401);
+  const asPartnerHeader = await worker.fetch(new Request(partnersUrl, { headers: { "X-Partner-Code": "archive" } }), env);
+  assert.equal(asPartnerHeader.status, 401);
+  const plans = await sendPlanWith(plansPost(goodPlan, { "X-Team-Code": "archive" }));
+  assert.equal(plans.response.status, 401);
+  const { response, sent } = await sendWith({ "X-Team-Code": "archive" }, { ...env, GITHUB_TOKEN: "test-token" });
+  assert.equal((await response.json()).on_map, false);
+  assert.equal(sent[0].labels, undefined);
+  const sim = await worker.fetch(simPut("build-1-aaaaaaa", "{}", { Authorization: "Bearer archive" }), env);
+  assert.equal(sim.status, 401);
+  const recorded = await worker.fetch(recordedPut("{}", { Authorization: "Bearer archive" }), env);
+  assert.equal(recorded.status, 401);
+});
+
+test("the partner endpoint reads only the partner list and that one prediction", async () => {
+  const env = partnerEnv({}, [{ ...archive, build: "build-70-abc1234" }]);
+  const reads = [];
+  const get = env.MAP.get;
+  env.MAP.get = async (key) => { reads.push(key); return get(key); };
+  const body = await (await worker.fetch(partnerGet("archive"), env)).json();
+  assert.deepEqual(reads, ["partners", "sim/build-70-abc1234"]);
+  assert.equal(body.tag, "build-70-abc1234");
+  assert.equal(body.build, 70);
+});
+
+test("a pinned build stays pinned, latest follows sim/latest", async () => {
+  const env = partnerEnv({}, [{ ...archive, build: "build-70-abc1234" }, { name: "Other", code: "other", build: "latest", added: archive.added }]);
+  assert.equal((await (await worker.fetch(partnerGet("archive"), env)).json()).tag, "build-70-abc1234");
+  assert.equal((await (await worker.fetch(partnerGet("other"), env)).json()).tag, "build-71-def5678");
+  env.MAP.store.set("sim/latest", simBlob("build-72-0123456", 72));
+  assert.equal((await (await worker.fetch(partnerGet("archive"), env)).json()).tag, "build-70-abc1234");
+  assert.equal((await (await worker.fetch(partnerGet("other"), env)).json()).tag, "build-72-0123456");
+});
+
+test("a partner cannot choose a build", async () => {
+  const env = partnerEnv({}, [{ ...archive, build: "build-70-abc1234" }]);
+  const body = await (await worker.fetch(partnerGet("archive", `${partnerMapUrl}?build=build-71-def5678`), env)).json();
+  assert.equal(body.tag, "build-70-abc1234");
+});
+
+test("GET /partner/map fails closed on a missing or odd prediction", async () => {
+  const blobs = [
+    undefined, "not json", "[]", "null", '{"routes":"x"}', '{"schema":2,"routes":[]}',
+    JSON.stringify({ routes: [{ id: "skills", samples: samplePoints(5, 0) }] }),
+    JSON.stringify({ routes: [{ id: "awp-L", slot: "A", samples: samplePoints(5, 0) }] }),
+    JSON.stringify({ routes: [{ id: "awp-L", field: "skills", samples: samplePoints(5, 0) }] }),
+    JSON.stringify({ routes: [{ id: "awp-L", side: "R", samples: samplePoints(5, 0) }] }),
+    JSON.stringify({ routes: [{ id: "awp-L", samples: [{ t: 0, x: 0, y: 0 }, { t: 1, x: "1", y: 0 }] }] }),
+    JSON.stringify({ routes: [{ id: "awp-L", samples: samplePoints(1, 0) }] }),
+    JSON.stringify({ routes: [{ id: "awp-L", samples: samplePoints(5, 0), events: "x" }] }),
+  ];
+  for (const blob of blobs) {
+    const env = partnerEnv({}, [archive]);
+    if (blob === undefined) env.MAP.store.delete("sim/latest");
+    else env.MAP.store.set("sim/latest", blob);
+    const response = await worker.fetch(partnerGet("archive"), env);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true, team: "Archive", tag: null, build: null, generated: null, routes: [] }, String(blob).slice(0, 60));
+  }
+});
+
+test("a damaged partner list lets nobody in", async () => {
+  for (const stored of ["not json", "[]", '{"version":2,"teams":[]}', '{"version":1,"teams":[{"name":"A","code":""}]}']) {
+    const env = partnerEnv();
+    env.MAP.store.set("partners", stored);
+    assert.equal((await worker.fetch(partnerGet(""), env)).status, 401, stored);
+    assert.equal((await worker.fetch(partnerGet("archive"), env)).status, 401, stored);
+  }
+});
+
+test("GET /partner/map is rate limited before anything is read", async () => {
+  const env = partnerEnv({}, [archive]);
+  const keys = [];
+  env.LIMITER_READ = { limit: async ({ key }) => { keys.push(key); return { success: false }; } };
+  env.MAP.get = async () => { throw new Error("read before the limit"); };
+  const response = await worker.fetch(new Request(partnerMapUrl, { headers: { "X-Partner-Code": "archive", "CF-Connecting-IP": "203.0.113.9" } }), env);
+  assert.equal(response.status, 429);
+  assert.equal(response.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+  assert.deepEqual(keys, ["203.0.113.9"]);
+});
+
+test("OPTIONS on the partner paths allows exactly the Pages origin and their headers", async () => {
+  const one = await worker.fetch(new Request(partnerMapUrl, { method: "OPTIONS", headers: { Origin: "https://evil.example" } }), {});
+  assert.equal(one.status, 204);
+  assert.equal(one.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+  assert.equal(one.headers.get("Access-Control-Allow-Methods"), "GET, OPTIONS");
+  assert.equal(one.headers.get("Access-Control-Allow-Headers"), "X-Partner-Code");
+  const all = await worker.fetch(new Request(partnersUrl, { method: "OPTIONS" }), {});
+  assert.equal(all.status, 204);
+  assert.equal(all.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+  assert.equal(all.headers.get("Access-Control-Allow-Methods"), "GET, POST, DELETE, OPTIONS");
+  assert.equal(all.headers.get("Access-Control-Allow-Headers"), "X-Team-Code, Content-Type");
+  const map = await worker.fetch(new Request(mapUrl, { method: "OPTIONS" }), {});
+  assert.equal(map.headers.get("Access-Control-Allow-Headers"), "X-Team-Code", "/map is unchanged");
+});
+
+test("other methods on the partner paths are refused", async () => {
+  const env = partnerEnv({}, [archive]);
+  assert.equal((await worker.fetch(new Request(partnerMapUrl, { method: "POST", headers: { "X-Partner-Code": "archive" }, body: "{}" }), env)).status, 405);
+  assert.equal((await worker.fetch(partnersCall("PUT", { body: {} }), env)).status, 405);
+});
+
+test("managing partners needs the team code, and stores nothing without it", async () => {
+  for (const code of [null, "", "code-1235", "archive"]) {
+    const env = partnerEnv({}, [archive]);
+    for (const req of [partnersCall("GET", { code }), partnersCall("POST", { code, body: { name: "B", code: "bbbb", build: "latest" } }), partnersCall("DELETE", { code, query: "?name=Archive" })]) {
+      const response = await worker.fetch(req, env);
+      assert.equal(response.status, 401);
+      assert.equal(response.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+      assert.deepEqual(await response.json(), { ok: false, error: "wrong team code" });
+    }
+    assert.deepEqual(JSON.parse(env.MAP.store.get("partners")).teams, [archive]);
+  }
+  const open = partnerEnv();
+  delete open.TEAM_CODE;
+  assert.equal((await worker.fetch(partnersCall("GET", { code: "" }), open)).status, 500);
+});
+
+test("add, list, update and remove a partner", async () => {
+  const env = partnerEnv();
+  assert.deepEqual(await (await worker.fetch(partnersCall("GET"), env)).json(), { ok: true, teams: [] });
+  const added = await addTeam(env, { name: "  Archive ", code: " Archive ", build: "latest", junk: "dropped" });
+  assert.equal(added.status, 201);
+  const [team] = (await added.json()).teams;
+  assert.deepEqual(Object.keys(team).sort(), ["added", "build", "code", "name"]);
+  assert.equal(team.name, "Archive");
+  assert.equal(team.code, "archive");
+  assert.ok(!Number.isNaN(Date.parse(team.added)));
+  assert.equal((await worker.fetch(partnerGet("archive"), env)).status, 200);
+
+  const updated = await addTeam(env, { name: "archive", code: "new-pass", build: "build-70-abc1234" });
+  assert.equal(updated.status, 200);
+  const teams = (await updated.json()).teams;
+  assert.equal(teams.length, 1);
+  assert.equal(teams[0].added, team.added, "an update keeps when it was added");
+  assert.equal((await worker.fetch(partnerGet("archive"), env)).status, 401, "the old password stops working");
+  assert.equal((await (await worker.fetch(partnerGet("new-pass"), env)).json()).tag, "build-70-abc1234");
+
+  assert.equal((await worker.fetch(partnersCall("DELETE", { query: "?name=Nobody" }), env)).status, 404);
+  const removed = await worker.fetch(partnersCall("DELETE", { query: "?name=ARCHIVE" }), env);
+  assert.equal(removed.status, 200);
+  assert.deepEqual((await removed.json()).teams, []);
+  assert.equal((await worker.fetch(partnerGet("new-pass"), env)).status, 401, "access removed");
+});
+
+test("partner validation", async () => {
+  const env = partnerEnv({}, [archive]);
+  const bad = [
+    ["not an object", []],
+    ["no name", { code: "abcd", build: "latest" }],
+    ["blank name", { name: "   ", code: "abcd", build: "latest" }],
+    ["name of control characters", { name: "\u0000\u0007", code: "abcd", build: "latest" }],
+    ["name of invisible formatting characters", { name: "\u200b\u200f\u202e\u2066\ufeff", code: "abcd", build: "latest" }],
+    ["name over 40", { name: "n".repeat(41), code: "abcd", build: "latest" }],
+    ["no code", { name: "B", build: "latest" }],
+    ["empty code", { name: "B", code: "", build: "latest" }],
+    ["code of spaces", { name: "B", code: "      ", build: "latest" }],
+    ["code under 4", { name: "B", code: "abc", build: "latest" }],
+    ["code over 64", { name: "B", code: "c".repeat(65), build: "latest" }],
+    ["code with non-ASCII", { name: "B", code: "café-1", build: "latest" }],
+    ["number code", { name: "B", code: 12345, build: "latest" }],
+    ["the team code", { name: "B", code: "code-1234", build: "latest" }],
+    ["the team code in other case", { name: "B", code: " CODE-1234 ", build: "latest" }],
+    ["the ingest token", { name: "B", code: "ingest-1234", build: "latest" }],
+    ["another team's code", { name: "B", code: "ARCHIVE", build: "latest" }],
+    ["no build", { name: "B", code: "bbbb" }],
+    ["a bad build", { name: "B", code: "bbbb", build: "../recorded" }],
+    ["a build with no prediction", { name: "B", code: "bbbb", build: "build-1-aaaaaaa" }],
+    ["a recorded key as build", { name: "B", code: "bbbb", build: "recorded" }],
+  ];
+  for (const [name, body] of bad) {
+    const response = await addTeam(env, body);
+    assert.equal(response.status, 400, name);
+    assert.equal((await response.json()).ok, false);
+    assert.deepEqual(JSON.parse(env.MAP.store.get("partners")).teams, [archive], name);
+  }
+  assert.equal((await worker.fetch(partnersCall("POST", { body: "{" }), env)).status, 400);
+  assert.equal((await worker.fetch(partnersCall("POST", { body: { name: "B", code: "x".repeat(5000), build: "latest" } }), env)).status, 413);
+  for (const ok of [{ name: "n".repeat(40), code: "c".repeat(64), build: "latest" }, { name: "Four", code: "four", build: "build-70-abc1234" }]) {
+    assert.equal((await addTeam(env, ok)).status, 201, ok.name);
+  }
+});
+
+test("invisible formatting characters are taken out of a partner's name", async () => {
+  const env = partnerEnv();
+  const added = await addTeam(env, { name: "\u202eIron\u200b Lions\u2069\ufeff", code: "iron-lions-9", build: "latest" });
+  assert.equal(added.status, 201);
+  assert.equal((await added.json()).teams[0].name, "Iron Lions");
+  const removed = await worker.fetch(partnersCall("DELETE", { query: "?name=Iron%E2%80%8B%20Lions" }), env);
+  assert.equal(removed.status, 200, "a name sent with one still matches");
+});
+
+test("the list holds 20 teams; an update still works when it is full", async () => {
+  const env = partnerEnv();
+  for (let i = 0; i < 20; i += 1) assert.equal((await addTeam(env, { name: `Team ${i}`, code: `pass-${i}`, build: "latest" })).status, 201);
+  const full = await addTeam(env, { name: "Team 20", code: "pass-20", build: "latest" });
+  assert.equal(full.status, 400);
+  assert.match((await full.json()).error, /20 teams/);
+  assert.equal((await addTeam(env, { name: "Team 3", code: "pass-three", build: "latest" })).status, 200);
+  assert.equal(JSON.parse(env.MAP.store.get("partners")).teams.length, 20);
+});
+
+test("partner changes use the stricter limit, the list read the read limit, before the code check", async () => {
+  const env = partnerEnv();
+  const used = [];
+  env.LIMITER = { limit: async () => { used.push("write"); return { success: false }; } };
+  env.LIMITER_READ = { limit: async () => { used.push("read"); return { success: false }; } };
+  assert.equal((await worker.fetch(partnersCall("POST", { code: "wrong", body: {} }), env)).status, 429);
+  assert.equal((await worker.fetch(partnersCall("DELETE", { code: "wrong", query: "?name=a" }), env)).status, 429);
+  assert.equal((await worker.fetch(partnersCall("GET", { code: "wrong" }), env)).status, 429);
+  assert.deepEqual(used, ["write", "write", "read"]);
+});

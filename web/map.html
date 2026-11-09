@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>Auto Pathing map | 40217S Scourge</title>
-<script>if (new URLSearchParams(location.search).get('embed') === '1') document.documentElement.classList.add('embed'); if (window.parent === window) document.documentElement.classList.add('solo');</script>
+<script>if (new URLSearchParams(location.search).get('embed') === '1') document.documentElement.classList.add('embed'); if (window.parent === window) document.documentElement.classList.add('solo'); if (new URLSearchParams(location.search).get('partner') === '1') document.documentElement.classList.add('partner');</script>
 <style>
 :root {
   color-scheme: light dark;
@@ -143,6 +143,8 @@ code { background: var(--track); padding: 1px 4px; border-radius: 4px; }
 .app[data-rail="0"] { max-width: 700px; }
 .app[data-rail="0"] .stage { grid-template-columns: minmax(0, 1fr); }
 .app[data-rail="0"] .rail { display: none; }
+/* The partner page sets the width and the outer spacing, so its panels and these line up. */
+.partner .app { padding: 0; max-width: none; }
 @media (max-width: 480px) { :root { --pad: 12px; --inset: 12px; } }
 
 /* ---------- summary row ---------- */
@@ -2490,13 +2492,16 @@ function sessionLabel(s) {
 }
 
 // The label that says what the dashed line is. It never says how close it is to the robot: nobody has measured that.
+const PARTNER_NONE = "40217S hasn't shared a route yet. Check back before your match, or ask them.";
 const predLabel = (sim) => (isNum(sim.build) ? 'Build ' + sim.build + ', predicted' : 'Predicted') + ' from the code, not a real run';
 const PRED_SWATCH = '<svg viewBox="0 0 26 8" aria-hidden="true"><line x1="1" y1="4" x2="25" y2="4" stroke="var(--pred)" stroke-width="2.4" stroke-dasharray="6 4" stroke-linecap="round"/></svg>';
 const genText = (g) => { const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(g); return m ? m[1] + ' ' + m[2] + ' UTC' : g; };
 function predBlock(model, state, sel) {
   if (sel.frame === 'local') return '';
   const sim = model.sim, none = (t) => '<p class="predlabel none"><i></i><span>' + t + '</span></p>';
-  if (!sim) return none('No prediction for this build yet. Get the latest build, then Refresh.');
+  if (!sim) return none(state.partner ? PARTNER_NONE : 'No prediction for this build yet. Get the latest build, then Refresh.');
+  // The partner page already says what the line is and when it was made, right above the map.
+  if (state.partner && sel.sim) return '';
   if (!sel.sim) return none(esc(isNum(sim.build) ? 'Build ' + sim.build : 'This build') + ' has no prediction for ' + esc(sel.entry ? sel.entry.label : 'this route') + '.');
   let h = '<p class="predlabel">' + PRED_SWATCH + '<span>' + esc(predLabel(sim)) + '</span></p>';
   if (isNum(model.deviceBuild) && isNum(sim.build) && model.deviceBuild !== sim.build) {
@@ -2840,6 +2845,8 @@ function playInfoText(sel, t) {
   const s = sel.scrub;
   if (!s) return sel.frame === 'local' ? 'This push test has no samples, so there is nothing to play.' : sel.sim ? 'The predicted route is turned off in Layers.' : 'Pick a run or taught session to play it back.';
   const e = activeEvent(s, t);
+  // A partner has no use for our step numbers ("step -1 (Opening)").
+  if (s.kind === 'sim' && document.documentElement.classList.contains('partner')) return 'Predicted route.';
   if (s.kind === 'sim') return e ? 'Predicted: ' + (e.step !== null ? 'step ' + e.step : 'a step') + ' (' + (KIND_LABEL[e.type] || e.type || 'step') + ') done at ' + fmt(e.t, 2) + ' s.' : 'Predicted route. No step done yet at this time.';
   const rows = s === sel.runSession ? sel.rows : null;
   if (rows && e) {
@@ -2861,6 +2868,7 @@ function renderEmpty(model, state) {
   if (model.sim || model.routes.length || model.sessions.length || model.rejected.length) return '';
   // Drawing needs only the field, so a build with no prediction can still propose a plan.
   const draw = state && state.canDraw ? '<p><button type="button" class="drawbtn" data-key="draw" data-opendraw="1">' + (state.draft ? 'Continue plan' : 'Draw a plan') + '</button></p>' : '';
+  if (state && state.partner) return '<p>' + esc(PARTNER_NONE) + '</p>';
   return '<h2>No prediction for this build yet</h2><p>Get the latest build, then Refresh.</p><p class="standalone-only">The laptop tool builds this page from your data.</p>' + (model.note ? '<p class="notel">' + esc(model.note) + '</p>' : '') + draw;
 }
 
@@ -2887,6 +2895,8 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
 /* ---------- page shell (DOM) ---------- */
 (function () {
   const EMBED = document.documentElement.classList.contains('embed');
+  // Partner mode: the alliance partner page. It shows the match auton prediction and nothing else, and never draws.
+  const PARTNER = EMBED && document.documentElement.classList.contains('partner');
   const sampleOn = typeof DATA === 'undefined' && !EMBED && typeof window.__SAMPLE_DATA__ !== 'undefined';
   const rawData = typeof DATA !== 'undefined' ? DATA : sampleOn ? window.__SAMPLE_DATA__ : null;
   let model = buildModel({ mapData: rawData, simulated: sampleOn && typeof window.__SAMPLE_SIM__ !== 'undefined' ? window.__SAMPLE_SIM__ : null });
@@ -2894,6 +2904,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   const $ = (id) => document.getElementById(id);
   const svg = $('map'), app = $('app');
   const state = {
+    partner: PARTNER,
     route: null, session: null, step: null, hover: null, t: 0, playing: false, speed: 1, cleared: false,
     pick: null, picked: false, side: 'L', sideSet: false, play: 'pred', playPicked: false,
     view: null, open: {}, more: {}, // view null: Fit route with a recording, Whole field without, until the person picks one
@@ -2909,7 +2920,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   const plan = { on: false, field: 'override', lines: [], actions: [], side: null, name: '', note: '', undo: [], stroke: null, pointer: null, sending: false, sendId: null, timer: 0, msg: null, pick: null, pickAt: 0, hot: null };
   const planHost = () => (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.scourgePlan) || null;
   // Draw is offered only with someone to hand the plan to: the web page's frame, or the Mac app's own handler. A page opened by hand has neither.
-  const canDraw = () => EMBED && (window.parent !== window || !!planHost());
+  const canDraw = () => !PARTNER && EMBED && (window.parent !== window || !!planHost());
   const drawNow = () => ({ field: plan.field, lines: plan.lines, stroke: plan.stroke, actions: plan.actions, pick: plan.pick, hot: plan.hot });
   const view = () => {
     state.canDraw = canDraw(); state.draft = plan.lines.length;
@@ -3317,9 +3328,17 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
   loadDraft();
 
   /* ----- host ----- */
+  // In partner mode only the match auton prediction is read, whatever the host sends: no recordings, files, or other routes.
+  function partnerOnly(input) {
+    const sim = input && typeof input === 'object' && input.simulated && typeof input.simulated === 'object' ? input.simulated : null;
+    const routes = sim && Array.isArray(sim.routes) ? sim.routes.filter((r) => r && (r.id === 'awp-L' || r.id === 'awp-R') && r.slot == null && r.field == null) : [];
+    return { simulated: sim ? { schema: 1, tag: sim.tag, build: sim.build, generated: sim.generated, routes } : null };
+  }
   function load(input) {
     stop();
-    model = buildModel(input);
+    model = buildModel(PARTNER ? partnerOnly(input) : input);
+    // "AWP" means nothing to another team, so the partner page names the route in plain words.
+    if (PARTNER) routeEntries(model).forEach((e) => { if (e.slot === null) e.label = 'Match auton'; });
     model.illustrative = false; // only the page's own sample is ever a sample
     $('samplebadge').hidden = true;
     $('gen').textContent = '';
@@ -3333,7 +3352,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     syncLists();
     return { routes: model.routes.length, sessions: model.sessions.length, rejected: model.rejected.length };
   }
-  window.ScourgeMap = { load, planResult };
+  window.ScourgeMap = { load, planResult, mode: PARTNER ? 'partner' : 'full' };
   window.addEventListener('message', (e) => {
     if (e.source === window.parent && hostAllowed(location.origin, e.origin) && e.data) {
       if (e.data.type === 'scourge-map-load') load(e.data.input);

@@ -22,6 +22,31 @@ const PLAN_CORS_HEADERS = {
   "Access-Control-Allow-Headers": "X-Team-Code, X-Scourge-Client, Content-Type",
 };
 
+// Alliance partners. The list lives in one MAP key; partners read only the match auton prediction.
+const PARTNERS_KEY = "partners";
+const MAX_PARTNERS = 20;
+const PARTNER_NAME_MAX = 40;
+const PARTNER_CODE_MIN = 4;
+const PARTNER_CODE_MAX = 64;
+const MAX_PARTNER_BODY = 4_000;
+// A pinned partner build is a release tag, like build-70-abc1234.
+const RELEASE_TAG = /^build-\d{1,7}-[0-9a-f]{7,40}$/;
+// The 15 s match autonomous, from both starting tiles (sim_export.py's plan()). Taught routes, Skills, RECF and
+// anything new are left out until someone adds them here on purpose.
+const MATCH_ROUTE_IDS = new Set(["awp-L", "awp-R"]);
+const MAX_ROUTE_SAMPLES = 5_000;
+const MAX_ROUTE_EVENTS = 500;
+const PARTNERS_CORS_HEADERS = {
+  "Access-Control-Allow-Origin": PAGES_ORIGIN,
+  "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "X-Team-Code, Content-Type",
+};
+const PARTNER_CORS_HEADERS = {
+  "Access-Control-Allow-Origin": PAGES_ORIGIN,
+  "Access-Control-Allow-Methods": "GET, OPTIONS",
+  "Access-Control-Allow-Headers": "X-Partner-Code",
+};
+
 function jsonResponse(payload, status) {
   return new Response(JSON.stringify(payload), {
     status,
@@ -352,10 +377,230 @@ async function handleSim(request, env, tag) {
   return jsonResponse({ ok: true, tag }, 200);
 }
 
+/* ---------- alliance partners ---------- */
+
+function corsJson(payload, status, cors) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...cors },
+  });
+}
+const partnersResponse = (payload, status) => corsJson(payload, status, PARTNERS_CORS_HEADERS);
+const partnerResponse = (payload, status) => corsJson(payload, status, PARTNER_CORS_HEADERS);
+
+// Codes are compared trimmed and in lower case, so "Archive " and "archive" are the same password.
+const normalCode = (code) => (typeof code === "string" ? code.trim().toLowerCase() : "");
+// Invisible formatting characters (zero-width spaces, direction marks and overrides, the byte order mark) could make
+// two names look the same or flip the text around them, so they go with the control characters.
+const cleanTeamName = (name) => (typeof name === "string"
+  ? name.replace(/[\p{Cc}\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/gu, "").replace(/\s+/g, " ").trim()
+  : "");
+
+// The stored list, or an empty one when it is missing or not the shape this code writes.
+async function loadPartners(env) {
+  let parsed = null;
+  try {
+    parsed = JSON.parse((await env.MAP.get(PARTNERS_KEY)) ?? "null");
+  } catch {
+    return [];
+  }
+  if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.teams)) return [];
+  return parsed.teams.filter((t) => t && typeof t.name === "string" && typeof t.code === "string" && t.code &&
+    typeof t.build === "string" && typeof t.added === "string").slice(0, MAX_PARTNERS)
+    .map(({ name, code, build, added }) => ({ name, code, build, added }));
+}
+
+function savePartners(env, teams) {
+  return env.MAP.put(PARTNERS_KEY, JSON.stringify({ version: 1, teams }));
+}
+
+// Checks one add or update. Returns { team } or { error }.
+async function cleanPartner(payload, env, teams) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return { error: "JSON must be an object" };
+  const name = cleanTeamName(payload.name);
+  if (!name || charCount(name) > PARTNER_NAME_MAX) return { error: `team name must be 1 to ${PARTNER_NAME_MAX} characters` };
+  const code = normalCode(payload.code);
+  if (charCount(code) < PARTNER_CODE_MIN || charCount(code) > PARTNER_CODE_MAX) {
+    return { error: `password must be ${PARTNER_CODE_MIN} to ${PARTNER_CODE_MAX} characters` };
+  }
+  // It travels in a header, which only carries plain characters.
+  if (!/^[\x20-\x7e]+$/.test(code)) return { error: "password can only use plain letters, numbers and symbols" };
+  if (code === normalCode(env.TEAM_CODE) || (env.INGEST_TOKEN && code === normalCode(env.INGEST_TOKEN))) {
+    return { error: "password can't be the team code" };
+  }
+  const same = (t) => t.name.toLowerCase() === name.toLowerCase();
+  if (teams.some((t) => !same(t) && t.code === code)) return { error: "another team already has that password" };
+  const build = payload.build;
+  if (build !== "latest") {
+    if (typeof build !== "string" || !RELEASE_TAG.test(build)) return { error: "build must be a release tag or latest" };
+    if ((await env.MAP.get(`sim/${build}`)) === null) return { error: "that build has no stored prediction" };
+  }
+  return { team: { name, code, build } };
+}
+
+async function handlePartners(request, env, url) {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: PARTNERS_CORS_HEADERS });
+  }
+  if (!["GET", "POST", "DELETE"].includes(request.method)) {
+    return partnersResponse({ ok: false, error: "method not allowed" }, 405);
+  }
+  // Before the code check, so this also slows guessing the team code. Changes get the stricter limit.
+  const limiter = request.method === "GET" ? env?.LIMITER_READ : env?.LIMITER;
+  if (limiter) {
+    const { success } = await limiter.limit({ key: request.headers.get("CF-Connecting-IP") || "unknown" });
+    if (!success) return partnersResponse({ ok: false, error: "too many tries, try again in a minute" }, 429);
+  }
+  if (!env?.TEAM_CODE || !env?.MAP) {
+    return partnersResponse({ ok: false, error: "relay not configured" }, 500);
+  }
+  if (!sameSecret(request.headers.get("X-Team-Code"), env.TEAM_CODE)) {
+    return partnersResponse({ ok: false, error: "wrong team code" }, 401);
+  }
+
+  const teams = await loadPartners(env);
+  if (request.method === "GET") return partnersResponse({ ok: true, teams }, 200);
+
+  if (request.method === "DELETE") {
+    const name = cleanTeamName(url.searchParams.get("name"));
+    const kept = teams.filter((t) => t.name.toLowerCase() !== name.toLowerCase());
+    if (!name || kept.length === teams.length) return partnersResponse({ ok: false, error: "no team by that name" }, 404);
+    await savePartners(env, kept);
+    return partnersResponse({ ok: true, teams: kept }, 200);
+  }
+
+  const bodyRead = await readRequestBody(request, MAX_PARTNER_BODY);
+  if (bodyRead.error) return partnersResponse({ ok: false, error: "request too large" }, 413);
+  let payload;
+  try {
+    payload = JSON.parse(bodyRead.text);
+  } catch {
+    return partnersResponse({ ok: false, error: "invalid JSON" }, 400);
+  }
+  const checked = await cleanPartner(payload, env, teams);
+  if (checked.error) return partnersResponse({ ok: false, error: checked.error }, 400);
+  const { team } = checked;
+  const index = teams.findIndex((t) => t.name.toLowerCase() === team.name.toLowerCase());
+  if (index < 0 && teams.length >= MAX_PARTNERS) {
+    return partnersResponse({ ok: false, error: `the list holds up to ${MAX_PARTNERS} teams, remove one first` }, 400);
+  }
+  // An update keeps when the team was first added.
+  const saved = { ...team, added: index < 0 ? new Date().toISOString() : teams[index].added };
+  const next = index < 0 ? [...teams, saved] : teams.map((t, i) => (i === index ? saved : t));
+  await savePartners(env, next);
+  return partnersResponse({ ok: true, teams: next }, index < 0 ? 201 : 200);
+}
+
+async function digest(text) {
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
+}
+
+// Which team this code belongs to, or null. Every stored code is checked, with no early exit, and hashes are
+// compared so every comparison takes the same time whatever the codes' lengths.
+async function matchPartner(given, teams) {
+  const mine = await digest(normalCode(given));
+  let found = null;
+  for (const team of teams) {
+    const theirs = await digest(team.code);
+    let difference = 0;
+    for (let i = 0; i < mine.length; i += 1) difference |= mine[i] ^ theirs[i];
+    if (difference === 0 && found === null) found = team;
+  }
+  return found;
+}
+
+const isFiniteNumber = (v) => typeof v === "number" && Number.isFinite(v);
+const numberOrNull = (v) => (isFiniteNumber(v) ? v : null);
+
+// One match auton route, rebuilt from the fields the map draws. Anything else on it is dropped. Null when it is
+// not a match auton route or not the expected shape.
+function cleanMatchRoute(route) {
+  if (!route || typeof route !== "object" || Array.isArray(route)) return null;
+  if (!MATCH_ROUTE_IDS.has(route.id)) return null;
+  if (route.slot !== null && route.slot !== undefined) return null;
+  if (route.field !== undefined && route.field !== "override") return null;
+  const side = route.id.slice(-1);
+  if (route.side !== undefined && route.side !== side) return null;
+  if (!Array.isArray(route.samples) || route.samples.length < 2 || route.samples.length > MAX_ROUTE_SAMPLES) return null;
+  if (route.events !== undefined && (!Array.isArray(route.events) || route.events.length > MAX_ROUTE_EVENTS)) return null;
+  const samples = [];
+  for (const s of route.samples) {
+    if (!s || !isFiniteNumber(s.t) || !isFiniteNumber(s.x) || !isFiniteNumber(s.y)) return null;
+    samples.push({ t: s.t, x: s.x, y: s.y, h: isFiniteNumber(s.h) ? s.h : 0 });
+  }
+  const events = [];
+  for (const e of route.events ?? []) {
+    if (!e || !isFiniteNumber(e.t)) return null;
+    events.push({
+      t: e.t, step: Number.isInteger(e.step) ? e.step : null,
+      type: typeof e.type === "string" && /^[a-z_]{1,30}$/.test(e.type) ? e.type : "",
+      tx: numberOrNull(e.tx), ty: numberOrNull(e.ty), th: numberOrNull(e.th),
+      x: numberOrNull(e.x), y: numberOrNull(e.y), h: numberOrNull(e.h), ok: e.ok === true,
+    });
+  }
+  const total = isFiniteNumber(route.total_ms) && route.total_ms > 0 ? route.total_ms : null;
+  return { id: route.id, name: "AWP", side, total_ms: total, samples, events };
+}
+
+// What a partner may see of a stored prediction. Fails closed: anything unreadable gives no routes, never the blob.
+function partnerView(text, tag) {
+  const empty = { tag: null, build: null, generated: null, routes: [] };
+  if (typeof text !== "string") return empty;
+  let sim;
+  try {
+    sim = JSON.parse(text);
+  } catch {
+    return empty;
+  }
+  if (!sim || typeof sim !== "object" || Array.isArray(sim) || !Array.isArray(sim.routes)) return empty;
+  if (sim.schema !== undefined && sim.schema !== 1) return empty;
+  const seen = new Set();
+  const routes = [];
+  for (const route of sim.routes) {
+    const clean = cleanMatchRoute(route);
+    if (clean && !seen.has(clean.id)) {
+      seen.add(clean.id);
+      routes.push(clean);
+    }
+  }
+  if (!routes.length) return empty;
+  return {
+    tag: typeof sim.tag === "string" && RELEASE_TAG.test(sim.tag) ? sim.tag : tag,
+    build: Number.isInteger(sim.build) && sim.build >= 0 && sim.build < 10_000_000 ? sim.build : null,
+    generated: typeof sim.generated === "string" && !Number.isNaN(Date.parse(sim.generated)) ? new Date(sim.generated).toISOString() : null,
+    routes,
+  };
+}
+
+async function handlePartnerMap(request, env) {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: PARTNER_CORS_HEADERS });
+  }
+  if (request.method !== "GET") {
+    return partnerResponse({ ok: false, error: "method not allowed" }, 405);
+  }
+  if (env?.LIMITER_READ) {
+    const { success } = await env.LIMITER_READ.limit({ key: request.headers.get("CF-Connecting-IP") || "unknown" });
+    if (!success) return partnerResponse({ ok: false, error: "too many tries, try again in a minute" }, 429);
+  }
+  if (!env?.MAP) {
+    return partnerResponse({ ok: false, error: "relay not configured" }, 500);
+  }
+  const team = await matchPartner(request.headers.get("X-Partner-Code") ?? "", await loadPartners(env));
+  if (!team) return partnerResponse({ ok: false, error: "wrong password" }, 401);
+
+  const pinned = team.build !== "latest" && RELEASE_TAG.test(team.build) ? team.build : null;
+  if (team.build !== "latest" && !pinned) return partnerResponse({ ok: true, team: team.name, ...partnerView(null, null) }, 200);
+  const text = await env.MAP.get(pinned ? `sim/${pinned}` : "sim/latest");
+  return partnerResponse({ ok: true, team: team.name, ...partnerView(text, pinned) }, 200);
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/map") return handleMap(request, env, url);
+    if (url.pathname === "/partners") return handlePartners(request, env, url);
+    if (url.pathname === "/partner/map") return handlePartnerMap(request, env);
     if (url.pathname === "/map/recorded") return handleRecorded(request, env);
     if (url.pathname.startsWith("/map/sim/")) {
       return handleSim(request, env, decodeURIComponent(url.pathname.slice("/map/sim/".length)));

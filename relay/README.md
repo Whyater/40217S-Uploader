@@ -1,6 +1,6 @@
 # Results relay
 
-This Cloudflare Worker does three jobs for the uploaders:
+This Cloudflare Worker does four jobs for the uploaders:
 
 - `POST /results` accepts robot test results and files them as GitHub issues in
   the team's data repository. The GitHub token stays in the Worker secret store,
@@ -8,6 +8,8 @@ This Cloudflare Worker does three jobs for the uploaders:
 - `GET /map` gives the uploaders' Route Map tab its data. It needs the team code.
 - `POST /plans` files a route someone drew on the map as a proposal. It needs the
   team code. A plan never changes a route, the map data, or robot code.
+- `/partners` and `/partner/map` share the match autonomous prediction with
+  alliance partners, each with their own password.
 
 ## Routes
 
@@ -39,6 +41,52 @@ client header a 403, a bad shape a 400, too large a 413, and a GitHub failure a
 The name and note only appear in the title and inside a JSON code fence, so an `@`
 in them notifies nobody. The browser may only call `/plans` from
 `https://whyater.github.io`.
+
+## Alliance partners
+
+- `GET /partners`, with `X-Team-Code`: answers `{ok, teams}`, where each team is
+  `{name, code, build, added}`. `code` is that team's password.
+- `POST /partners`, with `X-Team-Code` and a JSON body `{name, code, build}`: adds
+  the team, or updates it when the name is already on the list (case does not
+  matter). `build` is a release tag like `build-70-abc1234` that has a stored
+  prediction, or `latest`. Answers `201` when added, `200` when updated, with the
+  whole list.
+- `DELETE /partners?name=<name>`, with `X-Team-Code`: removes the team. Its
+  password stops working within a minute. Answers `404` if no team has that name.
+- `GET /partner/map`, with `X-Partner-Code`: answers
+  `{ok, team, tag, build, generated, routes}` for the team whose password
+  matches.
+- `OPTIONS /partners` and `OPTIONS /partner/map`: CORS preflight.
+
+The list is one key in the `MAP` namespace, `partners`:
+`{"version":1,"teams":[{name, code, build, added}]}`. It holds up to 20 teams.
+Names are 1 to 40 characters. Passwords are 4 to 64 plain characters, stored in
+lower case and compared trimmed and in lower case. A password can't be the team
+code or the ingest token, and two teams can't share one. Nothing new is needed in
+`wrangler.toml` or the secrets.
+
+`/partner/map` only ever sends the match autonomous routes, `awp-L` and `awp-R`,
+rebuilt from the fields the map draws (time, x, y, heading, and the step
+events). Skills, RECF, taught routes, any route id it doesn't know, the recorded
+data, plans and the assumptions are left out on the relay, so they never reach
+the partner's browser. The `commit` field is left out too; the tag carries the
+short hash, which the public releases already show. If the stored prediction is
+missing or not the expected shape, the answer has no routes rather than the
+stored data. A partner
+can't pick a build: they get the one set for their team. Every stored password is
+checked, with no early exit and on SHA-256 hashes so each check takes the same
+time. A wrong or missing password gets `401 {"ok":false,"error":"wrong password"}`
+either way. Partner passwords are not accepted by any other route, and the team
+code is not accepted by `/partner/map`.
+
+Reading the list and `/partner/map` share the read limit (about 30 per minute
+from one address). Adding and removing share the send limit (about 10 per
+minute). Both are checked before any code. KV can take up to a minute to show a
+change everywhere, so a removed partner may get in for up to a minute after.
+
+The relay is deployed by hand. After changing `src/index.js`, run
+`npx wrangler deploy` from `relay/`. The partner routes only work once it has
+been redeployed with them.
 
 Per-build data is written to the `MAP` namespace with
 `npx wrangler kv key put "sim/<tag>" --binding MAP --remote --path <file>`, not

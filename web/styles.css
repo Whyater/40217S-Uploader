@@ -402,6 +402,77 @@ input:focus-visible { outline-offset: 0; }
   color-scheme: light dark;
 }
 
+/* Alliance partners: the share panel on the Map tab */
+#map-share .disc-body { align-items: stretch; }
+.share-lead { max-width: 60ch; }
+.share-list { list-style: none; margin: 0; padding: 0; }
+.share-list:empty { display: none; }
+.share-list > li { padding: 10px 0; border-top: 0.5px solid var(--sep); display: flex; flex-direction: column; gap: 6px; }
+.share-list > li:first-child { border-top: 0; padding-top: 2px; }
+.share-head { display: flex; align-items: baseline; gap: var(--gap); }
+.share-name { font-weight: 600; font-size: var(--body); overflow-wrap: anywhere; flex: 1; min-width: 0; }
+.share-meta { color: var(--text-2); }
+.share-meta .nowrap { white-space: nowrap; }
+.share-meta .pw { font-family: var(--mono); color: var(--text); user-select: all; }
+.share-actions { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.share-actions .btn { border-radius: 8px; padding: 0 12px; font-size: var(--callout); }
+.share-actions .grow { flex: 1; }
+.share-actions .btn.primary { font-weight: 600; }
+.share-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: var(--callout); }
+.share-confirm > span:first-child { flex: 1 1 14em; }
+/* Kept to the right even when it wraps, so Cancel stays where the Remove link was. */
+.share-confirm-btns { display: flex; gap: 8px; margin-left: auto; }
+.share-confirm .btn { border-radius: 8px; padding: 0 12px; font-size: var(--callout); }
+/* --knock is white on the light red and near black on the dark theme's lighter red, about 6:1 in both. */
+.btn.danger-fill { background: var(--bad); color: var(--knock); border-color: transparent; box-shadow: none; font-weight: 600; }
+.share-form { padding-top: 12px; margin-top: 2px; border-top: 0.5px solid var(--sep); }
+.share-form .form { --label-col: 76px; }
+.share-form select { width: 100%; justify-self: stretch; }
+.share-form .btn-row { justify-content: flex-end; }
+.share-form .btn.prominent { width: auto; margin-top: 0; padding: 0 18px; }
+.share-empty { color: var(--text-2); }
+@media (max-width: 420px) {
+  .share-form .form { grid-template-columns: minmax(0, 1fr); row-gap: 4px; }
+  .share-form .form label { text-align: left; }
+  .share-form .form .hint { grid-column: 1; margin-top: 0; }
+  .share-form .form > input, .share-form .form > select { margin-bottom: 6px; }
+  .share-form .btn.prominent { width: 100%; }
+}
+
+/* Alliance partners: the page they open */
+/* One column: the map (no side rail here) and the panels above it share one width. */
+.partner-page[data-screen="route"] { max-width: calc(700px + 2 * var(--window-pad)); }
+.partner-page > .panel, .partner-page > .pbar { width: 100%; max-width: 460px; align-self: center; }
+.partner-page[data-screen="route"] > .panel, .partner-page[data-screen="route"] > .pbar { max-width: none; }
+.partner-page .map-card { border: 0; border-radius: 0; background: transparent; overflow: visible; }
+.partner-page .map-card iframe { height: max(560px, calc(100dvh - 200px)); }
+.partner-page[data-screen="lock"] { min-height: 100vh; min-height: 100dvh; justify-content: center; }
+.partner-page[data-screen="lock"] #lock { margin-bottom: 8vh; }
+#lock .empty { padding: 10px 6px 4px; }
+#lock h1.headline { font-size: 17px; margin: 2px 0 0; letter-spacing: -0.01em; }
+#lock .empty .callout { max-width: 34ch; }
+#lock .hint { margin-top: -2px; }
+/* The placeholder is this field's only visible label, so it and the border get full contrast here (3:1 or more). */
+#lock #code { border: 1px solid rgba(0, 0, 0, 0.5); }
+#lock #code::placeholder { opacity: 1; }
+#lock #code[aria-invalid="true"] { border-color: var(--bad); }
+@media (prefers-color-scheme: dark) {
+  #lock #code { border-color: rgba(255, 255, 255, 0.4); }
+  #lock #code[aria-invalid="true"] { border-color: var(--bad); }
+}
+.pbar { display: flex; align-items: center; gap: var(--gap); padding: 0 2px; }
+.pbar-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.pbar .link { flex: none; }
+.pbar h1.headline { font-size: var(--body); margin: 0; }
+.line.note { color: var(--text-2); }
+.line.note .ico { color: var(--text-2); }
+.muted-ico { color: var(--text-2); }
+#none .empty { padding-bottom: 4px; }
+#none h2.headline { font-size: var(--body); margin: 2px 0 0; }
+#none .empty .callout { max-width: 36ch; }
+#none .empty .btn { margin-top: 6px; }
+.partner-page ::selection, #map-share ::selection { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+
 @media (max-width: 359px) {
   :root { --label-col: 88px; --gap: 10px; }
 }

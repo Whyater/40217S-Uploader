@@ -48,6 +48,20 @@ The web version uploads the same files the same way PROS does, including the sam
 
 The web version also has a **Route Map** tab beside **Upload**. It shows the robot's field map, its taught and recorded runs, and where a run missed. Pick results `.csv` files and `map-data.json` files with **Add Files**. The laptop app records results to the `Scourge Robot Data` folder in Documents, and you can move them to the phone with AirDrop, a cloud drive, or a cable. The files are kept on that device only (in the browser's own storage, up to 20 MB) and are never uploaded. The tab works offline once the uploader has been opened online. Unlike uploading, it works on iPhones and iPads too.
 
+### Share the match auton with an alliance partner
+
+Once the team code is in, the Route Map tab has a **Share with an Alliance Partner** panel. Add a team by name. Its password starts as the team name in lower case with no spaces, and you can change it. Pick which build they see: the one on the map, or **Always the newest build**. Then tap **Copy Message** and send it to them. It reads like this:
+
+```text
+40217S Scourge match auton
+https://whyater.github.io/40217S-Uploader/partner.html
+Password: archive
+```
+
+The partner opens the link on a phone or laptop and types the password. They see only the predicted path of our 15 second match autonomous, from the left and right starts, in the same field map, with play and scrub. They can't see the Skills or RECF routes, taught routes, recorded runs, plans, other builds, or the team code, and the page has no uploader. The relay sends only the match auton, so none of the rest ever reaches their phone.
+
+A password like a team name is easy to guess, and the panel says so, but it is allowed. **Remove** takes a team's access away within a minute. Passwords are not case sensitive. Any change, including a removal, can take up to a minute to reach every Cloudflare location.
+
 ## Upload (every time)
 
 1. Plug a USB data cable into the **brain** (not the controller) and turn the brain on.
@@ -195,7 +209,7 @@ The robot source code is private. Each time the programmer pushes to the main br
 
 **Get latest code** first checks for a newer uploader (see [Update the uploader](#update-the-uploader)). Then it downloads the newest release, plus on Windows the two builds before it (found through the releases feed at `releases.atom`; if the feed cannot be read, only the newest is fetched and the builds already on the laptop stay), and, when the release lists SHA-256 hashes, checks each file before using it. Nothing is built on your laptop. **Upload to robot** hands those files to the official PROS command line tool, pros-cli 3.5.6.
 
-The web version is in `web/` and is published with GitHub Pages. Browsers can't download release files from GitHub directly, so `scripts/publish-web.sh` copies the latest release's files onto the site (the `gh-pages` branch) and checks their hashes. It runs on the programmer's computer after each new build. Until it runs, the web version keeps the previous build. The web app sends them to the brain with its own port of the pros-cli 3.5.6 upload code. Its tests replay real pros-cli uploads and check every byte matches. The Route Map tab is the same page the laptop apps use (`web/map.html`), shown in a frame, with the file handling in `web/mapdata.js`, `web/mapstore.js`, and `web/maptab.js`.
+The web version is in `web/` and is published with GitHub Pages. Browsers can't download release files from GitHub directly, so `scripts/publish-web.sh` copies the latest release's files onto the site (the `gh-pages` branch) and checks their hashes. It runs on the programmer's computer after each new build. Until it runs, the web version keeps the previous build. The web app sends them to the brain with its own port of the pros-cli 3.5.6 upload code. Its tests replay real pros-cli uploads and check every byte matches. The Route Map tab is the same page the laptop apps use (`web/map.html`), shown in a frame, with the file handling in `web/mapdata.js`, `web/mapstore.js`, and `web/maptab.js`. The partner page is `web/partner.html` and `web/partner.js`. It loads the same map in a partner mode that shows only the match auton and has no drawing tools, and it never loads the uploader's code. The share panel is `web/mapshare.js`, and both use `web/partnerdata.js`.
 
 The installer downloads pros-cli from [github.com/purduesigbots/pros-cli](https://github.com/purduesigbots/pros-cli) and checks its SHA-256 hash before using it. The app and its files go into `%LOCALAPPDATA%\ScourgeUploader` (the builds sit in its `builds` folder, one folder per build, and `selected.json` remembers the pick). pros-cli also writes a small settings folder at `%APPDATA%\PROS`. Apart from those two folders and the two shortcuts, nothing else on your system changes.
 
@@ -206,6 +220,8 @@ The installer and app are tested on Windows in CI up to the USB step. A first re
 The Route Map tab is checked in CI against sample recordings. It has not been used with a real recording yet.
 
 The web version is tested against a simulated brain only. A first upload from a phone to a real brain has not happened yet.
+
+Sharing with an alliance partner is tested with the relay's unit tests and a local run of the relay code with test data. It has not been used at an event yet. It needs the relay redeployed before it works on the live site.
 
 ## Limitations
 

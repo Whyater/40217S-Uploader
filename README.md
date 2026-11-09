@@ -64,7 +64,7 @@ When it is done, the program shows on the brain. Run it from the brain screen. T
 Every push to the robot code publishes a build, so one work session can make several in a row. The last build of a session is a **full build**. The Windows app keeps these builds on the laptop:
 
 - **Newest**: the newest published build. If it is not a full build, the drop-down calls it a test build.
-- **Full builds**: the last three full builds, each with a note on what it changed. They are listed in [`full-builds.json`](full-builds.json).
+- **Full builds**: the last three full builds, each with a note on what it changed. They are listed in [`full-builds.json`](full-builds.json). A full build that cannot be downloaded still counts as one of the three.
 - **Kept**: any build you chose to keep (see below).
 
 **Get latest code** downloads any of these it does not have yet and removes the other builds, so after one online click you can upload any of them with no internet. The build you are using is never removed. The **Robot code** section shows a drop-down in place of the build title, grouped as above, with each build's number, build time, and note, for example "Build 313   Nov 7, 10:36 AM   RECF: right Goal + roller". Pick one and the title, **Upload to robot**, **Put tester on robot** and the Route Map prediction all switch to that build. The app remembers your pick. If you pick an older build on purpose, **Get latest code** leaves it picked; if you were on the newest, it moves up to the new newest. Going back to an older build puts older code on the brain, so check the build number in the drop-down before you click **Upload to robot**.

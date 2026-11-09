@@ -95,13 +95,13 @@ $script:UploaderManifestUrl = 'https://raw.githubusercontent.com/Whyater/40217S-
 # The three newest published builds are kept on this computer, each in builds\<tag>.
 # selected.json says which one the window shows and uploads. Set-SelectedBuild points
 # the three paths below at the picked build; until one is picked they name the old
-# single-build place, which no longer exists.
+# single-build place, where an install that could not be moved forward still has its build.
 $script:BuildsToKeep = 3
 $script:SelectedFile = Join-Path $InstallDir 'selected.json'
 $script:SelectedTag = ''
 $script:ProjectDir = Join-Path $InstallDir 'project'
 $script:BinDir     = Join-Path $script:ProjectDir 'bin'
-$script:VersionFile = Join-Path $script:ProjectDir 'version.json'
+$script:VersionFile = Join-Path $InstallDir 'version.json'
 $script:ProsDir    = Join-Path $InstallDir 'pros-cli'
 $script:PollSeconds = 5        # how often to check for a plugged-in brain while idle
 $script:UploadTimeoutSec = 600 # wireless uploads through a controller can take minutes
@@ -858,7 +858,7 @@ $SharedCode = {
     }
 
     # Deletes the builds Select-BuildsToKeep drops. Best effort: a folder Explorer or a
-    # virus scanner has open stays until the next start. Returns the tags that went.
+    # virus scanner has open can be left half deleted; Initialize-Builds clears such pieces at the next start. Returns the tags that went.
     function Remove-OldBuilds {
         param([string]$InstallDir, [string[]]$Protect = @(), [int]$Keep = 3, [bool]$Busy = $false, $Sync = $null)
         $keepPlan = Select-BuildsToKeep -Builds (Get-StoredBuilds $InstallDir) -Protect $Protect -Keep $Keep -Busy $Busy
@@ -915,6 +915,27 @@ $SharedCode = {
         if ((-not $Selected) -or (@($After) -notcontains $Selected)) { return (Get-NewestTag $After) }
         if ($Selected -ceq (Get-NewestTag $Before)) { return (Get-NewestTag $After) }
         return $Selected
+    }
+
+    # The line shown after Get latest code. When a build picked on purpose is not the newest one
+    # stored, it says so, because Upload still sends the picked one.
+    function Get-DownloadStatusText {
+        param([string]$Status, [string[]]$Downloaded, [string[]]$After, [string]$Selected)
+        $label = { param([string]$t) if ($t -match '^build-(\d+)-') { 'build ' + $Matches[1] } else { $t } }
+        $newest = Get-NewestTag $After
+        $text = ''
+        if ($Status -eq 'downloaded') {
+            $names = @($Downloaded | ForEach-Object { & $label $_ })
+            if ($names.Count -le 1) { $text = 'Downloaded ' + ($names -join '') + '.' }
+            else { $text = 'Downloaded ' + $names.Count + ' builds (' + ($names -join ', ') + ').' }
+        } else {
+            $text = 'You already have the latest code.'
+        }
+        if ($Selected -and $newest -and ($Selected -cne $newest)) {
+            return @{ Text = ($text + ' Still using ' + (& $label $Selected) + ' (you picked it). Pick ' + (& $label $newest) + ' in the drop-down to use it.'); Kind = 'info' }
+        }
+        if ($Status -eq 'downloaded') { return @{ Text = ($text + ' Ready to upload.'); Kind = 'success' } }
+        return @{ Text = $text; Kind = 'info' }
     }
 
     # Before builds\ existed, one build lived in project\ with version.json beside it. Moves
@@ -2516,9 +2537,13 @@ $DownloadBody = { Save-LatestRelease -ReleasesUrl $A.ReleasesUrl -InstallDir $A.
 $MapBody = { Read-ScourgeResults -Folder $A.Folder -Skip $A.Skip -Cache $A.Cache }
 $CloudBody = { $r = Get-CloudMap -MapUrl $A.MapUrl -Build $A.Build -Code $A.Code -CachePath $A.CachePath; $r.Build = [string]$A.Build; $r }
 $CloudCacheBody = {
-    # A build with no saved copy of its own may use the single copy older uploaders kept.
+    # A build with no saved copy of its own may use the single copy older uploaders kept, if it is that build's.
     $r = Read-CloudCache -Path $A.Path
-    if (($r.Status -ne 'ok') -and $A.LegacyPath) { $r = Read-CloudCache -Path $A.LegacyPath }
+    if (($r.Status -ne 'ok') -and $A.LegacyPath) {
+        # Only if that copy is this build's own prediction; another build's would be shown as this one's.
+        $old = Read-CloudCache -Path $A.LegacyPath
+        if (($old.Status -eq 'ok') -and ($null -ne $old.Data.Sim) -and ([string]$old.Data.Sim.Tag -ceq [string]$A.Build)) { $r = $old }
+    }
     $r.Build = [string]$A.Build
     $r
 }
@@ -2584,7 +2609,8 @@ function Set-SelectedBuild {
     param([string]$Tag, [switch]$Save)
     if ($Tag) { $script:ProjectDir = Get-BuildFolder -InstallDir $InstallDir -Tag $Tag } else { $script:ProjectDir = Join-Path $InstallDir 'project' }
     $script:BinDir = Join-Path $script:ProjectDir 'bin'
-    $script:VersionFile = Join-Path $script:ProjectDir 'version.json'
+    # With no pick the old single-build layout applies: its version.json sits beside project, not in it.
+    if ($Tag) { $script:VersionFile = Join-Path $script:ProjectDir 'version.json' } else { $script:VersionFile = Join-Path $InstallDir 'version.json' }
     $script:SelectedTag = $Tag
     if ($Save -and $Tag) {
         try { Write-SelectedTag -Path $script:SelectedFile -Tag $Tag } catch { }
@@ -2600,10 +2626,12 @@ function Initialize-Builds {
     $root = Join-Path $InstallDir 'builds'
     if (Test-Path $root) {
         # A download that was cut off leaves a .download folder; a swap cut off leaves .old, which is the
-        # build itself when its own folder is missing.
+        # build itself when its own folder is missing. A folder that is no longer a whole build (a delete
+        # that hit a locked file) is a leftover too.
         foreach ($d in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)) {
             try {
-                if ($d.Name -like '*.download') { Remove-Item -LiteralPath $d.FullName -Recurse -Force }
+                if (($d.Name -notlike '*.download') -and ($d.Name -notlike '*.old') -and (-not (Test-BuildComplete $d.FullName))) { Remove-Item -LiteralPath $d.FullName -Recurse -Force }
+                elseif ($d.Name -like '*.download') { Remove-Item -LiteralPath $d.FullName -Recurse -Force }
                 elseif ($d.Name -like '*.old') {
                     $own = Join-Path $root ($d.Name.Substring(0, $d.Name.Length - 4))
                     if (Test-Path $own) { Remove-Item -LiteralPath $d.FullName -Recurse -Force } else { Move-Item -LiteralPath $d.FullName -Destination $own }
@@ -3884,7 +3912,7 @@ function Update-MapPanel {
 # ---------------------------------------------------------------------------
 # Route Map from the team relay. The relay base comes from results_url in
 # uploader.json. Opening the tab, Refresh, and a good Send each fetch; the last good
-# answer is kept in Documents\Scourge Robot Data\map-cloud.json and drawn when there is
+# answer is kept per build in Documents\Scourge Robot Data\map-cloud-<tag>.json and drawn when there is
 # no network. Nothing waits on the network: the cache and the fetch are background jobs.
 # ---------------------------------------------------------------------------
 
@@ -4099,7 +4127,7 @@ function Get-CloudNote {
         $lines.Add($t)
     }
     if ($have -and ($null -ne $cl.Data.Sim) -and $cl.Data.Sim.Tag -and $script:InstalledTag -and ([string]$cl.Data.Sim.Tag -ne [string]$script:InstalledTag)) {
-        $lines.Add('The prediction is for ' + (Get-BuildTagLabel ([string]$cl.Data.Sim.Tag)) + ', this computer has ' + (Get-BuildTagLabel ([string]$script:InstalledTag)) + '.')
+        $lines.Add('The prediction is for ' + (Get-BuildTagLabel ([string]$cl.Data.Sim.Tag)) + ', but ' + (Get-BuildTagLabel ([string]$script:InstalledTag)) + ' is picked.')
     }
     if ($have -and ($null -eq $cl.Data.Sim) -and $script:InstalledTag) {
         $lines.Add('There is no prediction for ' + (Get-BuildTagLabel ([string]$script:InstalledTag)) + ' yet.')
@@ -4250,6 +4278,19 @@ function Switch-CloudBuild {
     Set-CloudData $null ''
     Update-MapSessions
     Start-CloudFetch
+}
+
+# A build that was removed has no use for its saved prediction. Tags still stored are kept; with no stored
+# builds nothing is removed.
+function Remove-StaleMapCaches {
+    $stored = @(Get-StoredBuilds $InstallDir | ForEach-Object { [string]$_.Tag })
+    if ($stored.Count -eq 0) { return }
+    try {
+        foreach ($f in @(Get-ChildItem -LiteralPath (Get-ResultsFolder) -Filter 'map-cloud-*.json' -File -ErrorAction SilentlyContinue)) {
+            $tag = $f.Name.Substring(10, $f.Name.Length - 15)
+            if ($stored -notcontains $tag) { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue }
+        }
+    } catch { }
 }
 
 # Called when the uploader check finishes: carry on with a fetch that was waiting for the address.
@@ -6104,14 +6145,13 @@ function Start-Download {
         $moved = ($pick -cne $script:SelectedTag)
         if ($moved) { Set-SelectedBuild $pick -Save }
         Update-BuildInfo
+        Remove-StaleMapCaches
         if ($moved) { Switch-CloudBuild }
         switch ([string]$r.Status) {
-            'downloaded' {
-                $names = @($r.Downloaded | ForEach-Object { Get-BuildTagLabel ([string]$_) })
-                if ($names.Count -le 1) { Set-Status ('Downloaded ' + ($names -join '') + '. Ready to upload.') 'success' }
-                else { Set-Status ('Downloaded ' + $names.Count + ' builds (' + ($names -join ', ') + '). Ready to upload.') 'success' }
+            { @('downloaded', 'current') -contains $_ } {
+                $st = Get-DownloadStatusText -Status ([string]$r.Status) -Downloaded @($r.Downloaded) -After $after -Selected $script:SelectedTag
+                Set-Status $st.Text $st.Kind
             }
-            'current'    { Set-Status 'You already have the latest code.' 'info' }
             'none'       {
                 if ($script:InstalledTag) {
                     Set-Status 'Waiting for the next build to be published. The code you have is still ready to upload.' 'info'
@@ -6473,7 +6513,8 @@ function Repair-ProjectFolder {
 }
 Repair-ProjectFolder
 # Then bring a single-build install forward and pick the build to show.
-Initialize-Builds
+# -SelfTest never touches the real builds folder; its checks make their own.
+if (-not $SelfTest) { Initialize-Builds; Remove-StaleMapCaches }
 
 if ($SelfTest) {
     # No window is shown here. Each check adds to $failures if it goes wrong.
@@ -7314,6 +7355,17 @@ if ($SelfTest) {
         & $expectB ((Get-TagAfterDownload -Before @() -After $after -Selected '') -eq 'build-313-3c15a66') 'after download: a first download should pick the newest'
         & $expectB ((Get-TagAfterDownload -Before $before -After $after -Selected 'build-301-ac5e41e') -eq 'build-313-3c15a66') 'after download: a pick that was removed should move to the newest'
 
+        # The status line after Get latest code: a build picked on purpose is not silently left in use.
+        $newer = @('build-320-9999999', 'build-313-3c15a66', 'build-308-2808722')
+        $msg = Get-DownloadStatusText -Status 'downloaded' -Downloaded @('build-320-9999999') -After $newer -Selected 'build-308-2808722'
+        & $expectB (($msg.Text -eq 'Downloaded build 320. Still using build 308 (you picked it). Pick build 320 in the drop-down to use it.') -and ($msg.Kind -eq 'info')) ('status: an older pick should be named, got: ' + $msg.Text)
+        $msg = Get-DownloadStatusText -Status 'current' -Downloaded @() -After $newer -Selected 'build-308-2808722'
+        & $expectB ($msg.Text -eq 'You already have the latest code. Still using build 308 (you picked it). Pick build 320 in the drop-down to use it.') ('status: an older pick should be named when nothing was fetched, got: ' + $msg.Text)
+        $msg = Get-DownloadStatusText -Status 'downloaded' -Downloaded @('build-320-9999999') -After $newer -Selected 'build-320-9999999'
+        & $expectB (($msg.Text -eq 'Downloaded build 320. Ready to upload.') -and ($msg.Kind -eq 'success')) ('status: the newest pick should say ready, got: ' + $msg.Text)
+        $msg = Get-DownloadStatusText -Status 'current' -Downloaded @() -After $newer -Selected 'build-320-9999999'
+        & $expectB ($msg.Text -eq 'You already have the latest code.') ('status: current on the newest should keep its old text, got: ' + $msg.Text)
+
         # Moving a single-build install forward: project\ and version.json become builds\<tag>.
         $legacy = Join-Path $buildRoot 'legacy'
         $old = & $mkBuild $legacy 'build-290-0a0a0a0' '2026-11-06T00:00:00Z'
@@ -7336,6 +7388,17 @@ if ($SelfTest) {
         New-Item -ItemType Directory -Path (Join-Path $bad 'project\bin') -Force | Out-Null
         [System.IO.File]::WriteAllText((Join-Path $bad 'version.json'), '{ not json', (New-Object System.Text.UTF8Encoding($false)))
         & $expectB (((Move-LegacyProject -InstallDir $bad) -eq '') -and (Test-Path (Join-Path $bad 'project\bin')) -and (Test-Path (Join-Path $bad 'version.json'))) 'legacy: a damaged version.json should leave project\ where it is'
+
+        # If the move cannot be done, the window keeps reading the old layout, and a folder that is no longer
+        # a whole build (a delete that hit a locked file) is cleared at the next start.
+        $InstallDir = $bad
+        $script:SelectedFile = Join-Path $bad 'selected.json'
+        try {
+            New-Item -ItemType Directory -Path (Join-Path $bad 'builds\build-111-aaaaaaa\bin') -Force | Out-Null
+            Initialize-Builds
+            & $expectB (($script:SelectedTag -eq '') -and ($script:VersionFile -eq (Join-Path $bad 'version.json')) -and ($script:ProjectDir -eq (Join-Path $bad 'project'))) 'legacy: when the move fails the paths should stay on the old layout'
+            & $expectB (-not (Test-Path (Join-Path $bad 'builds\build-111-aaaaaaa'))) 'leftovers: a folder that is not a whole build should be cleared at start'
+        } finally { $InstallDir = $savedInstallDir; $script:SelectedFile = $savedSelectedFile; Set-SelectedBuild '' }
 
         # Picking a build changes the folder an upload uses. Two builds with different bytes, a stand-in for pros.exe
         # that writes down the folder it ran in and the hash of the hot file it was given.
@@ -7529,8 +7592,14 @@ if ($SelfTest) {
             $c2 = & $readCache @{ Path = (Get-CloudCachePath 'build-999-0000000'); LegacyPath = (Get-CloudCachePath); Build = 'build-999-0000000' }
             & $expectB ($c2.Status -eq 'none') 'map cache: a build with no copy and no old copy should load nothing'
             Copy-Item -LiteralPath (Join-Path $mapFolder ('map-cloud-' + $t308 + '.json')) -Destination (Join-Path $mapFolder 'map-cloud.json')
-            $c3 = & $readCache @{ Path = (Get-CloudCachePath 'build-999-0000000'); LegacyPath = (Get-CloudCachePath); Build = 'build-999-0000000' }
-            & $expectB (($c3.Status -eq 'ok') -and ($c3.Build -eq 'build-999-0000000')) 'map cache: the old single copy should be the fallback'
+            $c3 = & $readCache @{ Path = (Get-CloudCachePath 'build-998-0000000'); LegacyPath = (Get-CloudCachePath); Build = $t313 }
+            & $expectB (($c3.Status -eq 'ok') -and ($c3.Build -eq $t313)) 'map cache: the old single copy should be the fallback for the build it predicts'
+            $c4 = & $readCache @{ Path = (Get-CloudCachePath 'build-999-0000000'); LegacyPath = (Get-CloudCachePath); Build = 'build-999-0000000' }
+            & $expectB ($c4.Status -eq 'none') 'map cache: the old single copy must not be shown for a different build'
+            # A removed build's saved prediction goes; stored builds keep theirs.
+            $InstallDir = $inst1
+            try { Remove-StaleMapCaches } finally { $InstallDir = $savedInstallDir }
+            & $expectB ((-not (Test-Path (Join-Path $mapFolder ('map-cloud-' + $t308 + '.json')))) -and (Test-Path (Join-Path $mapFolder ('map-cloud-' + $t313 + '.json')))) 'map cache: a removed build''s copy should be pruned and a stored build''s kept'
             & $expectB ((Get-CloudCachePath 'build-308-2808722') -eq (Join-Path $mapFolder 'map-cloud-build-308-2808722.json') -and (Get-CloudCachePath '..\x') -eq (Join-Path $mapFolder 'map-cloud.json')) 'map cache: a tag that is a path must not become a file name'
         }
 
@@ -8181,7 +8250,7 @@ if ($SelfTest) {
                 foreach ($l in ($run.Output -split "`n")) { Write-Host ('    ' + $l) }
             }
         } else {
-            Write-Host '  Upload: skipped (no project\bin\hot.package.bin downloaded)'
+            Write-Host '  Upload: skipped (no build downloaded)'
         }
     }
 

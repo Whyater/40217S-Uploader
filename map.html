@@ -54,6 +54,8 @@
   --goal-neu: #6A6F78;
   --goal-opp: #B42318;
   --obj: #8C6D14;
+  --tip-red: #C62F2F;
+  --tip-blue: #2F62C9;
   --toggle: #4A4E56;
 }
 @media (prefers-color-scheme: dark) {
@@ -91,6 +93,8 @@
     --goal-neu: #9A9EA6;
     --goal-opp: #FF7060;
     --obj: #CFAE45;
+    --tip-red: #FF6B6B;
+    --tip-blue: #6F9BFF;
     --toggle: #A6A9B0;
   }
 }
@@ -286,6 +290,8 @@ svg text { font-family: var(--font); }
 .toggle-bar.other { fill: none; stroke: var(--toggle); stroke-width: 1.2; stroke-dasharray: 3 2; }
 .loader { fill: none; stroke: var(--text-2); stroke-width: 1.5; }
 .pin-flat { fill: var(--obj); fill-opacity: 0.3; stroke: var(--obj); stroke-width: 1.2; }
+.tip-red { fill: var(--tip-red); fill-opacity: 0.9; stroke: none; }
+.tip-blue { fill: var(--tip-blue); fill-opacity: 0.9; stroke: none; }
 .tape { stroke: var(--field-seam); stroke-width: 2; fill: none; }
 .zone-ours { fill: var(--zone-own); }
 .zone-theirs { fill: var(--opp); }
@@ -694,7 +700,7 @@ const worse = (a, b) => (a == null ? b : b == null ? a : ORDER[b] > ORDER[a] ? b
 function normPt(o) {
   o = o && typeof o === 'object' ? o : {};
   const zone = o.zone && typeof o.zone === 'object' ? { w: nn(o.zone.w), h: nn(o.zone.h) } : null;
-  return { name: String(o.name || ''), kind: String(o.kind || ''), x: nn(o.x), y: nn(o.y), r: nn(o.r), w: nn(o.w), h: nn(o.h), len: nn(o.len), a: nn(o.angle), zone };
+  return { name: String(o.name || ''), kind: String(o.kind || ''), x: nn(o.x), y: nn(o.y), r: nn(o.r), w: nn(o.w), h: nn(o.h), len: nn(o.len), a: nn(o.angle), tip: o.tip === 'red' || o.tip === 'blue' ? o.tip : '', holds: o.holds === 'pin' ? 'pin' : '', zone };
 }
 const hasXY = (p) => p.x !== null && p.y !== null;
 
@@ -704,7 +710,7 @@ function normField(f) {
   const box = (b) => ({ x0: nn(b && b.x0), y0: nn(b && b.y0), x1: nn(b && b.x1), y1: nn(b && b.y1), kind: String((b && b.kind) || ''), name: String((b && b.name) || '') });
   const whole = (b) => b.x0 !== null && b.y0 !== null && b.x1 !== null && b.y1 !== null;
   return {
-    id: f.id === 'pinnacle' ? 'pinnacle' : 'override',
+    id: f.id === 'pinnacle' || f.id === 'skills' ? f.id : 'override',
     wall: nn(f.wall) != null ? f.wall : 70.1,
     // Against the robot's footprint. The laptop tool's 5.0 in [VERIFY] is against the robot's center: different checks, so both stay.
     goalRadius: nn(f.goal_radius) != null ? f.goal_radius : 2.4,
@@ -833,13 +839,14 @@ function normSim(raw) {
     const fromId = /-([LR])$/.exec(String(r.id || ''));
     // Skills and RECF (the Pinnacle field) run once from a fixed start in true field coordinates: always the Left frame, never mirrored.
     const pin = r.field === 'pinnacle' || String(r.slot) === 'recf' || String(r.id) === 'recf';
-    const fixed = pin || String(r.slot) === 'skills' || String(r.id) === 'skills';
+    const skills = !pin && (r.field === 'skills' || String(r.slot) === 'skills' || String(r.id) === 'skills');
+    const fixed = pin || skills;
     const side = fixed ? 'L' : /^[LR]$/i.test(String(r.side)) ? String(r.side).toUpperCase() : fromId ? fromId[1] : 'L';
     const s = normSession({ id: r.id != null ? r.id : 'sim-' + (i + 1), kind: 'sim', side, samples: r.samples, events: r.events }, i, 'ms');
     if (s.samples.length < 2) return; // a line needs two points
     s.slot = pin ? (r.slot != null ? String(r.slot) : 'recf') : fixed ? 'skills' : r.slot != null ? String(r.slot) : null;
     s.fixed = fixed;
-    s.field = pin ? 'pinnacle' : 'override';
+    s.field = pin ? 'pinnacle' : skills ? 'skills' : 'override';
     s.name = r.name ? String(r.name) : pin ? 'RECF' : fixed ? 'Skills' : s.slot ? 'Taught ' + s.slot : 'AWP';
     s.total = isNum(r.total_ms) && r.total_ms > 0 ? r.total_ms / 1000 : s.duration;
     byId.set(s.id, s);
@@ -860,8 +867,8 @@ function routeEntries(model) {
   const map = new Map();
   // A Pinnacle (RECF) route runs once from a fixed start in true field coordinates, like Skills, and keeps its own name.
   const get = (slot, name, field) => {
-    const pin = field === 'pinnacle', key = slot == null ? 'awp' : slot === 'skills' ? 'skills' : pin ? 'p-' + slot : 't-' + slot;
-    if (!map.has(key)) map.set(key, { key, slot: slot == null ? null : slot, label: slot == null ? 'AWP' : slot === 'skills' || pin ? name || (pin ? 'RECF' : 'Skills') : 'Taught ' + slot, routeIdx: -1, sim: {}, fixed: slot === 'skills' || pin, field: pin ? 'pinnacle' : 'override' });
+    const pin = field === 'pinnacle', fid = pin ? 'pinnacle' : slot === 'skills' ? 'skills' : 'override', key = slot == null ? 'awp' : slot === 'skills' ? 'skills' : pin ? 'p-' + slot : 't-' + slot;
+    if (!map.has(key)) map.set(key, { key, slot: slot == null ? null : slot, label: slot == null ? 'AWP' : slot === 'skills' || pin ? name || (pin ? 'RECF' : 'Skills') : 'Taught ' + slot, routeIdx: -1, sim: {}, fixed: slot === 'skills' || pin, field: fid });
     return map.get(key);
   };
   get(null);
@@ -1428,20 +1435,90 @@ const DEFAULT_FIELD = {
   id: 'override',
   wall: 70.1,
   goals: [
-    { name: 'ALLIANCE_GOAL_NEAR', kind: 'alliance', x: 23.6, y: -47.2 }, { name: 'ALLIANCE_GOAL_SIDE', kind: 'alliance', x: 47.2, y: -23.6 },
-    { name: 'NEUTRAL_GOAL_NEAR', kind: 'neutral', x: -23.6, y: -47.2 }, { name: 'NEUTRAL_GOAL_SIDE', kind: 'neutral', x: 47.2, y: 23.6 },
-    { name: 'CENTER_GOAL', kind: 'neutral', x: 0, y: 0 }, { name: 'OPP_ALLIANCE_GOAL_FAR', kind: 'opponent', x: -23.6, y: 47.2 },
-    { name: 'OPP_ALLIANCE_GOAL_LEFT', kind: 'opponent', x: -47.2, y: 23.6 }, { name: 'NEUTRAL_GOAL_FAR', kind: 'neutral', x: 23.6, y: 47.2 },
-    { name: 'NEUTRAL_GOAL_LEFT', kind: 'neutral', x: -47.2, y: -23.6 },
+    {"name": "ALLIANCE_GOAL_NEAR", "kind": "alliance", "x": 23.6, "y": -47.2},
+    {"name": "ALLIANCE_GOAL_SIDE", "kind": "alliance", "x": 47.2, "y": -23.6},
+    {"name": "NEUTRAL_GOAL_NEAR", "kind": "neutral", "x": -23.6, "y": -47.2, "holds": "pin"},
+    {"name": "NEUTRAL_GOAL_SIDE", "kind": "neutral", "x": 47.2, "y": 23.6, "holds": "pin"},
+    {"name": "CENTER_GOAL", "kind": "neutral", "x": 0.0, "y": 0.0, "holds": "pin"},
+    {"name": "OPP_ALLIANCE_GOAL_FAR", "kind": "opponent", "x": -23.6, "y": 47.2},
+    {"name": "OPP_ALLIANCE_GOAL_LEFT", "kind": "opponent", "x": -47.2, "y": 23.6},
+    {"name": "NEUTRAL_GOAL_FAR", "kind": "neutral", "x": 23.6, "y": 47.2, "holds": "pin"},
+    {"name": "NEUTRAL_GOAL_LEFT", "kind": "neutral", "x": -47.2, "y": -23.6, "holds": "pin"},
   ],
-  toggles: [{ name: 'TOGGLE_NEAR', x: 0, y: -70.1 }, { name: 'TOGGLE_SIDE', x: 70.1, y: 0 }, { name: 'TOGGLE_LEFT', x: -70.1, y: 0 }, { name: 'TOGGLE_FAR', x: 0, y: 70.1 }],
+  toggles: [
+    {"name": "TOGGLE_NEAR", "x": 0.0, "y": -70.1},
+    {"name": "TOGGLE_SIDE", "x": 70.1, "y": 0.0},
+    {"name": "TOGGLE_LEFT", "x": -70.1, "y": 0.0},
+    {"name": "TOGGLE_FAR", "x": 0.0, "y": 70.1},
+  ],
   objects: [
-    { name: 'OBJ_WALL_NEAR_LEFT', x: -23.6, y: -68.7 }, { name: 'OBJ_WALL_NEAR_RIGHT', x: 23.6, y: -68.7 }, { name: 'OBJ_WALL_SIDE', x: 68.7, y: -23.6 },
-    { name: 'OBJ_MID_NEAR', x: 0, y: -23.6 }, { name: 'OBJ_MID_SIDE', x: 23.6, y: 0 }, { name: 'OBJ_DIAGONAL_SIDE', x: 47.2, y: -47.2 }, { name: 'OBJ_DIAGONAL_INNER', x: 23.6, y: -23.6 },
+    {"name": "OBJ_WALL_NEAR_RIGHT_1", "x": 20.44, "y": -68.7, "kind": "cup", "r": 1.58},
+    {"name": "OBJ_WALL_NEAR_RIGHT_2", "x": 23.6, "y": -68.7, "kind": "stack", "r": 1.58},
+    {"name": "OBJ_WALL_NEAR_RIGHT_3", "x": 26.76, "y": -68.7, "kind": "cup", "r": 1.58},
+    {"name": "OBJ_WALL_NEAR_LEFT_1", "x": -26.76, "y": -68.7, "kind": "cup", "r": 1.58},
+    {"name": "OBJ_WALL_NEAR_LEFT_2", "x": -23.6, "y": -68.7, "kind": "stack", "r": 1.58},
+    {"name": "OBJ_WALL_NEAR_LEFT_3", "x": -20.44, "y": -68.7, "kind": "cup", "r": 1.58},
+    {"name": "OBJ_WALL_SIDE_1", "x": 68.7, "y": -26.76, "kind": "cup", "r": 1.58},
+    {"name": "OBJ_WALL_SIDE_2", "x": 68.7, "y": -23.6, "kind": "stack", "r": 1.58},
+    {"name": "OBJ_WALL_SIDE_3", "x": 68.7, "y": -20.44, "kind": "cup", "r": 1.58},
+    {"name": "OBJ_WALL_SIDE_UP_1", "x": 68.7, "y": 20.44, "kind": "cup", "r": 1.58},
+    {"name": "OBJ_WALL_SIDE_UP_2", "x": 68.7, "y": 23.6, "kind": "stack", "r": 1.58},
+    {"name": "OBJ_WALL_SIDE_UP_3", "x": 68.7, "y": 26.76, "kind": "cup", "r": 1.58},
+    {"name": "OBJ_WALL_FAR_RIGHT_1", "x": 20.44, "y": 68.7, "kind": "cup", "r": 1.58},
+    {"name": "OBJ_WALL_FAR_RIGHT_2", "x": 23.6, "y": 68.7, "kind": "stack", "r": 1.58},
+    {"name": "OBJ_WALL_FAR_RIGHT_3", "x": 26.76, "y": 68.7, "kind": "cup", "r": 1.58},
+    {"name": "OBJ_WALL_FAR_LEFT_1", "x": -26.76, "y": 68.7, "kind": "cup", "r": 1.58},
+    {"name": "OBJ_WALL_FAR_LEFT_2", "x": -23.6, "y": 68.7, "kind": "stack", "r": 1.58},
+    {"name": "OBJ_WALL_FAR_LEFT_3", "x": -20.44, "y": 68.7, "kind": "cup", "r": 1.58},
+    {"name": "OBJ_WALL_LEFT_UP_1", "x": -68.7, "y": 20.44, "kind": "cup", "r": 1.58},
+    {"name": "OBJ_WALL_LEFT_UP_2", "x": -68.7, "y": 23.6, "kind": "stack", "r": 1.58},
+    {"name": "OBJ_WALL_LEFT_UP_3", "x": -68.7, "y": 26.76, "kind": "cup", "r": 1.58},
+    {"name": "OBJ_WALL_LEFT_DOWN_1", "x": -68.7, "y": -26.76, "kind": "cup", "r": 1.58},
+    {"name": "OBJ_WALL_LEFT_DOWN_2", "x": -68.7, "y": -23.6, "kind": "stack", "r": 1.58},
+    {"name": "OBJ_WALL_LEFT_DOWN_3", "x": -68.7, "y": -20.44, "kind": "cup", "r": 1.58},
+    {"name": "OBJ_CLUSTER_1_PIN_XP", "x": -42.8, "y": -47.2, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 0.0, "tip": "red"},
+    {"name": "OBJ_CLUSTER_1_PIN_YN", "x": -47.2, "y": -51.6, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 270.0, "tip": "red"},
+    {"name": "OBJ_CLUSTER_1_PIN_XN", "x": -51.6, "y": -47.2, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 180.0, "tip": "blue"},
+    {"name": "OBJ_CLUSTER_1_PIN_YP", "x": -47.2, "y": -42.8, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 90.0, "tip": "blue"},
+    {"name": "OBJ_CLUSTER_1", "x": -47.2, "y": -47.2, "kind": "cup", "r": 1.58},
+    {"name": "OBJ_CLUSTER_2_PIN_XP", "x": -19.2, "y": -23.6, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 0.0, "tip": "red"},
+    {"name": "OBJ_CLUSTER_2_PIN_YN", "x": -23.6, "y": -28.0, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 270.0, "tip": "red"},
+    {"name": "OBJ_CLUSTER_2_PIN_XN", "x": -28.0, "y": -23.6, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 180.0, "tip": "blue"},
+    {"name": "OBJ_CLUSTER_2_PIN_YP", "x": -23.6, "y": -19.2, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 90.0, "tip": "blue"},
+    {"name": "OBJ_CLUSTER_2", "x": -23.6, "y": -23.6, "kind": "cup", "r": 1.58},
+    {"name": "OBJ_CLUSTER_3_PIN_XP", "x": 28.0, "y": 23.6, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 0.0, "tip": "red"},
+    {"name": "OBJ_CLUSTER_3_PIN_YN", "x": 23.6, "y": 19.2, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 270.0, "tip": "red"},
+    {"name": "OBJ_CLUSTER_3_PIN_XN", "x": 19.2, "y": 23.6, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 180.0, "tip": "blue"},
+    {"name": "OBJ_CLUSTER_3_PIN_YP", "x": 23.6, "y": 28.0, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 90.0, "tip": "blue"},
+    {"name": "OBJ_CLUSTER_3", "x": 23.6, "y": 23.6, "kind": "cup", "r": 1.58},
+    {"name": "OBJ_CLUSTER_4_PIN_XP", "x": 51.6, "y": 47.2, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 0.0, "tip": "red"},
+    {"name": "OBJ_CLUSTER_4_PIN_YN", "x": 47.2, "y": 42.8, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 270.0, "tip": "red"},
+    {"name": "OBJ_CLUSTER_4_PIN_XN", "x": 42.8, "y": 47.2, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 180.0, "tip": "blue"},
+    {"name": "OBJ_CLUSTER_4_PIN_YP", "x": 47.2, "y": 51.6, "kind": "pin_flat", "len": 6.5, "w": 3.02, "angle": 90.0, "tip": "blue"},
+    {"name": "OBJ_CLUSTER_4", "x": 47.2, "y": 47.2, "kind": "cup", "r": 1.58},
+    {"name": "OBJ_DIAGONAL_SIDE", "x": 47.2, "y": -47.2, "kind": "stack", "r": 1.58},
+    {"name": "OBJ_DIAGONAL_INNER", "x": 23.6, "y": -23.6, "kind": "stack", "r": 1.58},
+    {"name": "OBJ_DIAGONAL_FAR_INNER", "x": -23.6, "y": 23.6, "kind": "stack", "r": 1.58},
+    {"name": "OBJ_DIAGONAL_FAR", "x": -47.2, "y": 47.2, "kind": "stack", "r": 1.58},
+    {"name": "OBJ_MID_NEAR", "x": 0.0, "y": -23.6, "kind": "stack", "r": 1.58, "tip": "red"},
+    {"name": "OBJ_MID_SIDE", "x": 23.6, "y": 0.0, "kind": "stack", "r": 1.58, "tip": "red"},
+    {"name": "OBJ_MID_FAR", "x": 0.0, "y": 23.6, "kind": "stack", "r": 1.58, "tip": "blue"},
+    {"name": "OBJ_MID_LEFT", "x": -23.6, "y": 0.0, "kind": "stack", "r": 1.58, "tip": "blue"},
   ],
-  loaders: [{ name: 'LOADER_LEFT', x: -58.7, y: -68.5 }, { name: 'LOADER_RIGHT', x: 58.7, y: -68.5 }],
+  loaders: [
+    {"name": "LOADER_LEFT", "x": -58.7, "y": -68.5, "zone": {"w": 24.3, "h": 11.5}},
+    {"name": "LOADER_RIGHT", "x": 58.7, "y": -68.5, "zone": {"w": 24.3, "h": 11.5}},
+    {"name": "LOADER_FAR_LEFT", "x": -58.7, "y": 68.5},
+    {"name": "LOADER_FAR_RIGHT", "x": 58.7, "y": 68.5},
+  ],
   robot: { length: 17, width: 16, front: 7, back: 10 }, // front/back: claw end and intake end, measured from the turning center
 };
+
+// The Skills field: the match field with every Goal empty and no other alliance, so the blue Goals are ordinary Goals. A test compares it with the laptop tool's copy.
+const SKILLS_FIELD = Object.assign({}, DEFAULT_FIELD, {
+  id: 'skills',
+  goals: DEFAULT_FIELD.goals.map((g) => ({ name: g.name.replace('OPP_ALLIANCE', 'BLUE_ALLIANCE'), kind: g.kind === 'opponent' ? 'alliance' : g.kind, x: g.x, y: g.y })),
+});
 
 // The RECF Pinnacle field, same frame as the Override one. A test compares it with the laptop tool's copy; positions are good to about 1 in.
 const PINNACLE_FIELD = {
@@ -1517,8 +1594,17 @@ const PINNACLE_FIELD = {
 function buildModel(input) {
   const i = input && typeof input === 'object' ? input : {};
   const m = normalize(i.mapData);
-  if (!(i.mapData && i.mapData.field && typeof i.mapData.field === 'object')) m.field = normField(DEFAULT_FIELD);
-  m.fields = { override: m.field, pinnacle: normField(PINNACLE_FIELD) };
+  // Map data from an older tool has an untyped object list (small X's); the page's own copy has every Cup and Pin.
+  const sent = i.mapData && i.mapData.field && typeof i.mapData.field === 'object' ? i.mapData.field : null;
+  if (!sent) m.field = normField(DEFAULT_FIELD);
+  else if (!arr(sent.objects).some((o) => o && o.kind)) { // only the object list is stale: keep the sent Goals and robot size
+    const own = normField(DEFAULT_FIELD);
+    m.field.objects = own.objects;
+    // Older data also never said which Goals start a match holding a Pin: take that from the page's copy, by Goal name.
+    const held = own.goals.filter((g) => g.holds === 'pin').map((g) => g.name);
+    m.field.goals.forEach((g) => { if (held.indexOf(g.name) >= 0) g.holds = 'pin'; });
+  }
+  m.fields = { override: m.field, pinnacle: normField(PINNACLE_FIELD), skills: normField(SKILLS_FIELD) };
   const notes = [i.note, m.note].filter(Boolean).map(String); // the host's line and the data's own line, once each
   m.note = notes.filter((x, j) => notes.indexOf(x) === j).join(' ');
   m.sim = normSim(i.simulated);
@@ -1664,9 +1750,10 @@ function frameCtx(model, sel, W, fit, layers) {
 
 // The model with the other field swapped in, so every drawing and check that reads model.field sees the field being shown. Built once per model.
 function fieldModel(model, id) {
-  if (id !== 'pinnacle' || !model.fields) return model;
-  if (!model.fieldView) model.fieldView = Object.assign(Object.create(model), { field: model.fields.pinnacle, base: model });
-  return model.fieldView;
+  if ((id !== 'pinnacle' && id !== 'skills') || !model.fields) return model;
+  const views = model.fieldViews || (model.fieldViews = {});
+  if (!views[id]) views[id] = Object.assign(Object.create(model), { field: model.fields[id], base: model });
+  return views[id];
 }
 
 function resolveSel(model, state) {
@@ -1682,8 +1769,9 @@ function resolveSel(model, state) {
   const entries = routeEntries(model);
   const entry = state.pick != null ? entries.find((x) => x.key === state.pick) || null : state.route != null ? entries.find((x) => x.routeIdx === state.route) || null : null;
   // The field on screen: the draw tool's own choice, else the picked route's field. A prediction is only drawn on the field it was made for.
-  const entryField = entry && entry.field === 'pinnacle' ? 'pinnacle' : 'override';
-  const fieldId = state.fieldId === 'pinnacle' || state.fieldId === 'override' ? state.fieldId : entryField;
+  const known = (id) => id === 'pinnacle' || id === 'skills' || id === 'override';
+  const entryField = entry && known(entry.field) ? entry.field : 'override';
+  const fieldId = known(state.fieldId) ? state.fieldId : entryField;
   const sim = frame === 'field' && fieldId === entryField ? simFor(entry, state.side || 'L') : null;
   // The transport plays the prediction unless the recording was asked for (and has a path to play).
   const hasPath = !!(session && session.samples.length);
@@ -1715,7 +1803,7 @@ function renderBase(model, sel, ctx) {
   const w = F.wall, g = ctx.grid, win = ctx.win, pin = F.id === 'pinnacle';
   p.push('<rect class="field-bg" x="' + f3(-w) + '" y="' + f3(-w) + '" width="' + f3(2 * w) + '" height="' + f3(2 * w) + '"/>');
   if (pin) F.zones.forEach((z) => p.push('<rect class="zone-' + esc(z.kind) + '" x="' + f3(z.x0) + '" y="' + f3(-z.y1) + '" width="' + f3(z.x1 - z.x0) + '" height="' + f3(z.y1 - z.y0) + '"><title>' + esc(z.name) + '</title></rect>'));
-  else p.push('<polygon class="opp-side" points="' + f3(-w) + ',' + f3(w) + ' ' + f3(w) + ',' + f3(-w) + ' ' + f3(-w) + ',' + f3(-w) + '"/>');
+  else if (F.id !== 'skills') p.push('<polygon class="opp-side" points="' + f3(-w) + ',' + f3(w) + ' ' + f3(w) + ',' + f3(-w) + ' ' + f3(-w) + ',' + f3(-w) + '"/>');
   // Grid lines span the whole field (the view clips them); axis numbers sit on the edge of what is shown.
   for (let v = -Math.floor(w / g) * g; v <= w; v += g) {
     const cls = (v === 0 ? 'seam' : 'grid') + ' ns';
@@ -1736,8 +1824,6 @@ function renderBase(model, sel, ctx) {
     F.tape.forEach((t) => p.push('<line class="tape ns" x1="' + f3(t.x1) + '" y1="' + f3(-t.y1) + '" x2="' + f3(t.x2) + '" y2="' + f3(-t.y2) + '"/>'));
     F.startAreas.forEach((z) => p.push('<rect class="start-area ns" x="' + f3(z.x0) + '" y="' + f3(-z.y1) + '" width="' + f3(z.x1 - z.x0) + '" height="' + f3(z.y1 - z.y0) + '"><title>Starting area</title></rect>'));
   } else p.push('<line class="aline ns" x1="' + f3(-w) + '" y1="' + f3(w) + '" x2="' + f3(w) + '" y2="' + f3(-w) + '"/>');
-  // Our side is below the line, the other alliance's side above. A caption is left out when no stretch of the line in view is clear.
-  fieldLabels(F, ctx).caps.forEach((c) => p.push(at(c.t, c.t, k, '<g transform="rotate(-45)"><text class="lbl halo' + (c.muted ? ' muted' : '') + '" y="' + c.off + '" text-anchor="middle">' + c.text + '</text></g>')));
   p.push('<rect class="wall ns" x="' + f3(-w) + '" y="' + f3(-w) + '" width="' + f3(2 * w) + '" height="' + f3(2 * w) + '"/>');
   return p.join('');
 }
@@ -1778,7 +1864,7 @@ function fieldLabels(F, ctx) {
     return list;
   };
   const boxAt = (o, c) => ({ x: o.x + c.x, y: o.y + c.y, w: o.w, h: NAME_H });
-  const things = F.objects.map((q) => ({ x: q.x / k, y: -q.y / k, r: Math.max((q.r !== null ? q.r : 1.6) / k, 3) + 5 }))
+  const things = F.objects.map((q) => ({ x: q.x / k, y: -q.y / k, r: Math.max((q.r !== null ? q.r : 1.6) / k, 3) + 5, pin: q.kind === 'pin_flat' || /CLUSTER_\d$/.test(q.name) })) // a cluster sits on the Autonomous Line: a caption may run over its thin Pins and Cup ring
     .concat(F.loaders.map((q) => ({ x: q.x / k, y: -q.y / k, r: 15 })));
   // The axis numbers along the left and bottom of the view are in the way too.
   const axes = [];
@@ -1789,13 +1875,13 @@ function fieldLabels(F, ctx) {
   // The captions go first, on the stretch of y = x in view that is clear of every Goal and its default name.
   const lo = Math.max(win.x0, win.y0), hi = Math.min(win.x1, win.y1), caps = [];
   if (hi - lo > 24 && F.id !== 'pinnacle') { // the captions name the Override Autonomous Line, which Pinnacle does not have
-    CAPTIONS.forEach((c) => {
+    CAPTIONS.filter((c) => F.id !== 'skills' || c.id === 'our').forEach((c) => { // Skills has no other alliance side
       const len = c.text.length * c.cw, half = (len * k) / (2 * Math.SQRT2); // half the text's length as a stretch of t on the line
       let best = null;
       for (let t = lo + half + 2; t <= hi - half - 2 + 1e-9; t += 2) {
         const cx = t / k + 0.7071 * (c.off - 3.5), cy = -t / k + 0.7071 * (c.off - 3.5), pts = [];
         for (let u = -len / 2; u <= len / 2 + 0.01; u += 8) pts.push({ x: cx + 0.7071 * u, y: cy - 0.7071 * u });
-        const clash = pts.some((q) => geo.some((o) => Math.hypot(q.x - o.x, q.y - o.y) < o.R + 13 || boxHitsDisc(boxAt(o, spots(o)[0]), { x: q.x, y: q.y, r: 6 })) || things.some((d) => Math.hypot(q.x - d.x, q.y - d.y) < d.r + 6) || segs.some((sg) => distToSeg(q.x, q.y, sg[0], sg[1]) < 9));
+        const clash = pts.some((q) => geo.some((o) => Math.hypot(q.x - o.x, q.y - o.y) < o.R + 13 || boxHitsDisc(boxAt(o, spots(o)[0]), { x: q.x, y: q.y, r: 6 })) || things.some((d) => d.pin ? false : Math.hypot(q.x - d.x, q.y - d.y) < d.r + 6) || segs.some((sg) => distToSeg(q.x, q.y, sg[0], sg[1]) < 9));
         const dist = Math.abs(t - (lo + (hi - lo) * c.want));
         if (!clash && (!best || dist < best.dist)) best = { t, dist, pts };
       }
@@ -1855,13 +1941,14 @@ function renderFieldObjects(model, route, ctx) {
   F.objects.forEach((o) => {
     if (o.kind === 'pin_flat' && o.len !== null && o.w !== null) {
       // A Pin lying down: len by w inches, long axis o.a degrees counter-clockwise from +X (the page's y runs down, so the turn is negated).
-      p.push('<g transform="translate(' + f3(o.x) + ' ' + f3(-o.y) + ') rotate(' + f3(-(o.a !== null ? o.a : 0)) + ')"><rect class="pin-flat ns" x="' + f3(-o.len / 2) + '" y="' + f3(-o.w / 2) + '" width="' + f3(o.len) + '" height="' + f3(o.w) + '" rx="' + f3(o.w / 2) + '"><title>' + esc(o.name || 'Pin') + ' (lying Pin)</title></rect></g>');
+      p.push('<g transform="translate(' + f3(o.x) + ' ' + f3(-o.y) + ') rotate(' + f3(-(o.a !== null ? o.a : 0)) + ')"><rect class="pin-flat ns" x="' + f3(-o.len / 2) + '" y="' + f3(-o.w / 2) + '" width="' + f3(o.len) + '" height="' + f3(o.w) + '" rx="' + f3(o.w / 2) + '"><title>' + esc(o.name || 'Pin') + ' (lying Pin' + (o.tip ? ', ' + o.tip + ' tip' : '') + ')</title></rect>' +
+        (o.tip ? '<rect class="tip-' + o.tip + ' ns" x="' + f3(o.len / 2 - 2.4) + '" y="' + f3(-o.w / 2 + 0.4) + '" width="2.4" height="' + f3(o.w - 0.8) + '" rx="' + f3(o.w / 2 - 0.4) + '"/>' : '') + '</g>');
       return;
     }
     const R = Math.max((o.r !== null ? o.r : 1.6) / k, 3);
     let inner;
     if (o.kind === 'cup') inner = '<circle class="obj-ring" r="' + f3(R) + '"/>';
-    else if (o.kind === 'stack') inner = '<circle class="obj-ring" r="' + f3(R) + '"/><circle class="obj" r="' + f3(R * 0.45) + '"/>';
+    else if (o.kind === 'stack') inner = '<circle class="obj-ring" r="' + f3(R) + '"/><circle class="' + (o.tip ? 'tip-' + o.tip : 'obj') + '" r="' + f3(R * 0.45) + '"/>';
     else if (o.kind === 'pin') inner = '<circle class="obj" r="' + f3(R * 0.8) + '"/>';
     else inner = '<path class="obj-ring" d="M' + f3(-R) + ' ' + f3(-R) + 'L' + f3(R) + ' ' + f3(R) + 'M' + f3(R) + ' ' + f3(-R) + 'L' + f3(-R) + ' ' + f3(R) + '"/>';
     p.push(at(o.x, o.y, k, inner + '<title>' + esc((o.name || 'Object') + (o.kind ? ' (' + o.kind + ')' : '')) + '</title>'));
@@ -1873,6 +1960,7 @@ function renderFieldObjects(model, route, ctx) {
     else if (kind === 'opponent') { const a = R * 0.62; body = '<circle class="goal-opp-ring" r="' + f3(R + 4) + '"/><circle class="goal-opp-body" r="' + f3(R) + '"/><path class="goal-opp-x" d="M' + f3(-a) + ' ' + f3(-a) + 'L' + f3(a) + ' ' + f3(a) + 'M' + f3(a) + ' ' + f3(-a) + 'L' + f3(-a) + ' ' + f3(a) + '"/>'; }
     else if (kind === 'center') body = '<circle class="goal-neu-ring" r="' + f3(R + 4) + '"/><circle class="goal-neu-body" r="' + f3(R) + '"/>';
     else body = '<circle class="goal-neu-body" r="' + f3(R) + '"/>';
+    if (g.holds === 'pin') body += '<circle class="obj" r="' + f3(R * 0.42) + '"/>'; // the standing Pin a neutral Goal starts a match with
     const pins = route && route.checks.pins[g.name] ? route.checks.pins[g.name] : 0;
     let badge = '';
     if (pins > 0) {
@@ -1880,8 +1968,8 @@ function renderFieldObjects(model, route, ctx) {
       badge = '<g class="pinbadge" transform="translate(' + f3(R + 6) + ' -7.5)"><rect width="' + f3(bw) + '" height="15" rx="3.5"/><g transform="translate(8 8)">' + sym('grab_pin', 3.4, 'sym') + '</g><text x="' + f3(bw - 5) + '" y="11.3" text-anchor="end">' + esc(tx) + '</text></g>';
     }
     const label = !gg.label.seen ? '' : '<text class="lbl strong halo" x="' + f3(gg.label.dx) + '" y="' + f3(gg.label.dy) + '" text-anchor="' + gg.label.anchor + '">' + esc(shortName(g.name || 'Goal')) + '</text>';
-    const kindName = kind === 'alliance' ? 'our alliance Goal' : kind === 'opponent' ? 'opponent alliance Goal' : kind === 'center' ? 'tall neutral Goal' : 'neutral Goal';
-    p.push(at(g.x, g.y, k, body + label + badge + '<title>' + esc((g.name || 'Goal') + ', ' + kindName + ', at ' + fmt(g.x) + ', ' + fmt(g.y) + (pins ? ', ' + pins + ' Pin' + (pins === 1 ? '' : 's') + ' from this route' : '')) + '</title>'));
+    const kindName = kind === 'alliance' ? (F.id === 'skills' ? (/^BLUE/.test(g.name || '') ? 'blue alliance Goal' : 'red alliance Goal') : 'our alliance Goal') : kind === 'opponent' ? 'opponent alliance Goal' : kind === 'center' ? 'tall neutral Goal' : 'neutral Goal';
+    p.push(at(g.x, g.y, k, body + label + badge + '<title>' + esc((g.name || 'Goal') + ', ' + kindName + ', at ' + fmt(g.x) + ', ' + fmt(g.y) + (g.holds === 'pin' ? ', starts with a standing Pin' : '') + (pins ? ', ' + pins + ' Pin' + (pins === 1 ? '' : 's') + ' from this route' : '')) + '</title>'));
   });
   return p.join('');
 }
@@ -2035,10 +2123,19 @@ function renderPushLayer(sel, ctx) {
   return p.join('');
 }
 
+// The Autonomous Line captions: our side is below the line, the other alliance's side above. A caption is left out
+// when no stretch of the line in view is clear. Drawn after the field objects so their haloed text sits on top of the
+// cluster Pins on the line instead of under them.
+function renderCaptions(model, ctx) {
+  const k = ctx.k;
+  return fieldLabels(model.field, ctx).caps.map((c) => at(c.t, c.t, k, '<g transform="rotate(-45)"><text class="lbl halo' + (c.muted ? ' muted' : '') + '" y="' + c.off + '" text-anchor="middle">' + c.text + '</text></g>')).join('');
+}
+
 function renderStatic(model, state, sel, ctx) {
   const p = [renderBase(model, sel, ctx)];
   if (ctx.frame === 'field') {
     p.push(renderFieldObjects(model, sel.route, ctx));
+    p.push(renderCaptions(model, ctx));
     if (model.illustrative) p.push(at(0, 0, ctx.k, '<g transform="rotate(-30)"><text class="wm" y="14">ILLUSTRATIVE SAMPLE</text></g>'));
     if (state.layers.raw) p.push(renderRaw(model, sel, ctx));
     p.push(renderRoute(model, state, sel, ctx));
@@ -2271,9 +2368,9 @@ function sanitizeDraft(raw) {
     side: lines.length ? (d.side === 'R' && d.field !== 'pinnacle' ? 'R' : 'L') : null,
   }, d.field === 'pinnacle' ? { field: 'pinnacle' } : {});
 }
-// What the map draws while drawing: the whole field with only the prediction under the lines, so no route, recording or step mark is mistaken for one.
+// What the map draws while drawing (a plan always stores Override or Pinnacle; drawing from the Skills pick keeps showing the Skills field and its prediction): the whole field with only the prediction under the lines, so no route, recording or step mark is mistaken for one.
 function drawState(state) {
-  return Object.assign({}, state, { fieldId: state.draw && state.draw.field === 'pinnacle' ? 'pinnacle' : 'override', route: null, session: null, step: null, hover: null, view: 'field', layers: Object.assign({}, state.layers, { pred: true }) });
+  return Object.assign({}, state, { fieldId: state.draw && state.draw.field === 'pinnacle' ? 'pinnacle' : state.pick === 'skills' ? 'skills' : 'override', route: null, session: null, step: null, hover: null, view: 'field', layers: Object.assign({}, state.layers, { pred: true }) });
 }
 // Each line: its path, a dot where it starts, an arrow where it ends, and its order number. Sized in px through ctx.k like every other mark.
 function planTag(n) {
@@ -2576,6 +2673,8 @@ function renderLegend(state, sel) {
     it(sym('grab_stack', 5.2, 'sym raw'), 'Hollow: a mark made by hand, raw position') +
     it('<rect x="-6" y="-2" width="12" height="4" fill="var(--toggle)"/>', 'Toggle bar on the wall') +
     it('<circle r="4" fill="none" stroke="var(--obj)" stroke-width="1.5"/><circle r="1.8" fill="var(--obj)"/>', 'Cup stack, Cup, Pin on the field') +
+    it('<g transform="rotate(-20)"><rect x="-9" y="-2.6" width="18" height="5.2" rx="2.6" fill="var(--obj)" fill-opacity="0.3" stroke="var(--obj)" stroke-width="1.2"/><rect x="3.8" y="-2.1" width="4.9" height="4.2" rx="2" fill="var(--tip-red)"/></g>', 'Lying Pin, colored tip') +
+    it('<circle r="5.5" fill="var(--solid)" stroke="var(--goal-neu)" stroke-width="2.5"/><circle r="2.3" fill="var(--obj)" stroke="var(--obj)"/>', 'Neutral Goal with its starting Pin (match)') +
     it('<line x1="-11" y1="0" x2="11" y2="0" stroke="var(--route)" stroke-width="2.5" stroke-dasharray="5 3.5"/>', 'Dashed leg: driven in reverse') +
     it('<path d="M-9 8L9 -8" stroke="var(--text-2)" stroke-width="1.5" stroke-dasharray="5 3.5"/>', 'Autonomous Line, y = x') +
     '</ul><p class="hint">Heading 0 is up, clockwise is positive. A number on a Goal is how many Pins the route puts on it. Step numbers match the laptop tool. The Goal radius (2.4 in) and the robot box are not measured here.</p>' +
@@ -2780,8 +2879,8 @@ function renderAll(model, state, W) {
   };
 }
 
-const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normalize, resolveWaypoints, missRows, runSummary, pushDistances, footprintCorners, hull, areaOf, interpPose, circleHitsHull, sweepPoints, contacts, rawSessionFor, layoutTags, fitWindow, openingPoint, displayRoute, startPoseOf, frameCtx, resolveSel, renderAll, renderPlay, fmt, esc, activeEvent, shortName, parseWire, leftFrame, rejectionText, buildModel, sameSession, lastRun, pickSelection, slotFromBuild, runMatchesRoute, whenFine, openingLabel, hostAllowed, thinPath, drawnPath, DEFAULT_FIELD, PINNACLE_FIELD, normField, fieldModel, mirroredSession, mirroredRoute, normSim, buildNum, routeEntries, pickView, simFor, belongs, fieldLabels, renderEmpty,
-  samplesUpTo, TRAVEL_DEG, TRAVEL_RATE, isHand, travelOf, inchesAt, fmtIn, readoutText, playRate, PLAN_LIMITS, fieldFromScreen, simplifyLine, strokeToLine, addPlanLine, buildPlan, validatePlan, sanitizeDraft, planLength, lineLength, renderPlan, drawState, renderLayers, endHeading,
+const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normalize, resolveWaypoints, missRows, runSummary, pushDistances, footprintCorners, hull, areaOf, interpPose, circleHitsHull, sweepPoints, contacts, rawSessionFor, layoutTags, fitWindow, openingPoint, displayRoute, startPoseOf, frameCtx, resolveSel, renderAll, renderPlay, fmt, esc, activeEvent, shortName, parseWire, leftFrame, rejectionText, buildModel, sameSession, lastRun, pickSelection, slotFromBuild, runMatchesRoute, whenFine, openingLabel, hostAllowed, thinPath, drawnPath, DEFAULT_FIELD, SKILLS_FIELD, PINNACLE_FIELD, drawState, normField, fieldModel, mirroredSession, mirroredRoute, normSim, buildNum, routeEntries, pickView, simFor, belongs, fieldLabels, renderEmpty,
+  samplesUpTo, TRAVEL_DEG, TRAVEL_RATE, isHand, travelOf, inchesAt, fmtIn, readoutText, playRate, PLAN_LIMITS, fieldFromScreen, simplifyLine, strokeToLine, addPlanLine, buildPlan, validatePlan, sanitizeDraft, planLength, lineLength, renderPlan, renderLayers, endHeading,
   PLAN_ACTIONS, snapToLines, sortActions, actionPlace, nearestGoal, actionMarkers, renderActions, renderPicker, placePicker, renderActionRows };
 /*</pure>*/
 
@@ -3063,7 +3162,7 @@ const AP = { LIMITS, wrap180, headingMiss, missIn, rate, rateIn, rateDeg, normal
     if (plan.on || !canDraw()) return;
     stop();
     plan.on = true; plan.msg = null;
-    if (!plan.lines.length) plan.field = last.sel.fieldId; // start on the field being looked at
+    if (!plan.lines.length) plan.field = last.sel.fieldId === 'pinnacle' ? 'pinnacle' : 'override'; // start on the field being looked at (a Skills view draws on Override)
     keepPlanSide();
     state.hover = null;
     refresh();

@@ -1597,7 +1597,13 @@ function buildModel(input) {
   // Map data from an older tool has an untyped object list (small X's); the page's own copy has every Cup and Pin.
   const sent = i.mapData && i.mapData.field && typeof i.mapData.field === 'object' ? i.mapData.field : null;
   if (!sent) m.field = normField(DEFAULT_FIELD);
-  else if (!arr(sent.objects).some((o) => o && o.kind)) m.field.objects = normField(DEFAULT_FIELD).objects; // only the object list is stale: keep the sent Goals and robot size
+  else if (!arr(sent.objects).some((o) => o && o.kind)) { // only the object list is stale: keep the sent Goals and robot size
+    const own = normField(DEFAULT_FIELD);
+    m.field.objects = own.objects;
+    // Older data also never said which Goals start a match holding a Pin: take that from the page's copy, by Goal name.
+    const held = own.goals.filter((g) => g.holds === 'pin').map((g) => g.name);
+    m.field.goals.forEach((g) => { if (held.indexOf(g.name) >= 0) g.holds = 'pin'; });
+  }
   m.fields = { override: m.field, pinnacle: normField(PINNACLE_FIELD), skills: normField(SKILLS_FIELD) };
   const notes = [i.note, m.note].filter(Boolean).map(String); // the host's line and the data's own line, once each
   m.note = notes.filter((x, j) => notes.indexOf(x) === j).join(' ');

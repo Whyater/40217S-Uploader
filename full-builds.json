@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "builds": [
+    { "tag": "build-313-3c15a66", "note": "RECF: right Goal + roller, preload aimed 0.6 in left" },
+    { "tag": "build-294-3321f7c", "note": "Optical sensor LEDs on in every program" },
+    { "tag": "build-283-5c76fff", "note": "AWP: 2nd cup and pin lowered onto the 1st" }
+  ]
+}

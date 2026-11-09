@@ -4,9 +4,11 @@
 #   * The programmer pushes code to GitHub. A GitHub Action builds it and posts a
 #     "release" with three core files: hot.package.bin, cold.package.bin,
 #     project.pros. Newer releases may also carry the three Scourge Tester files.
-#   * This app keeps the three newest builds, each in <InstallDir>\builds\<tag>: the
-#     core files, and the tester files in its tester folder when they are present.
-#     A drop-down picks which build the rest of the app uses.
+#   * This app keeps a few builds, each in <InstallDir>\builds\<tag>: the newest one, the
+#     last three "full builds" (the final build of a work session, listed in full-builds.json),
+#     and any build someone chose to keep. Each folder has the core files, and the tester
+#     files in its tester folder when they are present. A drop-down picks which build the
+#     rest of the app uses.
 #   * When you click "Upload to robot", the app runs the official PROS tool
 #     (pros.exe upload ...) in the picked build's folder. PROS sends the files over USB.
 #
@@ -89,14 +91,19 @@ $script:Modes = @(
     @{ Label = 'Drive Test';   Asset = 'drive-test-hot.package.bin'; Slot = 3; Name = 'Scourge Drive Test' },
     @{ Label = 'Auto Pathing'; Asset = 'autopath-hot.package.bin';   Slot = 4; Name = 'Scourge Auto Pathing' }
 )
-$script:UploaderVersion = '2.7.0'
+$script:UploaderVersion = '2.8.0'
 $script:UploaderScriptPath = $PSCommandPath
 $script:UploaderManifestUrl = 'https://raw.githubusercontent.com/Whyater/40217S-Uploader/main/uploader.json'
-# The three newest published builds are kept on this computer, each in builds\<tag>.
-# selected.json says which one the window shows and uploads. Set-SelectedBuild points
-# the three paths below at the picked build; until one is picked they name the old
-# single-build place, where an install that could not be moved forward still has its build.
-$script:BuildsToKeep = 3
+# Builds stay on this computer, each in builds\<tag>: the newest, the last three full builds, and
+# the ones someone kept (kept.json). selected.json says which one the window shows and uploads.
+# Set-SelectedBuild points the three paths below at the picked build; until one is picked they
+# name the old single-build place, where an install that could not be moved forward still has its build.
+# CI publishes a build for every push, so one work session can make several. The last one of a
+# session is a "full build"; full-builds.json on the Uploader repo lists them, each with a note.
+$script:FullBuildsUrl = 'https://raw.githubusercontent.com/Whyater/40217S-Uploader/main/full-builds.json'
+$script:FullBuildsToShow = 3
+# Every published build, for the Older build list. The releases feed is the fallback; it lists only the newest few.
+$script:ReleasesApiUrl = 'https://api.github.com/repos/Whyater/40217S-Uploader/releases?per_page=100'
 $script:SelectedFile = Join-Path $InstallDir 'selected.json'
 $script:SelectedTag = ''
 $script:ProjectDir = Join-Path $InstallDir 'project'
@@ -785,9 +792,22 @@ $SharedCode = {
         return @($tags.ToArray())
     }
 
+    # The <updated> time of each build entry in a releases.atom feed, as tag -> text.
+    function Read-ReleasesAtomDates {
+        param([string]$Text)
+        $dates = @{}
+        foreach ($e in [regex]::Matches($Text, '<entry>(.*?)</entry>', [System.Text.RegularExpressions.RegexOptions]::Singleline)) {
+            $body = $e.Groups[1].Value
+            $t = @(Read-ReleasesAtom $body)
+            $u = [regex]::Match($body, '<updated>([^<]+)</updated>')
+            if (($t.Count -gt 0) -and $u.Success -and (-not $dates.ContainsKey($t[0]))) { $dates[$t[0]] = $u.Groups[1].Value.Trim() }
+        }
+        return $dates
+    }
+
     # Asks the public releases feed which builds exist. GitHub does not promise this feed's
     # shape, so any trouble just means "earlier builds unavailable" and the caller carries on.
-    # Returns @{ Status = 'ok' | 'error'; Tags; Error }.
+    # Returns @{ Status = 'ok' | 'error'; Tags; Dates (tag -> time, when the feed has one); Error }.
     function Get-PublishedBuildTags {
         param([string]$ReleasesUrl)
         $tmp = [System.IO.Path]::GetTempFileName()
@@ -796,12 +816,176 @@ $SharedCode = {
                 Invoke-WebRequest -Uri ($ReleasesUrl + '.atom?t=' + [DateTime]::UtcNow.Ticks) -OutFile $tmp -UseBasicParsing -TimeoutSec 20
                 $text = [System.IO.File]::ReadAllText($tmp, [System.Text.Encoding]::UTF8)
             } catch {
-                return @{ Status = 'error'; Tags = @(); Error = $_.Exception.Message }
+                return @{ Status = 'error'; Tags = @(); Dates = @{}; Error = $_.Exception.Message }
             }
-            return @{ Status = 'ok'; Tags = @(Read-ReleasesAtom $text); Error = '' }
+            return @{ Status = 'ok'; Tags = @(Read-ReleasesAtom $text); Dates = (Read-ReleasesAtomDates $text); Error = '' }
         } finally {
             Remove-Item -Path $tmp -Force -ErrorAction SilentlyContinue
         }
+    }
+
+    # Every build-N release, newest first, as @{ Tag; BuiltAt }, for the Older build list. The GitHub
+    # API lists up to 100 (60 requests an hour without a login, shared by everyone on a school network);
+    # if it fails or is rate limited, the releases feed lists the newest few instead.
+    # Returns @{ Status = 'ok' | 'error'; Source = 'api' | 'atom'; Builds; ApiError; Error }.
+    function Get-ReleaseBuildList {
+        param([string]$ApiUrl, [string]$ReleasesUrl)
+        $apiError = ''
+        $tmp = [System.IO.Path]::GetTempFileName()
+        try {
+            Invoke-WebRequest -Uri $ApiUrl -OutFile $tmp -UseBasicParsing -TimeoutSec 20
+            $parsed = [System.IO.File]::ReadAllText($tmp, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+            $list = New-Object System.Collections.ArrayList
+            $seen = @{}
+            foreach ($r in @($parsed)) {
+                if (($null -eq $r) -or ($null -eq $r.PSObject.Properties['tag_name'])) { throw 'The answer is not a list of releases.' }
+                $t = [string]$r.tag_name
+                if (((Get-BuildNumber $t) -lt 0) -or $seen.ContainsKey($t) -or ($r.draft -eq $true)) { continue }
+                $seen[$t] = $true
+                $when = $r.published_at
+                if ($when -is [datetime]) { $when = $when.ToUniversalTime().ToString('o') }
+                [void]$list.Add(@{ Tag = $t; BuiltAt = [string]$when })
+            }
+            if ($list.Count -eq 0) { throw 'The answer lists no builds.' }
+            return @{ Status = 'ok'; Source = 'api'; Builds = @(Sort-Builds $list.ToArray()); ApiError = ''; Error = '' }
+        } catch {
+            $apiError = $_.Exception.Message
+        } finally {
+            Remove-Item -Path $tmp -Force -ErrorAction SilentlyContinue
+        }
+        $feed = Get-PublishedBuildTags -ReleasesUrl $ReleasesUrl
+        if (($feed.Status -ne 'ok') -or (@($feed.Tags).Count -eq 0)) {
+            $why = if ($feed.Error) { [string]$feed.Error } else { 'The releases feed lists no builds.' }
+            return @{ Status = 'error'; Source = ''; Builds = @(); ApiError = $apiError; Error = $why }
+        }
+        $builds = @($feed.Tags | ForEach-Object { @{ Tag = [string]$_; BuiltAt = [string]$feed.Dates[[string]$_] } })
+        return @{ Status = 'ok'; Source = 'atom'; Builds = @(Sort-Builds $builds); ApiError = $apiError; Error = '' }
+    }
+
+    # A full-builds.json tag: build-<number>-<7 lowercase hex>.
+    function Test-FullBuildTag {
+        param([string]$Tag)
+        return ($Tag -cmatch '^build-\d+-[0-9a-f]{7}$')
+    }
+
+    # Reads full-builds.json: {"version":1,"builds":[{"tag":"build-313-3c15a66","note":"..."}, ...]}.
+    # The order in the file does not matter. Tags that are not build-N-sha7 are left out, a tag listed
+    # twice counts once, and the list comes back newest first.
+    # Returns @{ Ok (false when the text is not that shape); Builds = @(@{ Tag; Note; BuiltAt }) }.
+    function Read-FullBuilds {
+        param([string]$Text)
+        try { $d = $Text | ConvertFrom-Json } catch { return @{ Ok = $false; Builds = @() } }
+        if (($null -eq $d) -or ($d -is [array]) -or ($d -isnot [System.Management.Automation.PSCustomObject]) -or ($null -eq $d.PSObject.Properties['builds'])) { return @{ Ok = $false; Builds = @() } }
+        $seen = @{}
+        $list = New-Object System.Collections.ArrayList
+        foreach ($b in @($d.builds)) {
+            if ($b -isnot [System.Management.Automation.PSCustomObject]) { continue }
+            $tag = [string]$b.tag
+            if ((-not (Test-FullBuildTag $tag)) -or $seen.ContainsKey($tag)) { continue }
+            $seen[$tag] = $true
+            # The note is shown on one line, so line breaks and other control characters become spaces.
+            $note = (([string]$b.note) -replace '[\x00-\x1f\x7f]', ' ').Trim()
+            [void]$list.Add(@{ Tag = $tag; Note = $note; BuiltAt = '' })
+        }
+        return @{ Ok = $true; Builds = @(Sort-Builds $list.ToArray()) }
+    }
+
+    # The last good copy of full-builds.json, saved next to selected.json.
+    function Read-FullBuildsCache {
+        param([string]$Path)
+        try {
+            if ($Path -and (Test-Path -LiteralPath $Path)) { return (Read-FullBuilds ([System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8))) }
+        } catch { }
+        return @{ Ok = $false; Builds = @() }
+    }
+
+    # The full-builds list: the published copy when it can be read (and then saved to $CachePath),
+    # else the last good copy, else an empty list. Never throws: Get latest code must not fail over it.
+    # Returns @{ Status = 'ok' | 'cache' | 'none'; Builds; Error }.
+    function Get-FullBuilds {
+        param([string]$Url, [string]$CachePath)
+        $err = ''
+        $tmp = $null
+        try {
+            $tmp = [System.IO.Path]::GetTempFileName()
+            # raw.githubusercontent.com caches for a few minutes; a unique query string asks for the current copy.
+            Invoke-WebRequest -Uri ($Url + '?t=' + [DateTime]::UtcNow.Ticks) -OutFile $tmp -UseBasicParsing -TimeoutSec 20
+            $text = [System.IO.File]::ReadAllText($tmp, [System.Text.Encoding]::UTF8)
+            $r = Read-FullBuilds $text
+            if ($r.Ok) {
+                if ($CachePath) {
+                    try {
+                        # Its own temp name: the startup check and Get latest code can both save at once.
+                        $part = $CachePath + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
+                        [System.IO.File]::WriteAllText($part, $text, (New-Object System.Text.UTF8Encoding($false)))
+                        Move-Item -LiteralPath $part -Destination $CachePath -Force
+                    } catch { Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue }
+                }
+                return @{ Status = 'ok'; Builds = $r.Builds; Error = '' }
+            }
+            $err = 'The published full-builds.json is damaged.'
+        } catch {
+            $err = $_.Exception.Message
+        } finally {
+            if ($tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+        }
+        $c = Read-FullBuildsCache $CachePath
+        if ($c.Ok) { return @{ Status = 'cache'; Builds = $c.Builds; Error = $err } }
+        return @{ Status = 'none'; Builds = @(); Error = $err }
+    }
+
+    # The full builds the drop-down shows and this computer keeps: the $Count highest-numbered,
+    # less the one already shown as the newest build.
+    function Select-ShownFullBuilds {
+        param($FullBuilds, [string]$Newest = '', [int]$Count = 3)
+        return @(@(Sort-Builds @($FullBuilds)) | Select-Object -First $Count | Where-Object { [string]$_.Tag -cne $Newest })
+    }
+
+    # A name for a kept build: 1 to 40 characters after trimming, on one line. Returns the problem, or ''.
+    function Get-KeptNameError {
+        param([string]$Name)
+        $n = ([string]$Name).Trim()
+        if (-not $n) { return 'Enter a name.' }
+        if ($n.Length -gt 40) { return 'Use 40 characters or fewer.' }
+        if ($n -match '[\x00-\x1f\x7f]') { return 'Use one line of text.' }
+        return ''
+    }
+
+    # kept.json, this computer's own list of builds someone chose to keep:
+    # {"version":1,"kept":{"<tag>":{"name":"<name>"}}}. A missing file is an empty list. A file that cannot
+    # be read is Damaged: the list is empty, and the file stays as it is until someone keeps or renames a
+    # build (Write-KeptBuilds then saves it as kept.json.bak). Returns @{ Kept (tag -> name); Damaged; Error }.
+    function Read-KeptBuilds {
+        param([string]$Path)
+        $kept = @{}
+        if (-not (Test-Path -LiteralPath $Path)) { return @{ Kept = $kept; Damaged = $false; Error = '' } }
+        try {
+            $d = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+            if (($null -eq $d) -or ($d -is [array]) -or ($d -isnot [System.Management.Automation.PSCustomObject]) -or ($d.kept -isnot [System.Management.Automation.PSCustomObject])) { throw 'It has no kept list.' }
+            foreach ($p in $d.kept.PSObject.Properties) {
+                $tag = [string]$p.Name
+                $name = ''
+                if ($p.Value -is [System.Management.Automation.PSCustomObject]) { $name = ([string]$p.Value.name).Trim() }
+                # The tag becomes a folder name, so only the same safe characters as everywhere else.
+                if (($tag -match '^[A-Za-z0-9._-]+$') -and ($tag -notmatch '^\.+$') -and (-not (Get-KeptNameError $name))) { $kept[$tag] = $name }
+            }
+        } catch {
+            return @{ Kept = @{}; Damaged = $true; Error = $_.Exception.Message }
+        }
+        return @{ Kept = $kept; Damaged = $false; Error = '' }
+    }
+
+    # Written whole and then moved into place, so a crash never leaves half a file. A damaged
+    # kept.json is copied to kept.json.bak before it is replaced, so nothing in it is lost.
+    function Write-KeptBuilds {
+        param([string]$Path, [hashtable]$Kept)
+        if ((Test-Path -LiteralPath $Path) -and (Read-KeptBuilds $Path).Damaged) { Copy-Item -LiteralPath $Path -Destination ($Path + '.bak') -Force }
+        $map = [ordered]@{}
+        foreach ($t in @(@($Kept.Keys) | Sort-Object)) { $map[[string]$t] = [ordered]@{ name = ([string]$Kept[$t]).Trim() } }
+        $json = [ordered]@{ version = 1; kept = $map } | ConvertTo-Json -Depth 4
+        $tmp = $Path + '.tmp'
+        [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $tmp -Destination $Path -Force
     }
 
     # The tag becomes a folder name, so only the same safe characters the release check allows.
@@ -842,17 +1026,17 @@ $SharedCode = {
         return @(Sort-Builds $list.ToArray())
     }
 
-    # Which builds stay. The $Keep newest stay, and so does every tag in $Protect (the
-    # one picked, the one just released) even when it is older. While something is
-    # using the builds ($Busy) nothing goes. Returns @{ Keep; Evict } as tag lists.
+    # Which builds stay: exactly the tags in $Protect (the newest, the full builds shown, the kept
+    # ones, the one picked, any being used). While something is using the builds ($Busy) nothing
+    # goes. Returns @{ Keep; Evict } as tag lists, newest first.
     function Select-BuildsToKeep {
-        param($Builds, [string[]]$Protect = @(), [int]$Keep = 3, [bool]$Busy = $false)
+        param($Builds, [string[]]$Protect = @(), [bool]$Busy = $false)
         $sorted = @(Sort-Builds $Builds)
         $keepTags = New-Object System.Collections.Generic.List[string]
         $evict = New-Object System.Collections.Generic.List[string]
-        for ($i = 0; $i -lt $sorted.Count; $i++) {
-            $t = [string]$sorted[$i].Tag
-            if ($Busy -or ($i -lt $Keep) -or ($Protect -contains $t)) { $keepTags.Add($t) } else { $evict.Add($t) }
+        foreach ($b in $sorted) {
+            $t = [string]$b.Tag
+            if ($Busy -or (@($Protect) -ccontains $t)) { $keepTags.Add($t) } else { $evict.Add($t) }
         }
         return @{ Keep = @($keepTags.ToArray()); Evict = @($evict.ToArray()) }
     }
@@ -860,8 +1044,8 @@ $SharedCode = {
     # Deletes the builds Select-BuildsToKeep drops. Best effort: a folder Explorer or a
     # virus scanner has open can be left half deleted; Initialize-Builds clears such pieces at the next start. Returns the tags that went.
     function Remove-OldBuilds {
-        param([string]$InstallDir, [string[]]$Protect = @(), [int]$Keep = 3, [bool]$Busy = $false, $Sync = $null)
-        $keepPlan = Select-BuildsToKeep -Builds (Get-StoredBuilds $InstallDir) -Protect $Protect -Keep $Keep -Busy $Busy
+        param([string]$InstallDir, [string[]]$Protect = @(), [bool]$Busy = $false, $Sync = $null)
+        $keepPlan = Select-BuildsToKeep -Builds (Get-StoredBuilds $InstallDir) -Protect $Protect -Busy $Busy
         $gone = New-Object System.Collections.Generic.List[string]
         foreach ($t in $keepPlan.Evict) {
             try {
@@ -918,10 +1102,18 @@ $SharedCode = {
     }
 
     # The line shown after Get latest code. When a build picked on purpose is not the newest one
-    # stored, it says so, because Upload still sends the picked one.
+    # stored, it says so, because Upload still sends the picked one. $KeptNames holds kept builds' names
+    # (tag -> name); a kept build reads as "Practice auton (Build 308)".
     function Get-DownloadStatusText {
-        param([string]$Status, [string[]]$Downloaded, [string[]]$After, [string]$Selected)
-        $label = { param([string]$t) if ($t -match '^build-(\d+)-') { 'build ' + $Matches[1] } else { $t } }
+        param([string]$Status, [string[]]$Downloaded, [string[]]$After, [string]$Selected, [hashtable]$KeptNames = @{})
+        $label = {
+            param([string]$t)
+            $plain = $t
+            if ($t -match '^build-(\d+)-') { $plain = 'build ' + $Matches[1] }
+            if ($KeptNames.ContainsKey($t) -and $KeptNames[$t]) {
+                if ($t -match '^build-(\d+)-') { $KeptNames[$t] + ' (Build ' + $Matches[1] + ')' } else { $KeptNames[$t] + ' (' + $t + ')' }
+            } else { $plain }
+        }
         $newest = Get-NewestTag $After
         $text = ''
         if ($Status -eq 'downloaded') {
@@ -1168,34 +1360,33 @@ $SharedCode = {
         return @{ Status = 'downloaded'; Release = $rel; TesterAvailable = $testerReady }
     }
 
-    # Get latest code: download the newest release and the builds just before it, so the
-    # three newest published builds are on this computer, then drop the oldest ones.
+    # Get latest code: download the newest release and the last full builds, then drop builds
+    # nobody needs any more.
     #   * The newest build comes from release.json (as it always did).
-    #   * The earlier tags come from the public releases feed. If the feed cannot be
-    #     read, only the newest build is fetched and the builds already here stay.
+    #   * The full builds are the $FullCount highest-numbered tags in full-builds.json (Get-FullBuilds:
+    #     the published copy, else the last good copy, else none). Trouble with that list never fails
+    #     this; the newest build still comes down.
     #   * One build failing (a damaged file) fails only that build.
-    # $SelectedTag is the build in use. It is never deleted, however old.
+    #   * What stays: the newest, the full builds shown, every tag in $KeptTags, and $SelectedTag
+    #     (the build in use), however old. The rest goes, but only once the newest build is safely
+    #     stored, and only when a full-builds list was read: without one, a full build cannot be told
+    #     from the rest, so nothing is removed.
     # Returns @{ Status = 'downloaded' | 'current' | 'none' | 'offline' | 'error'; Release (the newest);
-    #            Downloaded (tags fetched this time); Failed (tag -> reason); Evicted (tags removed); Error }.
+    #            Downloaded (tags fetched this time); Failed (tag -> reason); Evicted (tags removed);
+    #            FullBuilds; FullStatus; Error }.
     function Save-LatestRelease {
-        param([string]$ReleasesUrl, [string]$InstallDir, [string[]]$AssetNames, [string]$SelectedTag = '', [int]$Keep = 3, $Sync = $null)
+        param([string]$ReleasesUrl, [string]$InstallDir, [string[]]$AssetNames, [string]$SelectedTag = '',
+            [string]$FullBuildsUrl = '', [string]$FullBuildsCache = '', [string[]]$KeptTags = @(), [int]$FullCount = 3, $Sync = $null)
         $info = Get-LatestRelease -ReleasesUrl $ReleasesUrl
         if ($info.Status -ne 'ok') { return $info }
         $latest = $info.Release
 
-        $candidates = New-Object System.Collections.ArrayList
-        [void]$candidates.Add(@{ Tag = $latest.Tag; BuiltAt = $latest.BuiltAt })
-        $feed = Get-PublishedBuildTags -ReleasesUrl $ReleasesUrl
-        if ($feed.Status -eq 'ok') {
-            foreach ($t in $feed.Tags) {
-                if (-not (@($candidates | ForEach-Object { $_.Tag }) -contains $t)) { [void]$candidates.Add(@{ Tag = $t; BuiltAt = '' }) }
-            }
-        } else {
-            Add-SharedLog $Sync ('Earlier builds unavailable: ' + $feed.Error)
-        }
-        $wanted = @(Sort-Builds $candidates.ToArray() | Select-Object -First $Keep | ForEach-Object { [string]$_.Tag })
-        # The newest release is always fetched, even if the feed lists a higher number than release.json does.
-        if ($wanted -notcontains $latest.Tag) { $wanted = @($wanted | Select-Object -First ($Keep - 1)) + $latest.Tag }
+        $full = @{ Status = 'none'; Builds = @(); Error = 'No full-builds address was given.' }
+        if ($FullBuildsUrl) { $full = Get-FullBuilds -Url $FullBuildsUrl -CachePath $FullBuildsCache }
+        if ($full.Status -eq 'cache') { Add-SharedLog $Sync ('Full builds: using the saved list, the published one could not be read (' + $full.Error + ')') }
+        elseif ($full.Status -eq 'none') { Add-SharedLog $Sync ('Full builds unavailable, so only the newest build was fetched: ' + $full.Error) }
+        $shownFull = @(Select-ShownFullBuilds -FullBuilds $full.Builds -Newest $latest.Tag -Count $FullCount | ForEach-Object { [string]$_.Tag })
+        $wanted = @($latest.Tag) + $shownFull
 
         $downloaded = New-Object System.Collections.Generic.List[string]
         $failed = @{}
@@ -1226,9 +1417,14 @@ $SharedCode = {
         # Only drop old builds once the newest one is safely stored.
         $evicted = @()
         if (($latestResult.Status -eq 'downloaded') -or ($latestResult.Status -eq 'current')) {
-            $evicted = @(Remove-OldBuilds -InstallDir $InstallDir -Protect @($SelectedTag, $latest.Tag) -Keep $Keep -Sync $Sync)
+            if ($full.Status -eq 'none') {
+                Add-SharedLog $Sync 'No old builds were removed, because the full-builds list could not be read.'
+            } else {
+                $protect = @(@($latest.Tag, $SelectedTag) + $shownFull + @($KeptTags) | Where-Object { $_ })
+                $evicted = @(Remove-OldBuilds -InstallDir $InstallDir -Protect $protect -Sync $Sync)
+            }
         }
-        $out = @{ Release = $latest; Downloaded = @($downloaded.ToArray()); Failed = $failed; Evicted = $evicted; TesterAvailable = $latestResult.TesterAvailable }
+        $out = @{ Release = $latest; Downloaded = @($downloaded.ToArray()); Failed = $failed; Evicted = $evicted; TesterAvailable = $latestResult.TesterAvailable; FullBuilds = $full.Builds; FullStatus = $full.Status }
         if (($latestResult.Status -eq 'downloaded') -or ($latestResult.Status -eq 'current')) {
             if ($downloaded.Count -gt 0) { $out.Status = 'downloaded' } else { $out.Status = 'current' }
         } else {
@@ -1236,6 +1432,21 @@ $SharedCode = {
             $out.Error = $latestResult.Error
         }
         return $out
+    }
+
+    # Downloads one build by its tag (picked from the Older build list, or a listed build that is not
+    # here yet), checked against that build's own release.json like every other build. Removes nothing:
+    # an older build picked this way stays until the next Get latest code, unless it is kept.
+    # Returns Save-ReleaseBuild's result plus Tag.
+    function Save-OneBuild {
+        param([string]$ReleasesUrl, [string]$InstallDir, [string[]]$AssetNames, [string]$Tag, $Sync = $null)
+        $info = Get-LatestRelease -ReleasesUrl $ReleasesUrl -Tag $Tag
+        if ($info.Status -eq 'none') { return @{ Status = 'error'; Tag = $Tag; Error = ('Build ' + $Tag + ' has no release information, so it cannot be checked.') } }
+        if ($info.Status -ne 'ok') { $info.Tag = $Tag; return $info }
+        if ($info.Release.Tag -cne $Tag) { return @{ Status = 'error'; Tag = $Tag; Error = ('The release information for ' + $Tag + ' names a different build.') } }
+        $r = Save-ReleaseBuild -Release $info.Release -ReleasesUrl $ReleasesUrl -InstallDir $InstallDir -AssetNames $AssetNames -Sync $Sync
+        $r.Tag = $Tag
+        return $r
     }
 
     # ------------------------------------------------------------------
@@ -2494,7 +2705,14 @@ $SharedCode = {
 $UploadBody   = { Invoke-RobotUpload -ProsExe $A.ProsExe -ProjectDir $A.ProjectDir -Slot $A.Slot -Name $A.Name -TimeoutSec $A.Timeout -Sync $Sync }
 $RecordBody  = { Invoke-ProsRecording -ProsExe $A.ProsExe -WorkDir $A.WorkDir -FilePath $A.FilePath -Sync $Sync -Retry $A.Retry -ScriptPath $A.ScriptPath }
 $LsusbBody    = { Invoke-Pros -ProsExe $A.ProsExe -Arguments 'lsusb --target v5 --no-analytics --no-sentry' -WorkDir $A.WorkDir -TimeoutSec 20 -Sync $Sync -Quiet }
-$CheckBody    = { Get-LatestRelease -ReleasesUrl $A.ReleasesUrl }
+# The startup check also reads the full-builds list, so the drop-down can label the builds before any download.
+$CheckBody    = {
+    $r = Get-LatestRelease -ReleasesUrl $A.ReleasesUrl
+    $f = Get-FullBuilds -Url $A.FullBuildsUrl -CachePath $A.FullBuildsCache
+    $r.FullBuilds = $f.Builds
+    $r.FullStatus = $f.Status
+    $r
+}
 $SendBody = {
     $result = @{ Status = 'error'; Error = '' }
     try {
@@ -2542,7 +2760,9 @@ $UploaderCheckBody = {
     $m.ForClick = [bool]$A.ForClick
     $m
 }
-$DownloadBody = { Save-LatestRelease -ReleasesUrl $A.ReleasesUrl -InstallDir $A.InstallDir -AssetNames $A.AssetNames -SelectedTag $A.SelectedTag -Keep $A.Keep -Sync $Sync }
+$DownloadBody = { Save-LatestRelease -ReleasesUrl $A.ReleasesUrl -InstallDir $A.InstallDir -AssetNames $A.AssetNames -SelectedTag $A.SelectedTag -FullBuildsUrl $A.FullBuildsUrl -FullBuildsCache $A.FullBuildsCache -KeptTags $A.KeptTags -FullCount $A.FullCount -Sync $Sync }
+$OlderListBody = { Get-ReleaseBuildList -ApiUrl $A.ApiUrl -ReleasesUrl $A.ReleasesUrl }
+$OneBuildBody = { Save-OneBuild -ReleasesUrl $A.ReleasesUrl -InstallDir $A.InstallDir -AssetNames $A.AssetNames -Tag $A.Tag -Sync $Sync }
 $MapBody = { Read-ScourgeResults -Folder $A.Folder -Skip $A.Skip -Cache $A.Cache }
 $CloudBody = { $r = Get-CloudMap -MapUrl $A.MapUrl -Build $A.Build -Code $A.Code -CachePath $A.CachePath; $r.Build = [string]$A.Build; $r }
 $CloudCacheBody = {
@@ -2626,12 +2846,30 @@ function Set-SelectedBuild {
     }
 }
 
-# Runs once at start. Brings a single-build install forward to builds\, picks the saved
-# build (or the newest when the pointer is missing, damaged, or names a build that is
-# gone), and drops builds beyond the newest three. Not while something is using the builds.
+# kept.json and the saved full-builds list sit next to selected.json.
+function Get-KeptPath { return (Join-Path (Split-Path $script:SelectedFile -Parent) 'kept.json') }
+function Get-FullBuildsCachePath { return (Join-Path (Split-Path $script:SelectedFile -Parent) 'full-builds.json') }
+
+# Reads kept.json into $script:Kept (tag -> name). A damaged file reads as no kept builds and is left
+# alone; KeptNote says so in Details once the window is up.
+function Initialize-KeptBuilds {
+    $r = Read-KeptBuilds (Get-KeptPath)
+    $script:Kept = $r.Kept
+    $script:KeptDamaged = [bool]$r.Damaged
+    $script:KeptNote = ''
+    if ($r.Damaged) { $script:KeptNote = 'kept.json could not be read (' + $r.Error + '), so no builds show as kept. It is left as it is until you keep or rename a build; then it is saved as kept.json.bak.' }
+}
+
+# Runs once at start. Brings a single-build install forward to builds\, reads the kept builds and the
+# last saved full-builds list, and picks the saved build (or the newest when the pointer is missing,
+# damaged, or names a build that is gone). Nothing is deleted here: old builds go only after
+# Get latest code has stored a checked newest build.
 function Initialize-Builds {
-    param([bool]$Busy = $false)
     try { [void](Move-LegacyProject -InstallDir $InstallDir) } catch { }
+    Initialize-KeptBuilds
+    $cached = Read-FullBuildsCache (Get-FullBuildsCachePath)
+    $script:FullBuilds = @($cached.Builds)
+    $script:FullKnown = [bool]$cached.Ok
     $root = Join-Path $InstallDir 'builds'
     if (Test-Path $root) {
         # A download that was cut off leaves a .download folder; a swap cut off leaves .old, which is the
@@ -2651,25 +2889,103 @@ function Initialize-Builds {
     $stored = @(Get-StoredBuilds $InstallDir | ForEach-Object { [string]$_.Tag })
     $want = Resolve-SelectedTag -Wanted (Read-SelectedTag $script:SelectedFile) -Stored $stored
     Set-SelectedBuild $want -Save
-    try { [void](Remove-OldBuilds -InstallDir $InstallDir -Protect @($want) -Keep $script:BuildsToKeep -Busy $Busy) } catch { }
 }
 
-# One line in the build drop-down: "Build 313 (latest)  Nov 7, 11:36 AM". Only the newest published
-# build is called latest, and only once this run has asked GitHub which one that is.
-function Get-BuildChoiceText {
-    param($Build, [bool]$IsLatest)
-    $tag = [string]$Build.Tag
-    if ($tag -match '^build-(\d+)-') { $text = 'Build ' + $Matches[1] } else { $text = $tag }
-    if ($IsLatest) { $text += ' (latest)' }
-    $when = ''
-    if ([string]$Build.BuiltAt) {
-        try {
-            $styles = [System.Globalization.DateTimeStyles]'AssumeUniversal, AdjustToUniversal'
-            $when = [datetime]::Parse([string]$Build.BuiltAt, [System.Globalization.CultureInfo]::InvariantCulture, $styles).ToLocalTime().ToString('MMM d, h:mm tt', [System.Globalization.CultureInfo]::InvariantCulture)
-        } catch { $when = '' }
+# "Build 313", the short name of a build in the drop-down. Not a CI tag: the tag itself.
+function Get-BuildNumberText {
+    param([string]$Tag)
+    if ($Tag -match '^build-(\d+)-') { return 'Build ' + $Matches[1] }
+    return $Tag
+}
+
+# A build's name at the start of a sentence or as a title: "Build 313", or for a kept build its
+# name with the number after it, "Practice auton (Build 308)".
+function Get-BuildDisplayName {
+    param([string]$Tag)
+    $plain = Get-BuildNumberText $Tag
+    if ($Tag -and $script:Kept.ContainsKey($Tag)) {
+        if ($plain -ceq $Tag) { return ($script:Kept[$Tag] + ' (' + $Tag + ')') }
+        return ($script:Kept[$Tag] + ' (' + $plain + ')')
     }
-    if ($when) { $text += '   ' + $when }
-    return $text
+    return $plain
+}
+
+# "Nov 7, 11:36 AM" in this computer's time zone, or '' when there is no time.
+function Format-BuildShortDate {
+    param([string]$Text)
+    if (-not $Text) { return '' }
+    try {
+        $styles = [System.Globalization.DateTimeStyles]'AssumeUniversal, AdjustToUniversal'
+        return [datetime]::Parse($Text, [System.Globalization.CultureInfo]::InvariantCulture, $styles).ToLocalTime().ToString('MMM d, h:mm tt', [System.Globalization.CultureInfo]::InvariantCulture)
+    } catch { return '' }
+}
+
+# The rows of the build drop-down, in order. Each is @{ Kind = 'build' | 'older'; Group; Header; Tag;
+# Title; When; Label; Stored; Text }. Header is the group name painted above the first row of a group.
+#   NEWEST       the newest release (once this run has asked GitHub, else the newest build here),
+#                labelled "newest", plus "test build" when the full-builds list does not name it
+#   FULL BUILDS  the $FullCount highest-numbered full builds, less the newest; label = its note
+#   KEPT         builds kept on this computer and not listed above; label = the name given
+#   ON THIS COMPUTER  any other stored build (one picked from the older list, or left by 2.7)
+#   Older build...    opens the list of every published build
+# A kept build's name leads its label in whichever group it sits. A row whose build is not here yet
+# says "Not downloaded"; picking it downloads it. Plain data in, so -SelfTest checks it without a window.
+function Get-PickerEntries {
+    param([string]$Latest, $FullBuilds, [bool]$FullKnown, [hashtable]$Kept = @{}, $Stored, [int]$FullCount = 3)
+    $dot = ' ' + [char]0x00B7 + ' '
+    $storedBy = @{}
+    foreach ($b in @($Stored)) { if ($null -ne $b) { $storedBy[[string]$b.Tag] = $b } }
+    $notes = @{}
+    foreach ($f in @($FullBuilds)) { if ($null -ne $f) { $notes[[string]$f.Tag] = [string]$f.Note } }
+    $newest = Get-NewestTag @(@($Latest) + @($storedBy.Keys))
+    $rows = New-Object System.Collections.ArrayList
+    $shown = @{}
+    $add = {
+        param([string]$Group, [string]$Header, [string]$Tag, [string]$GroupLabel)
+        $parts = New-Object System.Collections.Generic.List[string]
+        if ($Kept.ContainsKey($Tag)) { $parts.Add([string]$Kept[$Tag]) }
+        if ($GroupLabel) { $parts.Add($GroupLabel) }
+        $label = ($parts.ToArray() -join $dot)
+        $isStored = $storedBy.ContainsKey($Tag)
+        $when = 'Not downloaded'
+        if ($isStored) { $when = Format-BuildShortDate ([string]$storedBy[$Tag].BuiltAt) }
+        $title = Get-BuildNumberText $Tag
+        $text = $title
+        if ($when) { $text += '   ' + $when }
+        if ($label) { $text += '   ' + $label }
+        $shown[$Tag] = $true
+        [void]$rows.Add(@{ Kind = 'build'; Group = $Group; Header = $Header; Tag = $Tag; Title = $title; When = $when; Label = $label; Stored = $isStored; Text = $text })
+    }
+    if ($newest) {
+        $l = 'newest'
+        if ($FullKnown -and (-not $notes.ContainsKey($newest))) { $l = 'newest, test build' }
+        & $add 'newest' 'NEWEST' $newest $l
+    }
+    $h = 'FULL BUILDS'
+    foreach ($f in @(Select-ShownFullBuilds -FullBuilds $FullBuilds -Newest $newest -Count $FullCount)) {
+        $t = [string]$f.Tag
+        if ($shown.ContainsKey($t)) { continue }
+        $note = [string]$f.Note
+        if (-not $note) { $note = 'full build' }
+        & $add 'full' $h $t $note
+        $h = ''
+    }
+    $h = 'KEPT'
+    foreach ($k in @(Sort-Builds @(@($Kept.Keys) | ForEach-Object { @{ Tag = [string]$_; BuiltAt = '' } }))) {
+        $t = [string]$k.Tag
+        if ($shown.ContainsKey($t)) { continue }
+        & $add 'kept' $h $t ''
+        $h = ''
+    }
+    $h = 'ON THIS COMPUTER'
+    foreach ($b in @(Sort-Builds @($storedBy.Values))) {
+        $t = [string]$b.Tag
+        if ($shown.ContainsKey($t)) { continue }
+        & $add 'other' $h $t ''
+        $h = ''
+    }
+    [void]$rows.Add(@{ Kind = 'older'; Group = 'older'; Header = ''; Tag = ''; Title = 'Older build...'; When = ''; Label = ''; Stored = $false; Text = 'Older build...' })
+    return @($rows.ToArray())
 }
 
 # The CI notes look like "Built from <sha>: <commit subject>".
@@ -2729,6 +3045,8 @@ function Initialize-Theme {
     $c.Bad         = [System.Drawing.Color]::FromArgb(180, 35, 24)
     $c.Idle        = [System.Drawing.Color]::FromArgb(154, 161, 172)
     $c.LogBack     = [System.Drawing.Color]::FromArgb(247, 248, 250)
+    # The row under the mouse in the build drop-down: a light wash of the accent.
+    $c.PickHot     = [System.Drawing.Color]::FromArgb(236, 241, 253)
     # Route Map proposed plans, the same colors as the web map: plan lines and their actions.
     $c.Plan        = [System.Drawing.Color]::FromArgb(194, 87, 12)
     $c.Act         = [System.Drawing.Color]::FromArgb(74, 63, 181)
@@ -2739,6 +3057,7 @@ function Initialize-Theme {
     $f.Sub     = New-Object System.Drawing.Font('Segoe UI', 9.5)
     $f.Section = New-Object System.Drawing.Font('Segoe UI Semibold', 8)
     $f.Strong  = New-Object System.Drawing.Font('Segoe UI Semibold', 10)
+    $f.BaseStrong = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
     $f.Small   = New-Object System.Drawing.Font('Segoe UI', 8.5)
     $f.Button  = New-Object System.Drawing.Font('Segoe UI Semibold', 11)
     $f.Status  = New-Object System.Drawing.Font('Segoe UI', 9.5)
@@ -2861,6 +3180,15 @@ $script:DetailsShown = $false
 $script:UploaderUpdateReady = $false
 $script:LatestUploaderVersion = ''
 $script:TesterBuildTag = ''
+# Builds: the full-builds list (FullKnown once one was read, now or from the saved copy), the kept
+# builds (tag -> name), and the rows the drop-down shows (Get-PickerEntries).
+$script:FullBuilds = @()
+$script:FullKnown = $false
+$script:Kept = @{}
+$script:KeptDamaged = $false
+$script:KeptNote = ''
+$script:PickerEntries = @()
+$script:KeepLinksShown = $false
 $script:Recording = $false
 $script:ResultsPath = ''
 # The file Send uses: the newest recording worth sending (see Get-RecordOutcome). Empty after a good send.
@@ -2977,18 +3305,38 @@ function New-MainForm {
     # Robot code section
     $ui.CodeLabel = New-Label 'ROBOT CODE' 0 0 10 10 $f.Section $c.Muted
     $ui.BuildTitle = New-Label 'No robot code downloaded yet' 0 0 10 10 $f.Strong $c.Text
-    # The build drop-down takes the title's place once there are two or more builds to choose from.
+    # The build drop-down takes the title's place once a build is on this computer. It is drawn by
+    # Show-BuildPickerItem: group names above the first row of each group, and each row's number,
+    # build time, and label in columns. Its closed box is as tall as the Mode box below.
     $ui.BuildBox = New-Object System.Windows.Forms.ComboBox
     $ui.BuildBox.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $ui.BuildBox.DrawMode = [System.Windows.Forms.DrawMode]::OwnerDrawVariable
+    $ui.BuildBox.IntegralHeight = $false
     $ui.BuildBox.Visible = $false
     $ui.BuildMeta = New-Label '' 0 0 10 10 $f.Small $c.Muted
     $ui.BuildMeta.AutoEllipsis = $false
+    # Keep, rename, or stop keeping the picked build. Only the ones that apply show.
+    $ui.KeepLink = New-Object System.Windows.Forms.LinkLabel
+    $ui.RenameLink = New-Object System.Windows.Forms.LinkLabel
+    $ui.UnkeepLink = New-Object System.Windows.Forms.LinkLabel
+    $ui.KeepLink.Text = 'Keep this build...'
+    $ui.RenameLink.Text = 'Rename...'
+    $ui.UnkeepLink.Text = 'Stop keeping'
+    foreach ($lnk in @($ui.KeepLink, $ui.RenameLink, $ui.UnkeepLink)) {
+        $lnk.AutoSize = $true
+        $lnk.Font = $f.Small
+        $lnk.LinkColor = $c.Accent
+        $lnk.ActiveLinkColor = $c.AccentDown
+        $lnk.DisabledLinkColor = $c.Idle
+        $lnk.LinkBehavior = [System.Windows.Forms.LinkBehavior]::HoverUnderline
+        $lnk.Visible = $false
+    }
     $ui.GetButton = New-FlatButton 'Get latest code' 0 0 10 10 $false
     $ui.Notice = New-Label '' 0 0 10 10 $f.Small $c.Accent
     $ui.Notice.AutoEllipsis = $false
     $ui.Notice.Visible = $false
     $ui.MidLine = New-Line 0 0 10
-    $form.Controls.AddRange(@($ui.CodeLabel, $ui.BuildTitle, $ui.BuildBox, $ui.BuildMeta, $ui.GetButton, $ui.Notice, $ui.MidLine))
+    $form.Controls.AddRange(@($ui.CodeLabel, $ui.BuildTitle, $ui.BuildBox, $ui.BuildMeta, $ui.KeepLink, $ui.RenameLink, $ui.UnkeepLink, $ui.GetButton, $ui.Notice, $ui.MidLine))
 
     # Upload section
     $ui.UploadLabel = New-Label 'UPLOAD' 0 0 10 10 $f.Section $c.Muted
@@ -3073,7 +3421,7 @@ function New-MainForm {
 
     # Everything above except the header belongs to the Upload view. The Route Map
     # view has its own controls and hides these.
-    $ui.UploadControls = @($ui.CodeLabel, $ui.BuildTitle, $ui.BuildBox, $ui.BuildMeta, $ui.GetButton, $ui.Notice, $ui.MidLine,
+    $ui.UploadControls = @($ui.CodeLabel, $ui.BuildTitle, $ui.BuildBox, $ui.BuildMeta, $ui.KeepLink, $ui.RenameLink, $ui.UnkeepLink, $ui.GetButton, $ui.Notice, $ui.MidLine,
         $ui.UploadLabel, $ui.ModeLabel, $ui.SlotLabel, $ui.NameLabel, $ui.ModeBox, $ui.SlotBox, $ui.NameBox, $ui.NameError, $ui.UploadButton,
         $ui.TestsLine, $ui.TestsLabel, $ui.TestsHelper, $ui.TesterButton, $ui.RecordButton, $ui.ResultsStatus, $ui.SendButton, $ui.OpenFolderLink,
         $ui.Dot, $ui.ConnLabel, $ui.Status, $ui.DetailsLink, $ui.Log)
@@ -3101,6 +3449,11 @@ function New-MainForm {
     $ui.NameBox.Add_TextChanged({ Invoke-Safe { Update-NameError } })
     $ui.ModeBox.Add_SelectedIndexChanged({ Invoke-Safe { Set-ModeDefaults } })
     $ui.BuildBox.Add_SelectedIndexChanged({ Invoke-Safe { Select-Build } })
+    $ui.BuildBox.Add_MeasureItem({ param($s, $e) try { Measure-BuildPickerItem $e } catch { } })
+    $ui.BuildBox.Add_DrawItem({ param($s, $e) try { Show-BuildPickerItem $s $e } catch { } })
+    $ui.KeepLink.Add_LinkClicked({ Invoke-Safe { Invoke-KeepBuild } })
+    $ui.RenameLink.Add_LinkClicked({ Invoke-Safe { Invoke-RenameBuild } })
+    $ui.UnkeepLink.Add_LinkClicked({ Invoke-Safe { Remove-KeptBuild $script:SelectedTag } })
     $ui.DetailsLink.Add_LinkClicked({ Invoke-Safe { Set-DetailsVisible (-not $script:DetailsShown) } })
     $ui.SegUpload.Add_Click({ Invoke-Safe { Set-View 'upload' } })
     $ui.SegMap.Add_Click({ Invoke-Safe { Set-View 'map' } })
@@ -3215,10 +3568,31 @@ function Update-Layout {
     $ui.BuildBox.Visible = $script:BuildPickerShown
     $ui.BuildTitle.Visible = -not $script:BuildPickerShown
     $ui.BuildTitle.SetBounds($M, $y, $textW, (Px 22))
+    # A drawn drop-down is ItemHeight plus a fixed border tall, and the Mode box's own height settles only once
+    # Windows has made it, so the closed box is matched to it here, at every layout.
+    $fit = $ui.BuildBox.ItemHeight + ($ui.ModeBox.Height - $ui.BuildBox.Height)
+    if (($fit -ne $ui.BuildBox.ItemHeight) -and ($fit -ge 10)) { $ui.BuildBox.ItemHeight = $fit }
     $ui.BuildBox.SetBounds($M, $y, $textW, $ui.BuildBox.Height)
+    # The open list runs the full width, under the button, so notes and names have room.
+    $ui.BuildBox.DropDownWidth = $inner
     if ($script:BuildPickerShown) { $y += [math]::Max((Px 24), ($ui.BuildBox.Height + (Px 1))) } else { $y += Px 24 }
     Set-WrappedLabel $ui.BuildMeta $M $y $textW
     $y += $ui.BuildMeta.Height
+    # Keep this build... for a build that is not kept; Rename... and Stop keeping for one that is.
+    $isKept = $script:KeepLinksShown -and $script:Kept.ContainsKey([string]$script:SelectedTag)
+    $ui.KeepLink.Visible = $script:KeepLinksShown -and (-not $isKept)
+    $ui.RenameLink.Visible = $isKept
+    $ui.UnkeepLink.Visible = $isKept
+    if ($script:KeepLinksShown) {
+        $y += Px 4
+        if ($isKept) {
+            $ui.RenameLink.Location = New-Object System.Drawing.Point($M, $y)
+            $ui.UnkeepLink.Location = New-Object System.Drawing.Point(($M + $ui.RenameLink.PreferredSize.Width + (Px 12)), $y)
+        } else {
+            $ui.KeepLink.Location = New-Object System.Drawing.Point($M, $y)
+        }
+        $y += $ui.KeepLink.PreferredSize.Height
+    }
     # Keep clear of the button even when the details text is short.
     $y = [math]::Max($y, $ui.GetButton.Bottom)
     $ui.Notice.Visible = $script:NoticeShown
@@ -3988,9 +4362,11 @@ function Format-CloudWhen {
     } catch { return $Iso }
 }
 
-# "build-70-abc1234" reads as "build 70".
+# "build-70-abc1234" reads as "build 70" in a sentence. A kept build reads as its name with the
+# number after it, "Practice auton (Build 70)".
 function Get-BuildTagLabel {
     param([string]$Tag)
+    if ($Tag -and $script:Kept.ContainsKey($Tag)) { return (Get-BuildDisplayName $Tag) }
     if ($Tag -match '^build-(\d+)-') { return 'build ' + $Matches[1] }
     return $Tag
 }
@@ -6018,7 +6394,7 @@ function Set-Busy {
     $script:BusyMessage = $Message
     $script:BusyStarted = Get-Date
     $script:LastElapsed = -1
-    foreach ($ctl in @($ui.GetButton, $ui.UploadButton, $ui.TesterButton, $ui.RecordButton, $ui.SendButton, $ui.BuildBox, $ui.ModeBox, $ui.SlotBox, $ui.NameBox)) { $ctl.Enabled = -not $On }
+    foreach ($ctl in @($ui.GetButton, $ui.UploadButton, $ui.TesterButton, $ui.RecordButton, $ui.SendButton, $ui.BuildBox, $ui.ModeBox, $ui.SlotBox, $ui.NameBox, $ui.KeepLink, $ui.RenameLink, $ui.UnkeepLink)) { $ctl.Enabled = -not $On }
     if ($script:Recording) { $ui.RecordButton.Enabled = $true }
     if (-not $On) {
         $ui.TesterButton.Enabled = Test-HaveTester
@@ -6064,7 +6440,7 @@ function Update-BuildInfo {
         $tag = [string]$b.tag
         $isCiBuildTag = $tag -match '^build-(\d+)-[0-9a-fA-F]+$'
         $title = ''
-        if ($isCiBuildTag) { $title = 'Build ' + $Matches[1] }
+        if ($isCiBuildTag) { $title = Get-BuildDisplayName $tag }
         if (-not $title) { $title = $parts.Subject }
         if (-not $title) { $title = [string]$b.name }
         if (-not $title) { $title = 'Build ' + $tag }
@@ -6102,41 +6478,451 @@ function Update-Notice {
     Update-Layout
 }
 
-# Fills the build drop-down from the builds on this computer, with the picked one showing.
-# It appears only when there is a real choice (two or more builds). The caller lays out.
+# Fills the build drop-down (Get-PickerEntries) with the picked build showing. It shows once a build
+# is picked, because even one build has things to do there: keep it, or open an older one.
+# The caller lays out.
 function Update-BuildPicker {
     $ui = $script:Ui
     $stored = @(Get-StoredBuilds $InstallDir)
     $script:StoredTags = @($stored | ForEach-Object { [string]$_.Tag })
+    $script:PickerEntries = @(Get-PickerEntries -Latest ([string]$script:LatestTag) -FullBuilds $script:FullBuilds -FullKnown $script:FullKnown -Kept $script:Kept -Stored $stored -FullCount $script:FullBuildsToShow)
+    $at = Get-PickerIndex $script:SelectedTag
+    # A picked build that is not on this computer (its folder was removed by hand) is not shown as in use.
+    if (($at -ge 0) -and (-not $script:PickerEntries[$at].Stored)) { $at = -1 }
     $script:BuildFilling = $true
     try {
         $ui.BuildBox.BeginUpdate()
         $ui.BuildBox.Items.Clear()
-        foreach ($b in $stored) { [void]$ui.BuildBox.Items.Add((Get-BuildChoiceText $b ([string]$b.Tag -ceq $script:LatestTag))) }
-        $at = [array]::IndexOf($script:StoredTags, $script:SelectedTag)
+        # The rows must be in PickerEntries before they are added: adding one asks for its height.
+        foreach ($en in $script:PickerEntries) { [void]$ui.BuildBox.Items.Add([string]$en.Text) }
+        $listH = 0
+        for ($i = 0; $i -lt $script:PickerEntries.Count; $i++) { $listH += Get-PickerRowHeight $i }
+        $ui.BuildBox.DropDownHeight = [math]::Max((Px 40), [math]::Min(($listH + 2), (Px 520)))
         if ($at -ge 0) { $ui.BuildBox.SelectedIndex = $at }
         $ui.BuildBox.EndUpdate()
     } finally { $script:BuildFilling = $false }
-    $script:BuildPickerShown = ($stored.Count -ge 2) -and ($at -ge 0)
+    $script:BuildPickerShown = ($at -ge 0)
+    $script:KeepLinksShown = ($at -ge 0)
 }
 
-# The drop-down changed: use that build for the title, the upload, the tester, and the Route Map.
+# The drop-down row of a build, or -1.
+function Get-PickerIndex {
+    param([string]$Tag)
+    if (-not $Tag) { return -1 }
+    for ($i = 0; $i -lt $script:PickerEntries.Count; $i++) {
+        $en = $script:PickerEntries[$i]
+        if (($en.Kind -eq 'build') -and ([string]$en.Tag -ceq $Tag)) { return $i }
+    }
+    return -1
+}
+
+# Shows the picked build again after a row that does not switch at once (Older build..., a build to download).
+function Reset-PickerSelection {
+    $script:BuildFilling = $true
+    try { $script:Ui.BuildBox.SelectedIndex = Get-PickerIndex $script:SelectedTag } finally { $script:BuildFilling = $false }
+}
+
+# Row heights in the open list: a group's first row also holds the group name, and Older build... sits
+# below a dividing line.
+function Get-PickerRowHeight {
+    param([int]$Index)
+    $en = $script:PickerEntries[$Index]
+    $h = Px 26
+    if ($en.Header) { if ($Index -gt 0) { $h += Px 30 } else { $h += Px 22 } }
+    elseif ($en.Kind -eq 'older') { $h += Px 9 }
+    return $h
+}
+
+function Measure-BuildPickerItem {
+    param($E)
+    if (($E.Index -lt 0) -or ($E.Index -ge $script:PickerEntries.Count)) { return }
+    $E.ItemHeight = Get-PickerRowHeight $E.Index
+}
+
+# Paints one row of the build drop-down, or its closed box. A row has columns: the build number, its
+# build time (or "Not downloaded"), then the label (newest, a full build's note, a kept name), cut with
+# "..." when it does not fit. The closed box is narrower and the build time is in the details under it,
+# so it shows the number and the label (or the time when there is no label). TextRenderer draws the
+# same way the window's labels do; it is given the row's background so its smoothing matches.
+function Show-BuildPickerItem {
+    param($Box, $E)
+    $c = $script:Colors
+    $f = $script:Fonts
+    $g = $E.Graphics
+    $i = $E.Index
+    $b = $E.Bounds
+    $back = New-Object System.Drawing.SolidBrush($c.Back)
+    try { $g.FillRectangle($back, $b) } finally { $back.Dispose() }
+    if (($i -lt 0) -or ($i -ge $script:PickerEntries.Count)) { return }
+    $en = $script:PickerEntries[$i]
+    $isEdit = (($E.State -band [System.Windows.Forms.DrawItemState]::ComboBoxEdit) -ne 0)
+    $flags = [System.Windows.Forms.TextFormatFlags]'Left, VerticalCenter, SingleLine, NoPrefix, EndEllipsis'
+    $row = $b
+    $pad = Px 10
+    $rowBack = $c.Back
+    if ($isEdit) {
+        $pad = Px 4
+    } else {
+        $sideIn = Px 10
+        if ($en.Header) {
+            $hh = $b.Height - (Px 26)
+            if ($i -gt 0) {
+                $pen = New-Object System.Drawing.Pen($c.Line)
+                try { $g.DrawLine($pen, ($b.Left + $sideIn), ($b.Top + (Px 6)), ($b.Right - $sideIn), ($b.Top + (Px 6))) } finally { $pen.Dispose() }
+            }
+            $hr = New-Object System.Drawing.Rectangle(($b.Left + $sideIn), ($b.Top + $hh - (Px 18)), ($b.Width - 2 * $sideIn), (Px 16))
+            [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$en.Header, $f.Section, $hr, $c.Muted, $c.Back, ([System.Windows.Forms.TextFormatFlags]'Left, Bottom, SingleLine, NoPrefix'))
+            $row = New-Object System.Drawing.Rectangle($b.Left, ($b.Top + $hh), $b.Width, ($b.Height - $hh))
+        } elseif ($en.Kind -eq 'older') {
+            $pen = New-Object System.Drawing.Pen($c.Line)
+            try { $g.DrawLine($pen, ($b.Left + $sideIn), ($b.Top + (Px 4)), ($b.Right - $sideIn), ($b.Top + (Px 4))) } finally { $pen.Dispose() }
+            $row = New-Object System.Drawing.Rectangle($b.Left, ($b.Top + (Px 9)), $b.Width, ($b.Height - (Px 9)))
+        }
+        if (($E.State -band [System.Windows.Forms.DrawItemState]::Selected) -ne 0) {
+            $rowBack = $c.PickHot
+            $hot = New-Object System.Drawing.SolidBrush($rowBack)
+            try { $g.FillRectangle($hot, $row) } finally { $hot.Dispose() }
+        }
+    }
+    $enabled = $Box.Enabled
+    $textColor = if ($enabled) { $c.Text } else { $c.Muted }
+    $mutedColor = if ($enabled) { $c.Muted } else { $c.Idle }
+    # Keyboard focus on the closed box shows as the usual dotted outline.
+    if ($isEdit -and (($E.State -band [System.Windows.Forms.DrawItemState]::Focus) -ne 0) -and (($E.State -band [System.Windows.Forms.DrawItemState]::NoFocusRect) -eq 0)) {
+        [System.Windows.Forms.ControlPaint]::DrawFocusRectangle($g, $b)
+    }
+    if ($en.Kind -eq 'older') {
+        $oc = if ($enabled) { $c.Accent } else { $c.Muted }
+        $r = New-Object System.Drawing.Rectangle(($row.Left + $pad), $row.Top, ($row.Width - 2 * $pad), $row.Height)
+        [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$en.Title, $f.Base, $r, $oc, $rowBack, $flags)
+        return
+    }
+    $x = $row.Left + $pad
+    $right = $row.Right - $pad
+    $titleW = Px 76
+    $r = New-Object System.Drawing.Rectangle($x, $row.Top, [math]::Min($titleW, [math]::Max(0, $right - $x)), $row.Height)
+    [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$en.Title, $f.BaseStrong, $r, $textColor, $rowBack, $flags)
+    $x += $titleW
+    $columns = @(@{ Text = [string]$en.When; Width = (Px 112); Color = $mutedColor }, @{ Text = [string]$en.Label; Width = 0; Color = $textColor })
+    if ($isEdit) {
+        if ($en.Label) { $columns = @(@{ Text = [string]$en.Label; Width = 0; Color = $textColor }) } else { $columns = @(@{ Text = [string]$en.When; Width = 0; Color = $mutedColor }) }
+    }
+    foreach ($col in $columns) {
+        if ($x -ge $right) { break }
+        $w = $right - $x
+        if ($col.Width -gt 0) { $w = [math]::Min($col.Width, $w) }
+        if ($col.Text) {
+            $r = New-Object System.Drawing.Rectangle($x, $row.Top, $w, $row.Height)
+            [System.Windows.Forms.TextRenderer]::DrawText($g, $col.Text, $f.Base, $r, $col.Color, $rowBack, $flags)
+        }
+        $x += $w
+    }
+}
+
+# The drop-down changed. A stored build is used right away; Older build... opens the list of every
+# build; a listed build that is not here yet is downloaded and then used.
 function Select-Build {
-    if ($script:BuildFilling -or $script:Busy) { return }
+    if ($script:BuildFilling) { return }
     $i = $script:Ui.BuildBox.SelectedIndex
-    if (($i -lt 0) -or ($i -ge $script:StoredTags.Count)) { return }
-    $tag = [string]$script:StoredTags[$i]
+    if (($i -lt 0) -or ($i -ge $script:PickerEntries.Count)) { return }
+    if ($script:Busy) { Reset-PickerSelection; return }
+    $en = $script:PickerEntries[$i]
+    if ($en.Kind -eq 'older') { Reset-PickerSelection; Start-OlderBuildList; return }
+    $tag = [string]$en.Tag
     if ($tag -ceq $script:SelectedTag) { return }
-    Set-SelectedBuild $tag -Save
+    if (-not $en.Stored) { Reset-PickerSelection; Start-OneBuildDownload $tag; return }
+    Use-Build $tag
+}
+
+# Points the title, the upload, the tester, and the Route Map at one stored build, and says so.
+function Use-Build {
+    param([string]$Tag)
+    Set-SelectedBuild $Tag -Save
     Update-BuildInfo
     Switch-CloudBuild
     $mode = $script:Modes[$script:Ui.ModeBox.SelectedIndex]
-    $label = Get-BuildTagLabel $tag
-    $label = $label.Substring(0, 1).ToUpperInvariant() + $label.Substring(1)
+    $label = Get-BuildDisplayName $Tag
     if (Test-HaveMode $mode) {
         Set-Status ('Using ' + $label + '. Ready to upload.') 'info'
     } else {
         Set-Status ($label + ' has no ' + $mode.Label + ' version. Pick another build or another mode.') 'error'
+    }
+}
+
+# Saves a new kept list; the window uses it only once it is on disk. $true when saved.
+function Save-KeptList {
+    param([hashtable]$Kept)
+    try {
+        Write-KeptBuilds -Path (Get-KeptPath) -Kept $Kept
+    } catch {
+        Set-Status ('Could not save the kept builds. ' + $_.Exception.Message) 'error'
+        return $false
+    }
+    $script:Kept = $Kept
+    $script:KeptDamaged = $false
+    return $true
+}
+
+# Keeps a build under a name, or gives a kept build a new name.
+function Set-KeptName {
+    param([string]$Tag, [string]$Name)
+    if (-not $Tag) { return }
+    $problem = Get-KeptNameError $Name
+    if ($problem) { Set-Status $problem 'error'; return }
+    $wasKept = $script:Kept.ContainsKey($Tag)
+    $new = $script:Kept.Clone()
+    $new[$Tag] = $Name.Trim()
+    if (-not (Save-KeptList $new)) { return }
+    Update-BuildInfo
+    if ($wasKept) { Set-Status ('Renamed to ' + (Get-BuildDisplayName $Tag) + '.') 'success' }
+    else { Set-Status ('Kept ' + (Get-BuildDisplayName $Tag) + '. Get latest code will not remove it.') 'success' }
+}
+
+function Remove-KeptBuild {
+    param([string]$Tag)
+    if ($script:Busy -or (-not $Tag) -or (-not $script:Kept.ContainsKey($Tag))) { return }
+    $name = Get-BuildDisplayName $Tag
+    $new = $script:Kept.Clone()
+    $new.Remove($Tag)
+    if (-not (Save-KeptList $new)) { return }
+    Update-BuildInfo
+    Set-Status ($name + ' is no longer kept. Get latest code removes it once it is not picked, unless it is the newest or a full build.') 'info'
+}
+
+function Invoke-KeepBuild {
+    $tag = [string]$script:SelectedTag
+    if ($script:Busy -or (-not $tag)) { return }
+    $default = Get-BuildNumberText $tag
+    if ($default.Length -gt 40) { $default = $default.Substring(0, 40) }
+    $name = Show-NameDialog -Title 'Keep this build' -Prompt ('Keep ' + (Get-BuildNumberText $tag) + ' on this computer under a name you choose. Get latest code will not remove it.') -Default $default -Action 'Keep'
+    if ($null -ne $name) { Set-KeptName $tag $name }
+}
+
+function Invoke-RenameBuild {
+    $tag = [string]$script:SelectedTag
+    if ($script:Busy -or (-not $script:Kept.ContainsKey($tag))) { return }
+    $name = Show-NameDialog -Title 'Rename build' -Prompt ('A new name for ' + (Get-BuildNumberText $tag) + '. The build number stays beside it.') -Default ([string]$script:Kept[$tag]) -Action 'Rename'
+    if ($null -ne $name) { Set-KeptName $tag $name }
+}
+
+# A small dialog in the window's style.
+function New-AppDialog {
+    param([string]$Title, [int]$Width, [int]$Height)
+    $c = $script:Colors
+    $d = New-Object System.Windows.Forms.Form
+    $d.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
+    $d.Text = $Title
+    $d.Font = $script:Fonts.Base
+    $d.BackColor = $c.Back
+    $d.ForeColor = $c.Text
+    $d.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $d.MaximizeBox = $false
+    $d.MinimizeBox = $false
+    $d.ShowInTaskbar = $false
+    $d.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
+    $d.ClientSize = New-Object System.Drawing.Size($Width, $Height)
+    try { if ($null -ne $script:Ui.Form) { $d.Icon = $script:Ui.Form.Icon } } catch { }
+    return $d
+}
+
+# The window's primary button look, for a dialog button.
+function Set-PrimaryLook {
+    param($Button)
+    $c = $script:Colors
+    $Button.Tag = 'primary'
+    $Button.Font = $script:Fonts.BaseStrong
+    $Button.ForeColor = [System.Drawing.Color]::White
+    $Button.FlatAppearance.BorderSize = 0
+    $Button.FlatAppearance.MouseOverBackColor = $c.AccentHover
+    $Button.FlatAppearance.MouseDownBackColor = $c.AccentDown
+    Update-ButtonLook $Button
+}
+
+# Asks for a kept build's name. Built here and shown by Show-NameDialog, so -SelfTest can build it
+# without a person. Its controls live in $script:Dlg so the event handlers can reach them.
+function New-NameDialog {
+    param([string]$Title, [string]$Prompt, [string]$Default, [string]$Action)
+    $c = $script:Colors
+    $f = $script:Fonts
+    $W = Px 380
+    $M = Px 20
+    $inner = $W - 2 * $M
+    $dl = @{}
+    $script:Dlg = $dl
+    $form = New-AppDialog $Title $W 10
+    $dl.Form = $form
+    $y = Px 18
+    $dl.Prompt = New-Label $Prompt 0 0 10 10 $f.Base $c.Text
+    $dl.Prompt.AutoEllipsis = $false
+    Set-WrappedLabel $dl.Prompt $M $y $inner
+    $y += $dl.Prompt.Height + (Px 14)
+    $dl.NameLabel = New-Label 'Name' $M $y $inner (Px 18) $f.Base $c.Muted
+    $y += Px 22
+    $dl.Box = New-Object System.Windows.Forms.TextBox
+    $dl.Box.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+    $dl.Box.MaxLength = 40
+    $dl.Box.Text = $Default
+    $dl.Box.SetBounds($M, $y, $inner, $dl.Box.PreferredHeight)
+    $y += $dl.Box.Height + (Px 4)
+    $dl.Error = New-Label '' $M $y $inner (Px 18) $f.Small $c.Bad
+    $dl.Hint = New-Label 'Up to 40 characters.' $M $y $inner (Px 18) $f.Small $c.Muted
+    $y += (Px 18) + (Px 16)
+    $bw = Px 96
+    $dl.Ok = New-FlatButton $Action ($M + $inner - $bw) $y $bw (Px 32) $false
+    Set-PrimaryLook $dl.Ok
+    $dl.Cancel = New-FlatButton 'Cancel' ($dl.Ok.Left - (Px 8) - $bw) $y $bw (Px 32) $false
+    $dl.Cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $y += (Px 32) + (Px 18)
+    $form.ClientSize = New-Object System.Drawing.Size($W, $y)
+    $form.Controls.AddRange(@($dl.Prompt, $dl.NameLabel, $dl.Box, $dl.Error, $dl.Hint, $dl.Ok, $dl.Cancel))
+    $form.AcceptButton = $dl.Ok
+    $form.CancelButton = $dl.Cancel
+    # A problem shows as soon as there is one, in place of the hint, and the button stays off until the name is good.
+    $dl.Check = {
+        $problem = Get-KeptNameError $script:Dlg.Box.Text
+        $script:Dlg.Error.Text = $problem
+        $script:Dlg.Error.Visible = [bool]$problem
+        $script:Dlg.Hint.Visible = -not $problem
+        $script:Dlg.Ok.Enabled = -not $problem
+    }
+    & $dl.Check
+    $dl.Box.Add_TextChanged({ try { & $script:Dlg.Check } catch { } })
+    $dl.Ok.Add_Click({
+        if (-not (Get-KeptNameError $script:Dlg.Box.Text)) {
+            $script:Dlg.Form.DialogResult = [System.Windows.Forms.DialogResult]::OK
+            $script:Dlg.Form.Close()
+        }
+    })
+    $form.Add_Shown({ try { $script:Dlg.Box.SelectAll(); [void]$script:Dlg.Box.Focus() } catch { } })
+    return $form
+}
+
+# The name typed, trimmed, or $null when the dialog was cancelled.
+function Show-NameDialog {
+    param([string]$Title, [string]$Prompt, [string]$Default, [string]$Action)
+    $form = New-NameDialog -Title $Title -Prompt $Prompt -Default $Default -Action $Action
+    try {
+        $res = $form.ShowDialog($script:Ui.Form)
+        if ($res -eq [System.Windows.Forms.DialogResult]::OK) { return $script:Dlg.Box.Text.Trim() }
+        return $null
+    } finally { $form.Dispose() }
+}
+
+# The list of every published build, to pick one to download. Each row says whether that build is
+# kept, a full build, or already on this computer.
+function New-OlderBuildDialog {
+    param($Builds, [string]$Source)
+    $c = $script:Colors
+    $f = $script:Fonts
+    $W = Px 520
+    $M = Px 20
+    $inner = $W - 2 * $M
+    $dl = @{ Tags = @() }
+    $script:Dlg = $dl
+    $form = New-AppDialog 'Older build' $W 10
+    $dl.Form = $form
+    $y = Px 18
+    $help = 'Every published build, newest first. The one you pick is downloaded, checked, and used. It stays until the next Get latest code unless you keep it.'
+    if ($Source -eq 'atom') { $help += ' GitHub''s full list did not answer, so only the newest few are here. Try again later for the rest.' }
+    $dl.Help = New-Label $help 0 0 10 10 $f.Base $c.Muted
+    $dl.Help.AutoEllipsis = $false
+    Set-WrappedLabel $dl.Help $M $y $inner
+    $y += $dl.Help.Height + (Px 12)
+    $listH = Px 300
+    $dl.List = New-MapListView @('Build', 'Built', 'Note') @((Px 84), (Px 128), ($inner - (Px 84) - (Px 128) - (Px 22)))
+    $dl.List.SetBounds($M, $y, $inner, $listH)
+    $notes = @{}
+    foreach ($fb in @($script:FullBuilds)) { $notes[[string]$fb.Tag] = [string]$fb.Note }
+    $here = @(Get-StoredBuilds $InstallDir | ForEach-Object { [string]$_.Tag })
+    $tags = New-Object System.Collections.Generic.List[string]
+    foreach ($b in @($Builds)) {
+        $t = [string]$b.Tag
+        $note = ''
+        if ($script:Kept.ContainsKey($t)) { $note = [string]$script:Kept[$t] }
+        elseif ($notes.ContainsKey($t)) { $note = $notes[$t] }
+        if ($here -contains $t) { if ($note) { $note += ' (on this computer)' } else { $note = 'On this computer' } }
+        $it = New-Object System.Windows.Forms.ListViewItem((Get-BuildNumberText $t))
+        [void]$it.SubItems.Add((Format-BuildShortDate ([string]$b.BuiltAt)))
+        [void]$it.SubItems.Add($note)
+        [void]$dl.List.Items.Add($it)
+        $tags.Add($t)
+    }
+    $dl.Tags = @($tags.ToArray())
+    $y += $listH + (Px 16)
+    $bw = Px 128
+    $dl.Ok = New-FlatButton 'Use this build' ($M + $inner - $bw) $y $bw (Px 32) $false
+    Set-PrimaryLook $dl.Ok
+    $dl.Ok.Enabled = $false
+    $dl.Cancel = New-FlatButton 'Cancel' ($dl.Ok.Left - (Px 8) - (Px 96)) $y (Px 96) (Px 32) $false
+    $dl.Cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $y += (Px 32) + (Px 18)
+    $form.ClientSize = New-Object System.Drawing.Size($W, $y)
+    $form.Controls.AddRange(@($dl.Help, $dl.List, $dl.Ok, $dl.Cancel))
+    $form.CancelButton = $dl.Cancel
+    $dl.List.Add_SelectedIndexChanged({ try { $script:Dlg.Ok.Enabled = ($script:Dlg.List.SelectedIndices.Count -gt 0) } catch { } })
+    $done = {
+        if ($script:Dlg.List.SelectedIndices.Count -gt 0) {
+            $script:Dlg.Form.DialogResult = [System.Windows.Forms.DialogResult]::OK
+            $script:Dlg.Form.Close()
+        }
+    }
+    $dl.Ok.Add_Click($done)
+    $dl.List.Add_DoubleClick($done)
+    return $form
+}
+
+# The tag picked, or $null.
+function Show-OlderBuildDialog {
+    param($Builds, [string]$Source)
+    $form = New-OlderBuildDialog -Builds $Builds -Source $Source
+    try {
+        $res = $form.ShowDialog($script:Ui.Form)
+        if (($res -eq [System.Windows.Forms.DialogResult]::OK) -and ($script:Dlg.List.SelectedIndices.Count -gt 0)) { return [string]$script:Dlg.Tags[$script:Dlg.List.SelectedIndices[0]] }
+        return $null
+    } finally { $form.Dispose() }
+}
+
+# Older build...: asks GitHub for every build, then offers the list.
+function Start-OlderBuildList {
+    if ($script:Busy) { return }
+    Set-Busy $true 'list' 'Getting the list of builds...'
+    Start-BgJob $OlderListBody @{ ApiUrl = $script:ReleasesApiUrl; ReleasesUrl = $script:ReleasesUrl } {
+        param($r)
+        Set-Busy $false
+        if ($r.Status -ne 'ok') {
+            if ($r.ApiError) { Add-LogText ('Build list (GitHub API): ' + [string]$r.ApiError) }
+            Add-LogText ('Build list (releases feed): ' + [string]$r.Error)
+            Set-Status 'Could not get the list of builds. Check the internet connection and try again.' 'error'
+            return
+        }
+        if ($r.Source -eq 'atom') { Add-LogText ('Build list: the GitHub API did not answer (' + [string]$r.ApiError + '), so only the newest few builds are listed.') }
+        Set-Status '' 'info'
+        $tag = Show-OlderBuildDialog -Builds $r.Builds -Source ([string]$r.Source)
+        if (-not $tag) { return }
+        if (@(Get-StoredBuilds $InstallDir | ForEach-Object { [string]$_.Tag }) -contains $tag) { Use-Build $tag } else { Start-OneBuildDownload $tag }
+    }
+}
+
+# Downloads one build, checks it against its own release.json, and uses it.
+function Start-OneBuildDownload {
+    param([string]$Tag)
+    if ($script:Busy -or (-not $Tag)) { return }
+    Set-Busy $true 'download' ('Downloading ' + (Get-BuildDisplayName $Tag) + '...')
+    Add-LogText ('[' + (Get-Date).ToString('HH:mm:ss') + '] Downloading ' + $Tag)
+    Start-BgJob $OneBuildBody @{ ReleasesUrl = $script:ReleasesUrl; InstallDir = $InstallDir; AssetNames = $script:AssetNames; Tag = $Tag } {
+        param($r)
+        Set-Busy $false
+        $t = [string]$r.Tag
+        if (@('downloaded', 'current') -contains [string]$r.Status) {
+            Use-Build $t
+        } elseif ($r.Status -eq 'offline') {
+            Update-BuildInfo
+            Set-Status 'No internet connection, so that build could not be downloaded. The builds you have still work.' 'error'
+        } else {
+            Update-BuildInfo
+            Set-Status ('Could not download ' + (Get-BuildDisplayName $t) + '. ' + [string]$r.Error) 'error'
+        }
+        if ($r.Error) { Add-LogText ('Download ' + $t + ': ' + [string]$r.Error) }
     }
 }
 
@@ -6220,14 +7006,22 @@ function Start-ConnectionCheck {
 
 # Quietly asks GitHub whether newer code exists (on launch).
 function Start-ReleaseCheck {
-    Start-BgJob $CheckBody @{ ReleasesUrl = $script:ReleasesUrl } {
+    Start-BgJob $CheckBody @{ ReleasesUrl = $script:ReleasesUrl; FullBuildsUrl = $script:FullBuildsUrl; FullBuildsCache = (Get-FullBuildsCachePath) } {
         param($r)
-        if ($r.Status -eq 'ok') {
-            $script:LatestTag = [string]$r.Release.Tag
-            Update-BuildPicker
-            Update-Notice
-        }
+        Set-FullBuilds $r
+        if ($r.Status -eq 'ok') { $script:LatestTag = [string]$r.Release.Tag }
+        Update-BuildPicker
+        Update-Notice
     }
+}
+
+# Takes the full-builds list a background job read (published or saved copy). With no list at all,
+# the one already shown stays.
+function Set-FullBuilds {
+    param($R)
+    if (($null -eq $R) -or (@('ok', 'cache') -notcontains [string]$R.FullStatus)) { return }
+    $script:FullBuilds = @($R.FullBuilds)
+    $script:FullKnown = $true
 }
 
 function Start-UploaderCheck {
@@ -6284,15 +7078,19 @@ function Start-Download {
     # What was on this computer before, so the done handler can tell whether the newest build was the one picked.
     $script:BuildsBeforeDownload = @(Get-StoredBuilds $InstallDir | ForEach-Object { [string]$_.Tag })
     $jobArgs = @{
-        ReleasesUrl = $script:ReleasesUrl
-        InstallDir  = $InstallDir
-        AssetNames  = $script:AssetNames
-        SelectedTag = $script:SelectedTag
-        Keep        = $script:BuildsToKeep
+        ReleasesUrl     = $script:ReleasesUrl
+        InstallDir      = $InstallDir
+        AssetNames      = $script:AssetNames
+        SelectedTag     = $script:SelectedTag
+        FullBuildsUrl   = $script:FullBuildsUrl
+        FullBuildsCache = (Get-FullBuildsCachePath)
+        KeptTags        = @($script:Kept.Keys | ForEach-Object { [string]$_ })
+        FullCount       = $script:FullBuildsToShow
     }
     Start-BgJob $DownloadBody $jobArgs {
         param($r)
         Set-Busy $false
+        Set-FullBuilds $r
         if ($r.Release) { $script:LatestTag = [string]$r.Release.Tag; $script:TesterBuildTag = [string]$r.Release.Tag }
         # Someone on the newest build moves up to the new newest; a build picked on purpose stays picked.
         $after = @(Get-StoredBuilds $InstallDir | ForEach-Object { [string]$_.Tag })
@@ -6304,7 +7102,7 @@ function Start-Download {
         if ($moved) { Switch-CloudBuild }
         switch ([string]$r.Status) {
             { @('downloaded', 'current') -contains $_ } {
-                $st = Get-DownloadStatusText -Status ([string]$r.Status) -Downloaded @($r.Downloaded) -After $after -Selected $script:SelectedTag
+                $st = Get-DownloadStatusText -Status ([string]$r.Status) -Downloaded @($r.Downloaded) -After $after -Selected $script:SelectedTag -KeptNames $script:Kept
                 Set-Status $st.Text $st.Kind
             }
             'none'       {
@@ -6377,13 +7175,7 @@ function Start-Upload {
         Set-Busy $false
         $outcome = Get-UploadOutcome -Run $r -Slot $script:UploadSlot
         # Name the build, so a swap to an older one shows in the message afterwards.
-        $buildName = ''
-        if ($script:UploadTag) {
-            $buildName = Get-BuildTagLabel $script:UploadTag
-            if ($buildName -notlike 'build *') { $buildName = 'build ' + $buildName }
-            $buildName = ' ' + $buildName
-        }
-        $message = $outcome.Message -replace '^Uploaded to slot', ('Uploaded ' + $script:UploadMode + $buildName + ' to slot')
+        $message = $outcome.Message -replace '^Uploaded to slot', ('Uploaded ' + $script:UploadMode + (Get-UploadBuildText $script:UploadTag) + ' to slot')
         # PROS asked to clean up old libraries (we answered yes): say so plainly.
         if ([string]$r.Output -match 'There are too many files on the V5') {
             $evictNote = 'PROS removed old libraries (and programs that used them) to make room.'
@@ -6399,6 +7191,17 @@ function Start-Upload {
         }
         Start-ConnectionCheck
     }
+}
+
+# The build in the upload message: "Uploaded Competition build 308 to slot 1", or for a kept build
+# "Uploaded Competition from Practice auton (Build 308) to slot 1".
+function Get-UploadBuildText {
+    param([string]$Tag)
+    if (-not $Tag) { return '' }
+    if ($script:Kept.ContainsKey($Tag)) { return (' from ' + (Get-BuildDisplayName $Tag)) }
+    $label = Get-BuildTagLabel $Tag
+    if ($label -notlike 'build *') { $label = 'build ' + $label }
+    return (' ' + $label)
 }
 
 function Start-TesterUpload {
@@ -6615,6 +7418,7 @@ function Send-Results {
 function Start-App {
     $script:ProsExe = Find-ProsExe
     Update-BuildInfo
+    if ($script:KeptNote) { Add-LogText $script:KeptNote }
     $script:Ui.JobTimer.Start()
     $script:Ui.PollTimer.Start()
     if (-not $script:ProsExe) {
@@ -7415,11 +8219,12 @@ if ($SelfTest) {
         Write-Host ('  Route Map plans: FAIL (' + ($planFails -join '; ') + ')')
     }
 
-    # 0d. Builds on this computer: the three newest published builds, picking one, and uploading
-    #     the picked one. Everything here runs on files in a temp folder and a listener on this
-    #     computer standing in for GitHub, so it needs no internet and no robot.
+    # 0d. Builds on this computer: the newest build, the full builds, kept builds, picking one, and
+    #     uploading the picked one. Everything here runs on files in a temp folder and a listener on
+    #     this computer standing in for GitHub, so it needs no internet and no robot.
     $buildFails = New-Object System.Collections.Generic.List[string]
-    $expectB = { param($ok, $what) if (-not $ok) { [void]$buildFails.Add($what) } }
+    $script:BuildChecks = 0
+    $expectB = { param($ok, $what) $script:BuildChecks++; if (-not $ok) { [void]$buildFails.Add($what) } }
     $savedInstallDir = $InstallDir
     $savedSelectedFile = $script:SelectedFile
     $savedResultsFn = ${function:Get-ResultsFolder}
@@ -7456,21 +8261,114 @@ if ($SelfTest) {
         & $expectB (@(Read-ReleasesAtom '<html>not a feed</html>').Count -eq 0) 'atom: text that is not a feed should give no tags'
         & $expectB ((Get-BuildNumber 'build-313-3c15a66') -eq 313 -and (Get-BuildNumber 'mac-uploader-1.8.1') -eq -1 -and (Get-BuildNumber 'build-9-zzz') -eq -1) 'build number: only build-N-hex tags have one'
 
-        # Order and eviction. The number decides, not the date: 308 is given the latest date on purpose.
+        # Order and eviction. What stays is exactly the protected set (newest, full builds shown, kept,
+        # picked), newest first by number, not date: 308 is given the latest date on purpose.
         $five = @(
             @{ Tag = 'build-294-aaa1111'; BuiltAt = '2026-11-01T00:00:00Z' }, @{ Tag = 'build-313-3c15a66'; BuiltAt = '2026-11-02T00:00:00Z' },
             @{ Tag = 'build-304-497d4f7'; BuiltAt = '2026-11-03T00:00:00Z' }, @{ Tag = 'build-308-2808722'; BuiltAt = '2026-11-09T00:00:00Z' },
             @{ Tag = 'build-301-ac5e41e'; BuiltAt = '2026-11-04T00:00:00Z' })
-        $keepPlan = Select-BuildsToKeep -Builds $five -Keep 3
-        & $expectB ((@($keepPlan.Keep) -join ',') -eq 'build-313-3c15a66,build-308-2808722,build-304-497d4f7') ('eviction: kept ' + (@($keepPlan.Keep) -join ',') + ', expected 313, 308, 304 in that order')
-        & $expectB ((@($keepPlan.Evict) -join ',') -eq 'build-301-ac5e41e,build-294-aaa1111') ('eviction: dropped ' + (@($keepPlan.Evict) -join ','))
-        $keepPlan = Select-BuildsToKeep -Builds $five -Protect @('build-294-aaa1111') -Keep 3
-        & $expectB ((@($keepPlan.Keep) -contains 'build-294-aaa1111') -and (@($keepPlan.Keep).Count -eq 4) -and (@($keepPlan.Evict) -join ',') -eq 'build-301-ac5e41e') 'eviction: the picked build must stay even when it is the oldest'
-        $keepPlan = Select-BuildsToKeep -Builds $five -Keep 3 -Busy $true
+        $keepPlan = Select-BuildsToKeep -Builds $five -Protect @('build-294-aaa1111', 'build-313-3c15a66', 'build-304-497d4f7', '')
+        & $expectB ((@($keepPlan.Keep) -join ',') -eq 'build-313-3c15a66,build-304-497d4f7,build-294-aaa1111') ('eviction: kept ' + (@($keepPlan.Keep) -join ',') + ', expected 313, 304, 294 in that order')
+        & $expectB ((@($keepPlan.Evict) -join ',') -eq 'build-308-2808722,build-301-ac5e41e') ('eviction: dropped ' + (@($keepPlan.Evict) -join ','))
+        $keepPlan = Select-BuildsToKeep -Builds $five -Protect @('build-313-3c15a66') -Busy $true
         & $expectB ((@($keepPlan.Evict).Count -eq 0) -and (@($keepPlan.Keep).Count -eq 5)) 'eviction: nothing may go while busy'
-        $keepPlan = Select-BuildsToKeep -Builds @($five + @(@{ Tag = 'old-style-tag'; BuiltAt = '2026-12-01T00:00:00Z' })) -Keep 3
-        & $expectB (@($keepPlan.Evict) -contains 'old-style-tag') 'eviction: a tag with no build number sorts after the numbered ones'
-        & $expectB ((Select-BuildsToKeep -Builds @() -Keep 3).Keep.Count -eq 0) 'eviction: no builds at all should not fail'
+        $keepPlan = Select-BuildsToKeep -Builds @($five + @(@{ Tag = 'old-style-tag'; BuiltAt = '2026-12-01T00:00:00Z' })) -Protect @('old-style-tag')
+        & $expectB ((@($keepPlan.Keep) -join ',') -eq 'old-style-tag') 'eviction: a protected tag with no build number stays'
+        & $expectB ((Select-BuildsToKeep -Builds @() -Protect @('x')).Keep.Count -eq 0) 'eviction: no builds at all should not fail'
+
+        # full-builds.json: bad tags and repeats are left out, the file's order does not matter, newest first.
+        $fbText = '{"version":1,"builds":[{"tag":"build-283-5c76fff","note":"AWP: 2nd cup"},{"tag":"build-313-3c15a66","note":"RECF"},' +
+            '{"tag":"build-294-3321f7c","note":"LEDs\non "},{"tag":"build-300-ABCDEF1","note":"upper-case hex"},{"tag":"build-301-abc123","note":"six hex"},' +
+            '{"tag":"build-302-abc12345","note":"eight hex"},{"tag":"mac-uploader-1.8.1","note":"not a build"},{"tag":"build-313-3c15a66","note":"repeat"},' +
+            '{"note":"no tag"},"just text",{"tag":"build-x-1234567"},{"tag":" build-305-1234567"}]}'
+        $fb = Read-FullBuilds $fbText
+        & $expectB ($fb.Ok -and ((@($fb.Builds | ForEach-Object { $_.Tag }) -join ',') -eq 'build-313-3c15a66,build-294-3321f7c,build-283-5c76fff')) ('full builds: expected 313, 294, 283, got ' + (@($fb.Builds | ForEach-Object { $_.Tag }) -join ','))
+        & $expectB (($fb.Builds[0].Note -ceq 'RECF') -and ($fb.Builds[1].Note -ceq 'LEDs on')) ('full builds: the first copy of a tag wins and a note is one trimmed line, got ' + $fb.Builds[0].Note + ' / ' + $fb.Builds[1].Note)
+        foreach ($badText in @('', '{ "builds": [', '[1,2]', '{"version":1}', '"text"', 'null')) {
+            & $expectB (-not (Read-FullBuilds $badText).Ok) ('full builds: ' + $badText + ' is not a full-builds file')
+        }
+        $fbEmpty = Read-FullBuilds '{"version":1,"builds":[]}'
+        & $expectB ($fbEmpty.Ok -and (@($fbEmpty.Builds).Count -eq 0)) 'full builds: an empty list is a good, empty file'
+        & $expectB ((Test-FullBuildTag 'build-313-3c15a66') -and (-not (Test-FullBuildTag 'build-313-3C15A66')) -and (-not (Test-FullBuildTag 'build-313-3c15a66x'))) 'full builds: tags are build-N-<7 lowercase hex>'
+        # The file at the root of this repo, when this copy runs from a checkout: every entry must be a good one.
+        $repoFull = Join-Path $PSScriptRoot 'full-builds.json'
+        if (Test-Path -LiteralPath $repoFull) {
+            $repoText = [System.IO.File]::ReadAllText($repoFull, [System.Text.Encoding]::UTF8)
+            $repoParsed = Read-FullBuilds $repoText
+            $repoRaw = @(($repoText | ConvertFrom-Json).builds).Count
+            & $expectB ($repoParsed.Ok -and (@($repoParsed.Builds).Count -eq $repoRaw) -and ($repoRaw -gt 0)) ('full builds: the repo''s full-builds.json has ' + $repoRaw + ' entries but ' + @($repoParsed.Builds).Count + ' good ones')
+        }
+        # The drop-down and the disk show the 3 highest-numbered; one that is the newest is not shown twice, and no fourth fills in.
+        $fbFour = @(@{ Tag = 'build-270-1111111'; Note = 'a' }, @{ Tag = 'build-313-3c15a66'; Note = 'b' }, @{ Tag = 'build-283-5c76fff'; Note = 'c' }, @{ Tag = 'build-294-3321f7c'; Note = 'd' })
+        & $expectB ((@(Select-ShownFullBuilds -FullBuilds $fbFour -Newest 'build-320-9999999' -Count 3 | ForEach-Object { $_.Tag }) -join ',') -eq 'build-313-3c15a66,build-294-3321f7c,build-283-5c76fff') 'full builds: the three highest-numbered are shown'
+        & $expectB ((@(Select-ShownFullBuilds -FullBuilds $fbFour -Newest 'build-313-3c15a66' -Count 3 | ForEach-Object { $_.Tag }) -join ',') -eq 'build-294-3321f7c,build-283-5c76fff') 'full builds: the newest is not shown again among the full builds'
+        & $expectB (@(Select-ShownFullBuilds -FullBuilds @() -Newest 'x' -Count 3).Count -eq 0) 'full builds: an empty list shows none'
+
+        # kept.json: names, the round trip through the file, and a damaged file.
+        $keptDir = Join-Path $buildRoot 'keptfile'
+        New-Item -ItemType Directory -Path $keptDir -Force | Out-Null
+        $kp = Join-Path $keptDir 'kept.json'
+        $k0 = Read-KeptBuilds $kp
+        & $expectB ((-not $k0.Damaged) -and ($k0.Kept.Count -eq 0)) 'kept: no file is an empty list, not damaged'
+        Write-KeptBuilds -Path $kp -Kept @{ 'build-308-2808722' = '  Practice auton  '; 'build-294-3321f7c' = 'Skills run' }
+        $k1 = Read-KeptBuilds $kp
+        & $expectB ((-not $k1.Damaged) -and ($k1.Kept.Count -eq 2) -and ($k1.Kept['build-308-2808722'] -ceq 'Practice auton')) 'kept: a written list reads back, names trimmed'
+        & $expectB ((([System.IO.File]::ReadAllText($kp)) -match '"version":\s*1') -and (-not (Test-Path ($kp + '.bak'))) -and (-not (Test-Path ($kp + '.tmp')))) 'kept: the file says version 1, and a good file being replaced leaves no .bak or .tmp'
+        $k1.Kept.Remove('build-294-3321f7c')
+        Write-KeptBuilds -Path $kp -Kept $k1.Kept
+        & $expectB (((Read-KeptBuilds $kp).Kept.Keys -join ',') -eq 'build-308-2808722') 'kept: stop keeping one leaves the other'
+        Write-KeptBuilds -Path $kp -Kept @{}
+        $kEmpty = Read-KeptBuilds $kp
+        & $expectB ((-not $kEmpty.Damaged) -and ($kEmpty.Kept.Count -eq 0)) 'kept: an empty list writes and reads back as empty, not damaged'
+        $longName = 'x' * 41
+        [System.IO.File]::WriteAllText($kp, ('{"version":1,"kept":{"build-308-2808722":{"name":"ok"},"..":{"name":"dots"},"build-1-a":{"name":"  "},"build-2-b":{"name":"' + $longName + '"},"build-3-c":"text","a\\b":{"name":"path"}}}'), (New-Object System.Text.UTF8Encoding($false)))
+        $k2 = Read-KeptBuilds $kp
+        & $expectB ((-not $k2.Damaged) -and ($k2.Kept.Count -eq 1) -and ($k2.Kept['build-308-2808722'] -eq 'ok')) ('kept: bad entries in a good file are skipped, got ' + ($k2.Kept.Keys -join ','))
+        $damagedText = '{ "version": 1, "kept": { "build-308'
+        [System.IO.File]::WriteAllText($kp, $damagedText, (New-Object System.Text.UTF8Encoding($false)))
+        $k3 = Read-KeptBuilds $kp
+        & $expectB ($k3.Damaged -and ($k3.Kept.Count -eq 0) -and $k3.Error) 'kept: a cut-off file is damaged and reads as an empty list'
+        & $expectB (([System.IO.File]::ReadAllText($kp)) -ceq $damagedText) 'kept: reading a damaged file must not change it'
+        foreach ($shape in @('[1]', '{"version":1}', '{"kept":[]}', '{"kept":"x"}', 'null')) {
+            [System.IO.File]::WriteAllText($kp, $shape, (New-Object System.Text.UTF8Encoding($false)))
+            & $expectB ((Read-KeptBuilds $kp).Damaged) ('kept: ' + $shape + ' should read as damaged')
+        }
+        [System.IO.File]::WriteAllText($kp, $damagedText, (New-Object System.Text.UTF8Encoding($false)))
+        Write-KeptBuilds -Path $kp -Kept @{ 'build-320-9999999' = 'New' }
+        & $expectB ((Test-Path ($kp + '.bak')) -and (([System.IO.File]::ReadAllText($kp + '.bak')) -ceq $damagedText) -and ((Read-KeptBuilds $kp).Kept['build-320-9999999'] -eq 'New')) 'kept: replacing a damaged file saves it as kept.json.bak first'
+        Write-KeptBuilds -Path $kp -Kept @{ 'build-320-9999999' = 'Newer' }
+        & $expectB (([System.IO.File]::ReadAllText($kp + '.bak')) -ceq $damagedText) 'kept: a later save of a good file must not overwrite the .bak of the damaged one'
+        & $expectB (((Get-KeptNameError '') -ne '') -and ((Get-KeptNameError '   ') -ne '') -and ((Get-KeptNameError ('a' * 40)) -eq '') -and ((Get-KeptNameError ('a' * 41)) -ne '') -and ((Get-KeptNameError ("a`tb")) -ne '') -and ((Get-KeptNameError '  Practice auton (v2) #3  ') -eq '')) 'kept: names are 1 to 40 characters of one-line text after trimming'
+
+        # The drop-down rows: NEWEST, FULL BUILDS, KEPT, ON THIS COMPUTER, then Older build..., each build once.
+        $pFull = @(@{ Tag = 'build-313-3c15a66'; Note = 'RECF: right Goal + roller' }, @{ Tag = 'build-294-3321f7c'; Note = 'Optical sensor LEDs on' },
+            @{ Tag = 'build-283-5c76fff'; Note = 'AWP: 2nd cup' }, @{ Tag = 'build-270-1111111'; Note = 'too old to show' })
+        $pStored = @(@{ Tag = 'build-320-9999999'; BuiltAt = '2026-11-08T16:00:00Z' }, @{ Tag = 'build-313-3c15a66'; BuiltAt = '2026-11-07T17:36:00Z' },
+            @{ Tag = 'build-294-3321f7c'; BuiltAt = '2026-11-07T11:41:00Z' }, @{ Tag = 'build-308-2808722'; BuiltAt = '2026-11-07T17:01:00Z' },
+            @{ Tag = 'build-304-497d4f7'; BuiltAt = '2026-11-07T14:48:00Z' })
+        $pKept = @{ 'build-308-2808722' = 'Practice auton'; 'build-294-3321f7c' = 'Skills run'; 'build-200-2222222' = 'Gone' }
+        $rows = @(Get-PickerEntries -Latest 'build-320-9999999' -FullBuilds $pFull -FullKnown $true -Kept $pKept -Stored $pStored -FullCount 3)
+        $rowTags = @($rows | ForEach-Object { if ($_.Kind -eq 'older') { 'older' } else { $_.Tag } }) -join ','
+        & $expectB ($rowTags -eq 'build-320-9999999,build-313-3c15a66,build-294-3321f7c,build-283-5c76fff,build-308-2808722,build-200-2222222,build-304-497d4f7,older') ('picker: row order was ' + $rowTags)
+        & $expectB ((@($rows | ForEach-Object { $_.Group }) -join ',') -eq 'newest,full,full,full,kept,kept,other,older') ('picker: groups were ' + (@($rows | ForEach-Object { $_.Group }) -join ','))
+        & $expectB ((@($rows | ForEach-Object { $_.Header }) -join '|') -eq 'NEWEST|FULL BUILDS|||KEPT||ON THIS COMPUTER|') ('picker: group names were ' + (@($rows | ForEach-Object { $_.Header }) -join '|'))
+        $dotB = ' ' + [char]0x00B7 + ' '
+        & $expectB (($rows[0].Label -ceq 'newest, test build') -and ($rows[1].Label -ceq 'RECF: right Goal + roller') -and ($rows[2].Label -ceq ('Skills run' + $dotB + 'Optical sensor LEDs on')) -and ($rows[4].Label -ceq 'Practice auton') -and ($rows[6].Label -ceq '')) ('picker: labels were ' + (@($rows | ForEach-Object { $_.Label }) -join ' | '))
+        & $expectB (($rows[0].Title -ceq 'Build 320') -and ($rows[0].When -match '^[A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2} [AP]M$') -and ($rows[0].Text -like 'Build 320   * newest, test build')) ('picker: a row shows number, build time, label, got ' + $rows[0].Text)
+        & $expectB ((-not $rows[3].Stored) -and ($rows[3].When -eq 'Not downloaded') -and (-not $rows[5].Stored) -and $rows[1].Stored) 'picker: a listed build that is not here says Not downloaded'
+        & $expectB (($rows[7].Kind -eq 'older') -and ($rows[7].Text -eq 'Older build...')) 'picker: the last row is Older build...'
+        $rows2 = @(Get-PickerEntries -Latest 'build-313-3c15a66' -FullBuilds $pFull -FullKnown $true -Kept @{} -Stored @($pStored[1], $pStored[2]) -FullCount 3)
+        & $expectB (((@($rows2 | ForEach-Object { [string]$_.Tag }) -join ',') -eq 'build-313-3c15a66,build-294-3321f7c,build-283-5c76fff,') -and ($rows2[0].Label -ceq 'newest')) ('picker: a newest full build is just newest and is not repeated, got ' + (@($rows2 | ForEach-Object { $_.Text }) -join ' | '))
+        $rows3 = @(Get-PickerEntries -Latest 'build-320-9999999' -FullBuilds @() -FullKnown $false -Kept @{} -Stored @($pStored[0]))
+        & $expectB (($rows3.Count -eq 2) -and ($rows3[0].Label -ceq 'newest')) 'picker: with no full-builds list at all, the newest is not called a test build'
+        $rows4 = @(Get-PickerEntries -Latest '' -FullBuilds $pFull -FullKnown $true -Kept @{} -Stored @($pStored[3], $pStored[1]))
+        & $expectB (($rows4[0].Tag -eq 'build-313-3c15a66') -and ($rows4[0].Group -eq 'newest') -and ($rows4[1].Tag -eq 'build-294-3321f7c') -and ($rows4[3].Tag -eq 'build-308-2808722') -and ($rows4[3].Group -eq 'other')) ('picker: before GitHub answers, the newest build here is the newest, got ' + (@($rows4 | ForEach-Object { [string]$_.Tag + '/' + $_.Group }) -join ','))
+        $rows5 = @(Get-PickerEntries -Latest '' -FullBuilds @() -FullKnown $false -Kept @{} -Stored @())
+        & $expectB (($rows5.Count -eq 1) -and ($rows5[0].Kind -eq 'older')) 'picker: with no builds at all only Older build... is listed'
+
+        # The status line names kept builds by name, with the number.
+        $msgK = Get-DownloadStatusText -Status 'current' -Downloaded @() -After @('build-320-9999999', 'build-308-2808722') -Selected 'build-308-2808722' -KeptNames @{ 'build-308-2808722' = 'Practice auton' }
+        & $expectB ($msgK.Text -eq 'You already have the latest code. Still using Practice auton (Build 308) (you picked it). Pick build 320 in the drop-down to use it.') ('status: a kept build should be named, got: ' + $msgK.Text)
 
         # On disk: five builds, the oldest one picked.
         $inst = Join-Path $buildRoot 'evict'
@@ -7481,9 +8379,9 @@ if ($SelfTest) {
         New-Item -ItemType Directory -Path (Join-Path $inst 'builds\build-320-fff0000.download\bin') -Force | Out-Null
         New-Item -ItemType Directory -Path (Join-Path $inst 'builds\build-299-eee0000\bin') -Force | Out-Null
         & $expectB (@(Get-StoredBuilds $inst).Count -eq 5) 'stored builds: a .download folder and a folder with no files are not builds'
-        $gone = @(Remove-OldBuilds -InstallDir $inst -Protect @('build-294-3321f7c') -Keep 3 -Busy $true)
+        $gone = @(Remove-OldBuilds -InstallDir $inst -Protect @('build-294-3321f7c') -Busy $true)
         & $expectB (($gone.Count -eq 0) -and (@(Get-StoredBuilds $inst).Count -eq 5)) 'eviction on disk: busy must delete nothing'
-        $gone = @(Remove-OldBuilds -InstallDir $inst -Protect @('build-294-3321f7c') -Keep 3)
+        $gone = @(Remove-OldBuilds -InstallDir $inst -Protect @('build-313-3c15a66', 'build-308-2808722', 'build-304-497d4f7', 'build-294-3321f7c'))
         $left = @(Get-StoredBuilds $inst | ForEach-Object { $_.Tag })
         & $expectB ((($left -join ',') -eq 'build-313-3c15a66,build-308-2808722,build-304-497d4f7,build-294-3321f7c') -and ($gone -join ',') -eq 'build-301-ac5e41e') ('eviction on disk: left ' + ($left -join ','))
 
@@ -7660,44 +8558,89 @@ if ($SelfTest) {
             $fileHits = { @($hostState.Hits | Where-Object { $_ -match '/download/build-.*\.(bin|pros)$' }).Count }
             $newSync = { @{ Log = (New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]') } }
             $syncLines = { param($S) $o = New-Object System.Collections.Generic.List[string]; $l = $null; while ($S.Log.TryDequeue([ref]$l)) { $o.Add($l) }; ($o.ToArray() -join "`n") }
+            # full-builds.json on the stand-in: the tags given, each with a note. $null takes the file away.
+            $fbUrl = $base + '/full-builds.json'
+            $setFull = {
+                param($Tags)
+                if ($null -eq $Tags) { $hostState.Routes.Remove('/full-builds.json'); return }
+                $json = '{"version":1,"builds":[' + ((@($Tags) | ForEach-Object { '{"tag":"' + $_ + '","note":"note ' + $_ + '"}' }) -join ',') + ']}'
+                $hostState.Routes['/full-builds.json'] = $utf8.GetBytes($json)
+            }
+            # Get latest code the way the window runs it, with this install's own saved full-builds list.
+            $getLatest = {
+                param([string]$Inst, [string]$Selected = '', [string[]]$KeptTags = @(), $SyncObj = $null)
+                New-Item -ItemType Directory -Path $Inst -Force | Out-Null
+                Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $Inst -AssetNames $script:AssetNames -SelectedTag $Selected -FullBuildsUrl $fbUrl -FullBuildsCache (Join-Path $Inst 'full-builds.json') -KeptTags $KeptTags -FullCount 3 -Sync $SyncObj
+            }
+            $storedTags = { param([string]$Inst) (@(Get-StoredBuilds $Inst | ForEach-Object { $_.Tag }) -join ',') }
 
+            # A work session makes several builds; only its last one is a full build. Get latest code brings
+            # the newest build and the last three full builds, never the test builds in between.
             $inst1 = Join-Path $buildRoot 'dl1'
             $t313 = 'build-313-3c15a66'; $t308 = 'build-308-2808722'; $t304 = 'build-304-497d4f7'; $t301 = 'build-301-ac5e41e'
-            [void](& $publish $t301 '2026-11-07T07:19:00Z')
-            [void](& $publish $t304 '2026-11-07T08:48:00Z')
-            [void](& $publish $t308 '2026-11-07T11:01:00Z')
+            $t309 = 'build-309-0909090'; $t310 = 'build-310-1010101'
+            foreach ($pt in @(@($t301, '2026-11-07T07:19:00Z'), @($t304, '2026-11-07T08:48:00Z'), @($t308, '2026-11-07T11:01:00Z'), @($t309, '2026-11-07T11:10:00Z'), @($t310, '2026-11-07T11:20:00Z'))) { [void](& $publish $pt[0] $pt[1]) }
             & $setLatest (& $publish $t313 '2026-11-07T11:36:00Z')
-            & $setAtom @($t313, 'mac-uploader-1.8.1', $t308, $t304, $t301)
+            & $setAtom @($t313, 'mac-uploader-1.8.1', $t310, $t309, $t308, $t304, $t301)
+            & $setFull @($t308, $t304, $t301)
             $s1 = & $newSync
-            $r1 = Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $inst1 -AssetNames $script:AssetNames -Sync $s1
-            $have1 = @(Get-StoredBuilds $inst1 | ForEach-Object { $_.Tag })
-            & $expectB (($r1.Status -eq 'downloaded') -and (@($r1.Downloaded).Count -eq 3) -and (($have1 -join ',') -eq ($t313 + ',' + $t308 + ',' + $t304))) ('download: first run should store 313, 308, 304, got ' + $r1.Status + ' ' + ($have1 -join ',') + ' ' + $r1.Error + ' ' + (& $syncLines $s1))
+            $r1 = & $getLatest $inst1 '' @() $s1
+            & $expectB (($r1.Status -eq 'downloaded') -and (@($r1.Downloaded).Count -eq 4) -and ((& $storedTags $inst1) -eq ($t313 + ',' + $t308 + ',' + $t304 + ',' + $t301)) -and ($r1.FullStatus -eq 'ok')) ('download: first run should store the newest 313 and full builds 308, 304, 301, got ' + $r1.Status + ' ' + (& $storedTags $inst1) + ' ' + $r1.Error + ' ' + (& $syncLines $s1))
+            & $expectB ((-not (Test-Path (Join-Path $inst1 ('builds\' + $t310)))) -and (-not (Test-Path (Join-Path $inst1 ('builds\' + $t309))))) 'download: test builds between full builds are not downloaded'
+            & $expectB (@(@($hostState.Hits) | Where-Object { $_ -like '/full-builds.json?t=*' }).Count -ge 1) 'download: full-builds.json is asked for with a cache-busting query'
+            & $expectB (((Read-FullBuildsCache (Join-Path $inst1 'full-builds.json')).Builds | ForEach-Object { $_.Tag }) -join ',' -eq ($t308 + ',' + $t304 + ',' + $t301)) 'download: the full-builds list is saved next to selected.json'
             & $expectB ((Test-Path (Join-Path $inst1 ('builds\' + $t313 + '\tester\bin\hot.package.bin'))) -and (Test-Path (Get-ReleaseAssetPath -Root (Join-Path $inst1 ('builds\' + $t308)) -AssetName 'autopath-hot.package.bin')) -and (Test-Path (Get-ReleaseAssetPath -Root (Join-Path $inst1 ('builds\' + $t308)) -AssetName 'drive-test-hot.package.bin'))) 'download: tester and mode files should be stored per build'
             & $expectB (-not (@(Get-ChildItem (Join-Path $inst1 'builds') -Directory | Where-Object { $_.Name -match '\.(download|old)$' }).Count)) 'download: no .download folder should be left behind'
             & $expectB (((& $sha (Join-Path $inst1 ('builds\' + $t308 + '\bin\hot.package.bin'))) -eq (& $sha256Of ($utf8.GetBytes($t308 + '|hot.package.bin')))) -and ((Get-StoredBuilds $inst1)[1].BuiltAt -eq '2026-11-07T11:01:00Z')) 'download: a stored build should hold its own bytes and its own build time'
             $hitsBefore = & $fileHits
-            $r2 = Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $inst1 -AssetNames $script:AssetNames -SelectedTag $t313
+            $r2 = & $getLatest $inst1 $t313
             & $expectB (($r2.Status -eq 'current') -and (@($r2.Downloaded).Count -eq 0) -and ((& $fileHits) -eq $hitsBefore)) ('download: a second run should fetch no file, got ' + $r2.Status + ' with ' + ((& $fileHits) - $hitsBefore) + ' file requests')
 
-            # A new build comes out: only it downloads, and the oldest goes.
-            $t320 = 'build-320-9999999'
-            & $setLatest (& $publish $t320 '2026-11-08T09:00:00Z')
-            & $setAtom @($t320, $t313, $t308, $t304, $t301)
+            # Four more pushes in one session (320 to 323); the session's last build, 323, is not listed yet.
+            # Only the newest comes down. A build left from 2.7.0 (299) that nothing lists goes; the picked one stays.
+            $t320 = 'build-320-2020202'; $t321 = 'build-321-2121212'; $t322 = 'build-322-2222222'; $t323 = 'build-323-2323232'; $t299 = 'build-299-9999999'
+            foreach ($pt in @(@($t320, '2026-11-08T09:00:00Z'), @($t321, '2026-11-08T09:10:00Z'), @($t322, '2026-11-08T09:20:00Z'))) { [void](& $publish $pt[0] $pt[1]) }
+            & $setLatest (& $publish $t323 '2026-11-08T09:30:00Z')
+            [void](& $mkBuild $inst1 $t299 '2026-11-06T00:00:00Z')
             $hitsBefore = & $fileHits
-            $r3 = Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $inst1 -AssetNames $script:AssetNames -SelectedTag $t313
-            $have3 = @(Get-StoredBuilds $inst1 | ForEach-Object { $_.Tag })
-            & $expectB (($r3.Status -eq 'downloaded') -and (($r3.Downloaded -join ',') -eq $t320) -and (($have3 -join ',') -eq ($t320 + ',' + $t313 + ',' + $t308)) -and (($r3.Evicted -join ',') -eq $t304)) ('download: a new tag should evict the oldest, got ' + ($have3 -join ',') + ', evicted ' + ($r3.Evicted -join ','))
-            $newFiles = (& $fileHits) - $hitsBefore
-            & $expectB ($newFiles -eq $allFiles.Count) ('download: only the new build''s ' + $allFiles.Count + ' files should be fetched, got ' + $newFiles)
-            # The same run with an old build picked on purpose: it stays although it is now outside the newest three.
-            $t325 = 'build-325-8888888'
-            & $setLatest (& $publish $t325 '2026-11-08T12:00:00Z')
-            & $setAtom @($t325, $t320, $t313, $t308)
-            $r4 = Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $inst1 -AssetNames $script:AssetNames -SelectedTag $t308
-            $have4 = @(Get-StoredBuilds $inst1 | ForEach-Object { $_.Tag })
-            & $expectB (($have4 -join ',') -eq ($t325 + ',' + $t320 + ',' + $t313 + ',' + $t308)) ('download: the picked old build should be kept as a fourth, got ' + ($have4 -join ','))
-            $r5 = Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $inst1 -AssetNames $script:AssetNames -SelectedTag $t320
-            & $expectB ((@(Get-StoredBuilds $inst1).Count -eq 3) -and ($r5.Status -eq 'current') -and (-not (Test-Path (Join-Path $inst1 ('builds\' + $t308))))) 'download: once the old pick is let go it should be trimmed on the next run'
+            $r3 = & $getLatest $inst1 $t313
+            & $expectB (($r3.Status -eq 'downloaded') -and (($r3.Downloaded -join ',') -eq $t323) -and ((& $storedTags $inst1) -eq ($t323 + ',' + $t313 + ',' + $t308 + ',' + $t304 + ',' + $t301)) -and (($r3.Evicted -join ',') -eq $t299)) ('download: the newest test build comes down, the picked 313 stays, 299 goes, got ' + (& $storedTags $inst1) + ', evicted ' + ($r3.Evicted -join ','))
+            & $expectB (((& $fileHits) - $hitsBefore) -eq $allFiles.Count) ('download: only the new build''s ' + $allFiles.Count + ' files should be fetched, got ' + ((& $fileHits) - $hitsBefore))
+            # A kept build stays when it is neither picked, newest, nor full.
+            $r4 = & $getLatest $inst1 $t323 @($t313)
+            & $expectB (((& $storedTags $inst1) -eq ($t323 + ',' + $t313 + ',' + $t308 + ',' + $t304 + ',' + $t301)) -and (@($r4.Evicted).Count -eq 0)) ('download: a kept build must stay, got ' + (& $storedTags $inst1))
+            # Once it is let go, it goes on the next run.
+            $r5 = & $getLatest $inst1 $t323
+            & $expectB (((& $storedTags $inst1) -eq ($t323 + ',' + $t308 + ',' + $t304 + ',' + $t301)) -and (($r5.Evicted -join ',') -eq $t313)) ('download: an unkept, unpicked old build goes, got ' + (& $storedTags $inst1))
+            # The session ends: 323 is listed as a full build. The last three full builds are now 323, 308, 304,
+            # so 301 goes; 323 is the newest and is not counted twice.
+            & $setFull @($t301, $t323, $t304, $t308)
+            $r6 = & $getLatest $inst1 $t323
+            & $expectB (((& $storedTags $inst1) -eq ($t323 + ',' + $t308 + ',' + $t304)) -and (($r6.Evicted -join ',') -eq $t301)) ('download: the last three full builds are what stays, got ' + (& $storedTags $inst1))
+            # A full build that is not here yet (an older one listed later) is fetched on the next run.
+            & $setFull @($t323, $t308, $t310, $t304)
+            $r7 = & $getLatest $inst1 $t323
+            & $expectB ((($r7.Downloaded -join ',') -eq $t310) -and ((& $storedTags $inst1) -eq ($t323 + ',' + $t310 + ',' + $t308)) -and (($r7.Evicted -join ',') -eq $t304)) ('download: a newly listed full build should come down and the fourth go, got ' + (& $storedTags $inst1))
+            # A busy build never goes: Remove-OldBuilds itself refuses while busy.
+            & $expectB ((@(Remove-OldBuilds -InstallDir $inst1 -Protect @() -Busy $true).Count -eq 0) -and ((& $storedTags $inst1) -eq ($t323 + ',' + $t310 + ',' + $t308))) 'download: nothing is removed while busy'
+
+            # The published list cannot be read: the saved copy is used. A damaged published copy is not saved over it.
+            [System.IO.File]::WriteAllText((Join-Path $inst1 'full-builds.json'), ('{"version":1,"builds":[{"tag":"' + $t323 + '","note":"a"},{"tag":"' + $t308 + '","note":"b"},{"tag":"' + $t310 + '","note":"c"}]}'), $utf8)
+            $hostState.Routes['/full-builds.json'] = $utf8.GetBytes('{ "builds": [ broken')
+            $s5 = & $newSync
+            $r8 = & $getLatest $inst1 $t323 @() $s5
+            & $expectB (($r8.Status -eq 'current') -and ($r8.FullStatus -eq 'cache') -and ((& $storedTags $inst1) -eq ($t323 + ',' + $t310 + ',' + $t308)) -and ((& $syncLines $s5) -like '*saved list*')) ('download: a damaged published list should fall back to the saved copy, got ' + $r8.FullStatus + ' ' + (& $storedTags $inst1))
+            & $expectB (((Read-FullBuildsCache (Join-Path $inst1 'full-builds.json')).Builds.Count -eq 3)) 'download: a damaged published list must not replace the saved copy'
+            & $setFull $null
+            $r9 = & $getLatest $inst1 $t323
+            & $expectB (($r9.Status -eq 'current') -and ($r9.FullStatus -eq 'cache')) 'download: a missing published list should fall back to the saved copy'
+            # No published list and no saved copy: the newest still comes down, nothing is removed, and Details says why.
+            $inst4 = Join-Path $buildRoot 'dl4'
+            [void](& $mkBuild $inst4 $t299 '2026-11-06T00:00:00Z')
+            $s4 = & $newSync
+            $r10 = & $getLatest $inst4 '' @() $s4
+            $log4 = & $syncLines $s4
+            & $expectB (($r10.Status -eq 'downloaded') -and ($r10.FullStatus -eq 'none') -and ((& $storedTags $inst4) -eq ($t323 + ',' + $t299)) -and ($log4 -like '*Full builds unavailable*') -and ($log4 -like '*No old builds were removed*')) ('download: with no full-builds list only the newest should come down and nothing go, got ' + (& $storedTags $inst4) + ' / ' + $log4)
 
             # One damaged file fails only its own build.
             $inst2 = Join-Path $buildRoot 'dl2'
@@ -7705,39 +8648,69 @@ if ($SelfTest) {
             [void](& $publish $t330 '2026-11-09T01:00:00Z')
             [void](& $publish $t335 '2026-11-09T02:00:00Z' 'cold.package.bin')
             & $setLatest (& $publish $t340 '2026-11-09T03:00:00Z')
-            & $setAtom @($t340, $t335, $t330)
+            & $setFull @($t340, $t335, $t330)
             $s2 = & $newSync
-            $r6 = Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $inst2 -AssetNames $script:AssetNames -Sync $s2
-            $have6 = @(Get-StoredBuilds $inst2 | ForEach-Object { $_.Tag })
-            & $expectB (($r6.Status -eq 'downloaded') -and (($have6 -join ',') -eq ($t340 + ',' + $t330)) -and $r6.Failed.ContainsKey($t335) -and ($r6.Failed[$t335] -like '*SHA-256*')) ('download: a damaged older build should fail alone, got ' + ($have6 -join ',') + ' ' + ($r6.Failed.Keys -join ','))
+            $r11 = & $getLatest $inst2 '' @() $s2
+            & $expectB (($r11.Status -eq 'downloaded') -and ((& $storedTags $inst2) -eq ($t340 + ',' + $t330)) -and $r11.Failed.ContainsKey($t335) -and ($r11.Failed[$t335] -like '*SHA-256*')) ('download: a damaged full build should fail alone, got ' + (& $storedTags $inst2) + ' ' + ($r11.Failed.Keys -join ','))
             & $expectB (-not (Test-Path (Join-Path $inst2 ('builds\' + $t335 + '*')))) 'download: the damaged build should leave no folder behind'
             & $expectB ((& $syncLines $s2) -like ('*' + $t335 + '*')) 'download: the Details log should name the build that failed'
             # The next run, with the file fixed, fetches just that build.
             [void](& $publish $t335 '2026-11-09T02:00:00Z')
             $hitsBefore = & $fileHits
-            $r7 = Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $inst2 -AssetNames $script:AssetNames
-            & $expectB (((@(Get-StoredBuilds $inst2).Count) -eq 3) -and (($r7.Downloaded -join ',') -eq $t335) -and (((& $fileHits) - $hitsBefore) -eq $allFiles.Count)) 'download: after the fix only the failed build should be fetched'
+            $r12 = & $getLatest $inst2
+            & $expectB (((@(Get-StoredBuilds $inst2).Count) -eq 3) -and (($r12.Downloaded -join ',') -eq $t335) -and (((& $fileHits) - $hitsBefore) -eq $allFiles.Count)) 'download: after the fix only the failed build should be fetched'
             # A damaged newest build is an error, and the builds already stored are left alone.
             $inst3 = Join-Path $buildRoot 'dl3'
             [void](& $mkBuild $inst3 $t330 '2026-11-09T01:00:00Z')
-            [void](& $publish $t340 '2026-11-09T03:00:00Z' 'hot.package.bin')
+            [void](& $mkBuild $inst3 $t299 '2026-11-06T00:00:00Z')
             & $setLatest (& $publish $t340 '2026-11-09T03:00:00Z' 'hot.package.bin')
-            & $setAtom @($t340, $t330)
-            $r8 = Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $inst3 -AssetNames $script:AssetNames
-            & $expectB (($r8.Status -eq 'error') -and ($r8.Error -like '*SHA-256*') -and (@(Get-StoredBuilds $inst3 | ForEach-Object { $_.Tag }) -join ',') -eq $t330) 'download: a damaged newest build should be an error that leaves stored builds alone'
-            # No feed: only the newest is fetched, the status stays calm, and Details says why.
-            $inst4 = Join-Path $buildRoot 'dl4'
+            $r13 = & $getLatest $inst3
+            & $expectB (($r13.Status -eq 'error') -and ($r13.Error -like '*SHA-256*') -and (@($r13.Evicted).Count -eq 0) -and ((& $storedTags $inst3) -eq ($t335 + ',' + $t330 + ',' + $t299))) ('download: a damaged newest build should be an error that removes nothing (the full builds still come down), got ' + (& $storedTags $inst3))
+            [void](& $publish $t340 '2026-11-09T03:00:00Z')
             & $setLatest (& $publish $t340 '2026-11-09T03:00:00Z')
-            $hostState.Routes.Remove('/releases.atom')
-            $s4 = & $newSync
-            $r9 = Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $inst4 -AssetNames $script:AssetNames -Sync $s4
-            & $expectB (($r9.Status -eq 'downloaded') -and (@(Get-StoredBuilds $inst4).Count -eq 1) -and ($r9.Failed.Count -eq 0) -and ((& $syncLines $s4) -like '*Earlier builds unavailable*')) 'download: without the feed only the newest build should be stored, quietly'
-            # An older build whose release.json is missing is skipped, not fatal.
+            # A full build whose release.json is missing is skipped, not fatal.
             $inst5 = Join-Path $buildRoot 'dl5'
             $hostState.Routes.Remove('/releases/download/' + $t335 + '/release.json')
-            & $setAtom @($t340, $t335, $t330)
-            $r10 = Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $inst5 -AssetNames $script:AssetNames
-            & $expectB (($r10.Status -eq 'downloaded') -and ((@(Get-StoredBuilds $inst5 | ForEach-Object { $_.Tag }) -join ',') -eq ($t340 + ',' + $t330)) -and $r10.Failed.ContainsKey($t335)) 'download: an older build with no release.json should be skipped'
+            $r14 = & $getLatest $inst5
+            & $expectB (($r14.Status -eq 'downloaded') -and ((& $storedTags $inst5) -eq ($t340 + ',' + $t330)) -and $r14.Failed.ContainsKey($t335)) 'download: a full build with no release.json should be skipped'
+
+            # One build by tag (Older build..., or a listed build not here yet): checked against its own release.json, nothing removed.
+            $one = Save-OneBuild -ReleasesUrl $relUrl -InstallDir $inst5 -AssetNames $script:AssetNames -Tag $t309
+            & $expectB ((@('downloaded') -contains $one.Status) -and ($one.Tag -eq $t309) -and ((& $storedTags $inst5) -eq ($t340 + ',' + $t330 + ',' + $t309)) -and ((& $sha (Join-Path $inst5 ('builds\' + $t309 + '\bin\cold.package.bin'))) -eq (& $sha256Of ($utf8.GetBytes($t309 + '|cold.package.bin'))))) ('one build: 309 should be stored and checked, got ' + $one.Status + ' ' + $one.Error + ' ' + (& $storedTags $inst5))
+            [void](& $publish $t321 '2026-11-08T09:10:00Z' 'project.pros')
+            $one = Save-OneBuild -ReleasesUrl $relUrl -InstallDir $inst5 -AssetNames $script:AssetNames -Tag $t321
+            & $expectB (($one.Status -eq 'error') -and ($one.Error -like '*SHA-256*') -and (-not (Test-Path (Join-Path $inst5 ('builds\' + $t321 + '*'))))) 'one build: a damaged older build is refused and leaves no folder'
+            $one = Save-OneBuild -ReleasesUrl $relUrl -InstallDir $inst5 -AssetNames $script:AssetNames -Tag $t335
+            & $expectB (($one.Status -eq 'error') -and ($one.Tag -eq $t335) -and ($one.Error -like '*no release information*')) 'one build: a build with no release.json cannot be checked, so it is refused'
+            $one = Save-OneBuild -ReleasesUrl $relUrl -InstallDir $inst5 -AssetNames $script:AssetNames -Tag '..\x'
+            & $expectB ($one.Status -eq 'error') 'one build: a tag that is a path is refused'
+            # A picked older build stays until the next Get latest code, which removes it unless it is picked or kept.
+            $r15 = & $getLatest $inst5
+            & $expectB ((& $storedTags $inst5) -eq ($t340 + ',' + $t330)) ('one build: the next Get latest code removes an older build nobody picked or kept, got ' + (& $storedTags $inst5))
+
+            # The Older build list: the GitHub API first, the releases feed when the API fails.
+            $apiUrl = $base + '/api/releases?per_page=100'
+            $apiJson = '[{"tag_name":"build-313-3c15a66","published_at":"2026-11-07T17:36:00Z","draft":false},{"tag_name":"mac-uploader-1.8.1","published_at":"2026-11-07T10:00:00Z","draft":false},' +
+                '{"tag_name":"build-320-2020202","published_at":"2026-11-08T09:00:00Z","draft":false},{"tag_name":"build-399-3999999","published_at":null,"draft":true},' +
+                '{"tag_name":"build-308-2808722","published_at":"2026-11-07T17:01:00Z","draft":false},{"tag_name":"build-313-3c15a66","published_at":"2026-11-07T17:36:00Z","draft":false}]'
+            $hostState.Routes['/api/releases'] = $utf8.GetBytes($apiJson)
+            $atomU = { param([string]$Tag, [string]$When) '<entry><id>tag:github.com,2008:Repository/1430563935/' + $Tag + '</id><updated>' + $When + '</updated><link rel="alternate" type="text/html" href="https://github.com/Whyater/40217S-Uploader/releases/tag/' + $Tag + '"/><title>x</title></entry>' }
+            $hostState.Routes['/releases.atom'] = $utf8.GetBytes('<feed>' + (& $atomU $t323 '2026-11-08T09:30:00Z') + (& $atomU 'mac-uploader-1.8.1' '2026-11-07T10:00:00Z') + (& $atomU $t322 '2026-11-08T09:20:00Z') + '</feed>')
+            $lst = Get-ReleaseBuildList -ApiUrl $apiUrl -ReleasesUrl $relUrl
+            & $expectB (($lst.Status -eq 'ok') -and ($lst.Source -eq 'api') -and ((@($lst.Builds | ForEach-Object { $_.Tag }) -join ',') -eq 'build-320-2020202,build-313-3c15a66,build-308-2808722') -and ($lst.Builds[1].BuiltAt -like '2026-11-07*')) ('older list: the API list should give 320, 313, 308 with dates, no drafts or Mac releases, got ' + $lst.Source + ' ' + (@($lst.Builds | ForEach-Object { $_.Tag }) -join ','))
+            $hostState.Routes.Remove('/api/releases')
+            $lst = Get-ReleaseBuildList -ApiUrl $apiUrl -ReleasesUrl $relUrl
+            & $expectB (($lst.Status -eq 'ok') -and ($lst.Source -eq 'atom') -and $lst.ApiError -and ((@($lst.Builds | ForEach-Object { $_.Tag }) -join ',') -eq ($t323 + ',' + $t322)) -and ($lst.Builds[0].BuiltAt -eq '2026-11-08T09:30:00Z')) ('older list: a failed API should fall back to the feed with its dates, got ' + $lst.Source + ' ' + (@($lst.Builds | ForEach-Object { $_.Tag + '@' + $_.BuiltAt }) -join ','))
+            $hostState.Routes['/api/releases'] = $utf8.GetBytes('{"message":"API rate limit exceeded for 1.2.3.4."}')
+            $lst = Get-ReleaseBuildList -ApiUrl $apiUrl -ReleasesUrl $relUrl
+            & $expectB (($lst.Status -eq 'ok') -and ($lst.Source -eq 'atom')) 'older list: an API answer that is not a list (a rate-limit message) should fall back to the feed'
+            $hostState.Routes['/api/releases'] = $utf8.GetBytes('[]')
+            $lst = Get-ReleaseBuildList -ApiUrl $apiUrl -ReleasesUrl $relUrl
+            & $expectB ($lst.Source -eq 'atom') 'older list: an API list with no builds should fall back to the feed'
+            $hostState.Routes.Remove('/releases.atom')
+            $lst = Get-ReleaseBuildList -ApiUrl $apiUrl -ReleasesUrl $relUrl
+            & $expectB (($lst.Status -eq 'error') -and $lst.Error) 'older list: no API and no feed is an error'
+            $hostState.Routes.Remove('/api/releases')
 
             # The Route Map asks for the picked build's prediction and keeps a copy per build.
             $mapFolder = Join-Path $buildRoot 'docs'
@@ -7763,10 +8736,10 @@ if ($SelfTest) {
             & $expectB (($c3.Status -eq 'ok') -and ($c3.Build -eq $t313)) 'map cache: the old single copy should be the fallback for the build it predicts'
             $c4 = & $readCache @{ Path = (Get-CloudCachePath 'build-999-0000000'); LegacyPath = (Get-CloudCachePath); Build = 'build-999-0000000' }
             & $expectB ($c4.Status -eq 'none') 'map cache: the old single copy must not be shown for a different build'
-            # A removed build's saved prediction goes; stored builds keep theirs.
+            # A removed build's saved prediction goes; stored builds keep theirs (dl1 now holds 323, 310, 308; 313 went).
             $InstallDir = $inst1
             try { Remove-StaleMapCaches } finally { $InstallDir = $savedInstallDir }
-            & $expectB ((-not (Test-Path (Join-Path $mapFolder ('map-cloud-' + $t308 + '.json')))) -and (Test-Path (Join-Path $mapFolder ('map-cloud-' + $t313 + '.json')))) 'map cache: a removed build''s copy should be pruned and a stored build''s kept'
+            & $expectB ((-not (Test-Path (Join-Path $mapFolder ('map-cloud-' + $t313 + '.json')))) -and (Test-Path (Join-Path $mapFolder ('map-cloud-' + $t308 + '.json')))) 'map cache: a removed build''s copy should be pruned and a stored build''s kept'
             & $expectB ((Get-CloudCachePath 'build-308-2808722') -eq (Join-Path $mapFolder 'map-cloud-build-308-2808722.json') -and (Get-CloudCachePath '..\x') -eq (Join-Path $mapFolder 'map-cloud.json')) 'map cache: a tag that is a path must not become a file name'
         }
 
@@ -7793,7 +8766,7 @@ if ($SelfTest) {
         Remove-Item -LiteralPath $buildRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
     if ($buildFails.Count -eq 0) {
-        Write-Host '  Builds on this computer: OK'
+        Write-Host ('  Builds on this computer: OK (' + $script:BuildChecks + ' checks)')
     } else {
         foreach ($bf in $buildFails) { $failures.Add('builds: ' + $bf) }
         Write-Host ('  Builds on this computer: FAIL (' + ($buildFails -join '; ') + ')')
@@ -7819,12 +8792,17 @@ if ($SelfTest) {
             Write-Host ('  Screenshot saved: ' + $env:SCOURGE_SCREENSHOT)
             $testForm.Hide()
         }
-        # The build drop-down. It shows from two builds up, lists them with their build times, and a pick moves
-        # the title, the upload folder, and the saved pick to that build. The Route Map reload is replaced by a
-        # counter here; the real one is checked against a stand-in service above.
+        # The build drop-down: NEWEST, FULL BUILDS, KEPT and ON THIS COMPUTER rows, then Older build.... A pick
+        # moves the title, the upload folder, and the saved pick to that build; keep, rename, and stop keeping
+        # go through kept.json. The Route Map reload, the name dialog, and the downloads are replaced by
+        # stand-ins here; the real downloads are checked against a stand-in service above.
         $pickUi = New-Object System.Collections.Generic.List[string]
+        $script:PickChecks = 0
+        $expectP = { param($ok, $what) $script:PickChecks++; if (-not $ok) { $pickUi.Add($what) } }
         $savedInstUi = $InstallDir; $savedSelUi = $script:SelectedFile; $savedLatestUi = $script:LatestTag
         $savedTagUi = $script:SelectedTag; $savedInstalledUi = $script:InstalledTag; $savedSwitchUi = ${function:Switch-CloudBuild}
+        $savedKeptUi = $script:Kept; $savedKeptDamagedUi = $script:KeptDamaged; $savedFullUi = $script:FullBuilds; $savedFullKnownUi = $script:FullKnown
+        $savedNameDlg = ${function:Show-NameDialog}; $savedOlderFn = ${function:Start-OlderBuildList}; $savedOneFn = ${function:Start-OneBuildDownload}
         $uiRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('scourge-picker-' + [Guid]::NewGuid().ToString('N'))
         try {
             $ui = $script:Ui
@@ -7846,109 +8824,234 @@ if ($SelfTest) {
                 $ver = @{ tag = $Tag; name = $Tag; notes = ('Built from ' + $Tag.Substring($Tag.Length - 7) + ': test'); built_at = $BuiltAt; downloaded_at = '2026-11-09T00:00:00Z' }
                 [System.IO.File]::WriteAllText((Join-Path $dir 'version.json'), ($ver | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
             }
+            & $uiMake 'build-320-2020202' '2026-11-08T16:00:00Z'
             & $uiMake 'build-313-3c15a66' '2026-11-07T17:36:00Z'
             & $uiMake 'build-308-2808722' '2026-11-07T17:01:00Z'
             & $uiMake 'build-304-497d4f7' '2026-11-07T14:48:00Z'
+            & $uiMake 'build-294-3321f7c' '2026-11-07T11:41:00Z'
+            $utf8Ui = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText((Join-Path $uiRoot 'full-builds.json'), '{"version":1,"builds":[{"tag":"build-294-3321f7c","note":"Optical sensor LEDs on in every program"},{"tag":"build-313-3c15a66","note":"RECF: right Goal + roller, preload aimed 0.6 in left"},{"tag":"build-283-5c76fff","note":"AWP: 2nd cup and pin lowered onto the 1st"}]}', $utf8Ui)
+            [System.IO.File]::WriteAllText((Join-Path $uiRoot 'kept.json'), '{"version":1,"kept":{"build-308-2808722":{"name":"Practice auton"}}}', $utf8Ui)
             $InstallDir = $uiRoot
             $script:SelectedFile = Join-Path $uiRoot 'selected.json'
             $script:SwitchCalls = 0
             ${function:Switch-CloudBuild} = { $script:SwitchCalls++ }
             Initialize-Builds
-            $script:LatestTag = 'build-313-3c15a66'
+            $script:LatestTag = 'build-320-2020202'
             Update-BuildInfo
-            if ($script:SelectedTag -ne 'build-313-3c15a66') { $pickUi.Add('with no saved pick the newest build should be picked, got ' + $script:SelectedTag) }
-            if (($ui.BuildBox.Items.Count -ne 3) -or (-not (& $ownVisible $ui.BuildBox)) -or (& $ownVisible $ui.BuildTitle)) { $pickUi.Add('three builds should show the drop-down in the title''s place') }
-            if ($ui.BuildBox.Items.Count -eq 3) {
-                if (($ui.BuildBox.Items[0] -notlike 'Build 313 (latest)*') -or ($ui.BuildBox.Items[1] -notlike 'Build 308 *') -or ($ui.BuildBox.Items[2] -notlike 'Build 304 *') -or ($ui.BuildBox.Items[1] -like '*latest*')) { $pickUi.Add('drop-down items were: ' + (@($ui.BuildBox.Items) -join ' | ')) }
-                if (($ui.BuildBox.Items[1] -notmatch '[A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2} [AP]M$')) { $pickUi.Add('an item should end with the build time, got: ' + $ui.BuildBox.Items[1]) }
+            & $expectP ($script:SelectedTag -eq 'build-320-2020202') ('with no saved pick the newest build should be picked, got ' + $script:SelectedTag)
+            & $expectP (($ui.BuildBox.Items.Count -eq 7) -and (& $ownVisible $ui.BuildBox) -and (-not (& $ownVisible $ui.BuildTitle))) ('five stored builds, one listed full build not here, and Older build... should make 7 rows in the drop-down, got ' + $ui.BuildBox.Items.Count)
+            if ($ui.BuildBox.Items.Count -eq 7) {
+                & $expectP (($ui.BuildBox.Items[0] -like 'Build 320   * newest, test build') -and ($ui.BuildBox.Items[1] -like 'Build 313   *RECF: right Goal*') -and ($ui.BuildBox.Items[3] -like 'Build 283   Not downloaded   AWP*') -and ($ui.BuildBox.Items[4] -like 'Build 308   *Practice auton') -and ($ui.BuildBox.Items[5] -like 'Build 304   *') -and ($ui.BuildBox.Items[6] -eq 'Older build...')) ('drop-down rows were: ' + (@($ui.BuildBox.Items) -join ' | '))
+                & $expectP ((@($script:PickerEntries | ForEach-Object { $_.Header }) -join '|') -eq 'NEWEST|FULL BUILDS|||KEPT|ON THIS COMPUTER|') 'each group should be named above its first row'
             }
-            if ($ui.BuildBox.SelectedIndex -ne 0) { $pickUi.Add('the picked build should show selected') }
+            & $expectP ($ui.BuildBox.SelectedIndex -eq 0) 'the picked build should show selected'
             # Same left edge and height as the Mode box below, and clear of the Get latest code button.
-            if (($ui.BuildBox.Left -ne $ui.ModeBox.Left) -or ($ui.BuildBox.Height -ne $ui.ModeBox.Height) -or ($ui.BuildBox.Right -gt $ui.GetButton.Left)) { $pickUi.Add('drop-down box ' + $ui.BuildBox.Bounds + ' should line up with the Mode box ' + $ui.ModeBox.Bounds + ' and stop before the button ' + $ui.GetButton.Bounds) }
-            if ($ui.BuildBox.Font.Name -ne $ui.ModeBox.Font.Name -or $ui.BuildBox.Font.Size -ne $ui.ModeBox.Font.Size -or $ui.BuildBox.DropDownStyle -ne $ui.ModeBox.DropDownStyle) { $pickUi.Add('the drop-down should use the Mode box''s font and style') }
-            if ($script:NoticeShown) { $pickUi.Add('all three newest builds are here, so there should be no newer-code notice') }
-            $sizeWithPicker = $script:UploadLayoutSize
+            & $expectP (($ui.BuildBox.Left -eq $ui.ModeBox.Left) -and ($ui.BuildBox.Height -eq $ui.ModeBox.Height) -and ($ui.BuildBox.Right -le $ui.GetButton.Left)) ('drop-down box ' + $ui.BuildBox.Bounds + ' should line up with the Mode box ' + $ui.ModeBox.Bounds + ' and stop before the button ' + $ui.GetButton.Bounds)
+            & $expectP (($ui.BuildBox.Font.Name -eq $ui.ModeBox.Font.Name) -and ($ui.BuildBox.Font.Size -eq $ui.ModeBox.Font.Size) -and ($ui.BuildBox.DropDownStyle -eq $ui.ModeBox.DropDownStyle)) 'the drop-down should use the Mode box''s font and style'
+            & $expectP ((& $ownVisible $ui.KeepLink) -and (-not (& $ownVisible $ui.RenameLink)) -and (-not (& $ownVisible $ui.UnkeepLink))) 'a build that is not kept should offer Keep this build... only'
+            & $expectP (($ui.KeepLink.Top -ge $ui.BuildMeta.Bottom) -and ($ui.KeepLink.Bottom -le $ui.MidLine.Top)) ('the keep link ' + $ui.KeepLink.Bounds + ' should sit under the details ' + $ui.BuildMeta.Bounds + ' and above the line ' + $ui.MidLine.Bounds)
+            & $expectP (-not $script:NoticeShown) 'the newest build is here, so there should be no newer-code notice'
+            # Pick 313.
+            $ui.BuildBox.SelectedIndex = 1
+            & $expectP ($script:InstalledTag -eq 'build-313-3c15a66') ('picking 313 left the picked build at ' + $script:InstalledTag)
+            & $expectP (($script:ProjectDir -eq (Join-Path $uiRoot 'builds\build-313-3c15a66')) -and ((Read-SelectedTag $script:SelectedFile) -eq 'build-313-3c15a66')) 'picking 313 should move the project folder and save the pick'
+            & $expectP (($script:SwitchCalls -eq 1) -and ($ui.Status.Text -eq 'Using Build 313. Ready to upload.')) ('picking 313 should reload the Route Map once and say so, got ' + $script:SwitchCalls + ' and: ' + $ui.Status.Text)
+            & $expectP ($ui.BuildMeta.Text -like '*Commit 3c15a66*') ('the details under the drop-down should be 313''s, got: ' + $ui.BuildMeta.Text)
+            & $expectP ($script:TesterBuildTag -eq 'build-313-3c15a66') ('the tester build named in sent results should follow the picked build, got: ' + $script:TesterBuildTag)
+            $ui.BuildBox.SelectedIndex = 1
+            & $expectP ($script:SwitchCalls -eq 1) 'picking the build that is already picked should not reload anything'
+            # Pick the kept build: its name shows everywhere, with the number.
+            $ui.BuildBox.SelectedIndex = 4
+            & $expectP (($script:SelectedTag -eq 'build-308-2808722') -and ($ui.Status.Text -eq 'Using Practice auton (Build 308). Ready to upload.')) ('picking the kept build should name it, got: ' + $ui.Status.Text)
+            & $expectP ((& $ownVisible $ui.RenameLink) -and (& $ownVisible $ui.UnkeepLink) -and (-not (& $ownVisible $ui.KeepLink))) 'a kept build should offer Rename... and Stop keeping'
+            & $expectP (($ui.BuildTitle.Text -eq 'Practice auton (Build 308)') -and ((Get-BuildTagLabel 'build-308-2808722') -eq 'Practice auton (Build 308)') -and ((Get-BuildTagLabel 'build-313-3c15a66') -eq 'build 313')) ('a kept build''s title and sentence name should be its name with the number, got ' + $ui.BuildTitle.Text)
+            $savedCloudUi = $script:Cloud
+            $script:Cloud = @{ Inited = $true; Code = 'x'; Fetching = $false; Again = $false; Pending = $false; CacheLoaded = $true; Fresh = $true; Offline = $false; Unauthorized = $false; Error = ''
+                Data = @{ Sim = $null; Recorded = $null; Note = ''; RecordedUpdated = '' }; Sessions = @(); Fetched = ''; Route = 'AWP'; Side = 'L'; Keys = '' }
+            try {
+                & $expectP (((Get-MapEmptyText) -like 'No prediction for Practice auton (Build 308) yet.*') -and ((Get-CloudNote) -like '*no prediction for Practice auton (Build 308)*')) ('the Route Map should name the kept build, got: ' + (Get-MapEmptyText) + ' / ' + (Get-CloudNote))
+            } finally { $script:Cloud = $savedCloudUi }
+            & $expectP ($ui.UnkeepLink.Left -gt $ui.RenameLink.Right) 'Stop keeping should sit to the right of Rename...'
+            & $expectP (((Get-UploadBuildText 'build-308-2808722') -eq ' from Practice auton (Build 308)') -and ((Get-UploadBuildText 'build-313-3c15a66') -eq ' build 313') -and ((Get-UploadBuildText 'odd-tag') -eq ' build odd-tag') -and ((Get-UploadBuildText '') -eq '')) ('the upload message should name the build, a kept one by name, got ' + (Get-UploadBuildText 'build-308-2808722'))
+            # Rename, with the dialog replaced by an answer.
+            $script:NameAsk = $null
+            ${function:Show-NameDialog} = { param([string]$Title, [string]$Prompt, [string]$Default, [string]$Action) $script:NameAsk = @{ Title = $Title; Default = $Default; Action = $Action }; return 'Auton v2' }
+            Invoke-RenameBuild
+            & $expectP (($script:NameAsk.Default -eq 'Practice auton') -and ($script:NameAsk.Action -eq 'Rename')) 'Rename... should start from the current name'
+            & $expectP (((Read-KeptBuilds (Join-Path $uiRoot 'kept.json')).Kept['build-308-2808722'] -ceq 'Auton v2') -and ($ui.Status.Text -eq 'Renamed to Auton v2 (Build 308).') -and ($ui.BuildBox.Items[4] -like '*Auton v2')) ('rename should save and show the new name, got: ' + $ui.Status.Text)
+            ${function:Show-NameDialog} = { param([string]$Title, [string]$Prompt, [string]$Default, [string]$Action) return $null }
+            Invoke-RenameBuild
+            & $expectP ((Read-KeptBuilds (Join-Path $uiRoot 'kept.json')).Kept['build-308-2808722'] -ceq 'Auton v2') 'cancelling Rename... should change nothing'
+            Set-KeptName 'build-308-2808722' ('y' * 41)
+            & $expectP (($ui.Status.Text -eq 'Use 40 characters or fewer.') -and ($script:Kept['build-308-2808722'] -ceq 'Auton v2')) ('a name over 40 characters should be refused, got: ' + $ui.Status.Text)
+            # Stop keeping: the build stays while it is picked, and moves to ON THIS COMPUTER.
+            Remove-KeptBuild 'build-308-2808722'
+            $at308 = Get-PickerIndex 'build-308-2808722'
+            & $expectP ((-not (Read-KeptBuilds (Join-Path $uiRoot 'kept.json')).Kept.ContainsKey('build-308-2808722')) -and ($ui.Status.Text -like 'Auton v2 (Build 308) is no longer kept.*') -and ($script:SelectedTag -eq 'build-308-2808722') -and ($at308 -ge 0) -and ($script:PickerEntries[$at308].Group -eq 'other') -and (& $ownVisible $ui.KeepLink)) ('stop keeping should save, keep the build picked, and offer Keep again, got: ' + $ui.Status.Text)
+            # Keep it again: the name offered is "Build 308", and what comes back is trimmed.
+            ${function:Show-NameDialog} = { param([string]$Title, [string]$Prompt, [string]$Default, [string]$Action) $script:NameAsk = @{ Title = $Title; Default = $Default; Action = $Action }; return '  Practice auton  ' }
+            Invoke-KeepBuild
+            & $expectP (($script:NameAsk.Default -eq 'Build 308') -and ($script:NameAsk.Title -eq 'Keep this build')) ('Keep this build... should offer "Build 308", got ' + $script:NameAsk.Default)
+            & $expectP (((Read-KeptBuilds (Join-Path $uiRoot 'kept.json')).Kept['build-308-2808722'] -ceq 'Practice auton') -and ($ui.Status.Text -eq 'Kept Practice auton (Build 308). Get latest code will not remove it.') -and ($script:PickerEntries[(Get-PickerIndex 'build-308-2808722')].Group -eq 'kept')) ('keep should save the trimmed name and move the row to KEPT, got: ' + $ui.Status.Text)
+            Write-Host ('  Upload view height: ' + $script:UploadLayoutSize.Height + ' with the drop-down and keep links (Details open, ' + $script:Scale + 'x scale)')
+
+            # Pictures: the window, the open list, and both dialogs.
             if ($env:SCOURGE_SCREENSHOT) {
-                $buildShot = Join-Path (Split-Path $env:SCOURGE_SCREENSHOT -Parent) 'uploader-window-builds.png'
+                $shotDirP = Split-Path $env:SCOURGE_SCREENSHOT -Parent
                 $testForm.Show()
                 [System.Windows.Forms.Application]::DoEvents()
                 $testForm.Refresh()
-                $bmp = New-Object System.Drawing.Bitmap $testForm.Width, $testForm.Height
-                $testForm.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle 0, 0, $testForm.Width, $testForm.Height))
-                $bmp.Save($buildShot, [System.Drawing.Imaging.ImageFormat]::Png)
-                $bmp.Dispose()
-                Write-Host ('  Build drop-down screenshot saved: ' + $buildShot)
-                # The open list is a separate pop-up window that DrawToBitmap leaves out, so it is copied off the screen.
+                $formBmp = New-Object System.Drawing.Bitmap $testForm.Width, $testForm.Height
+                $testForm.DrawToBitmap($formBmp, (New-Object System.Drawing.Rectangle 0, 0, $testForm.Width, $testForm.Height))
+                $formBmp.Save((Join-Path $shotDirP 'uploader-window-builds.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+                Write-Host ('  Build drop-down screenshot saved: ' + (Join-Path $shotDirP 'uploader-window-builds.png'))
+                # The open list drawn by the same code that paints the real one, under the box, as Windows shows it.
+                # This needs no screen (CI and a service session have none to copy the real pop-up from).
+                # DrawToBitmap leaves every drop-down's closed box empty, so the build box's is painted the way
+                # WinForms asks for it: DrawItem with the ComboBoxEdit state, inside the frame and left of the arrow.
                 try {
-                    $testForm.Show()
-                    [System.Windows.Forms.Application]::DoEvents()
-                    $ui.BuildBox.DroppedDown = $true
-                    [System.Windows.Forms.Application]::DoEvents()
-                    Start-Sleep -Milliseconds 500
-                    [System.Windows.Forms.Application]::DoEvents()
-                    $openShot = Join-Path (Split-Path $env:SCOURGE_SCREENSHOT -Parent) 'uploader-window-builds-open.png'
-                    $bmp = New-Object System.Drawing.Bitmap $testForm.Width, ($testForm.Height + 40)
-                    $gr = [System.Drawing.Graphics]::FromImage($bmp)
-                    $gr.CopyFromScreen($testForm.Left, $testForm.Top, 0, 0, $bmp.Size)
-                    $gr.Dispose()
-                    $bmp.Save($openShot, [System.Drawing.Imaging.ImageFormat]::Png)
-                    $bmp.Dispose()
-                    Write-Host ('  Build drop-down (open) screenshot saved: ' + $openShot)
+                    $box = $ui.BuildBox
+                    $origin = $testForm.PointToScreen((New-Object System.Drawing.Point(0, 0)))
+                    $ox = $origin.X - $testForm.Left
+                    $oy = $origin.Y - $testForm.Top
+                    $x0 = $ox + $box.Left
+                    $y0 = $oy + $box.Bottom
+                    $listW = $box.DropDownWidth
+                    $listH = 2
+                    for ($ri = 0; $ri -lt $script:PickerEntries.Count; $ri++) { $listH += Get-PickerRowHeight $ri }
+                    # 24-bit, so GDI text draws as it does on screen.
+                    $canvas = New-Object System.Drawing.Bitmap ([math]::Max($testForm.Width, $x0 + $listW + 8)), ([math]::Max($testForm.Height, $y0 + $listH + 8)), ([System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+                    $cg = [System.Drawing.Graphics]::FromImage($canvas)
+                    $cg.Clear($script:Colors.Back)
+                    $cg.DrawImage($formBmp, 0, 0)
+                    $editRect = New-Object System.Drawing.Rectangle(($ox + $box.Left + 3), ($oy + $box.Top + 3), ($box.Width - 6 - [System.Windows.Forms.SystemInformation]::VerticalScrollBarWidth), ($box.Height - 6))
+                    $ea = New-Object System.Windows.Forms.DrawItemEventArgs($cg, $box.Font, $editRect, $box.SelectedIndex, ([System.Windows.Forms.DrawItemState]::ComboBoxEdit))
+                    Show-BuildPickerItem $box $ea
+                    $shadow = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(40, 0, 0, 0))
+                    $cg.FillRectangle($shadow, ($x0 + 3), ($y0 + 3), $listW, $listH)
+                    $shadow.Dispose()
+                    $white = New-Object System.Drawing.SolidBrush $script:Colors.Back
+                    $cg.FillRectangle($white, $x0, $y0, $listW, $listH)
+                    $white.Dispose()
+                    $ry = $y0 + 1
+                    $hotAt = Get-PickerIndex $script:SelectedTag
+                    for ($ri = 0; $ri -lt $script:PickerEntries.Count; $ri++) {
+                        $rh = Get-PickerRowHeight $ri
+                        $state = [System.Windows.Forms.DrawItemState]::None
+                        if ($ri -eq $hotAt) { $state = [System.Windows.Forms.DrawItemState]::Selected }
+                        $ea = New-Object System.Windows.Forms.DrawItemEventArgs($cg, $box.Font, (New-Object System.Drawing.Rectangle(($x0 + 1), $ry, ($listW - 2), $rh)), $ri, $state)
+                        Show-BuildPickerItem $box $ea
+                        $ry += $rh
+                    }
+                    $edge = New-Object System.Drawing.Pen $script:Colors.Border
+                    $cg.DrawRectangle($edge, $x0, $y0, ($listW - 1), ($listH - 1))
+                    $edge.Dispose()
+                    $cg.Dispose()
+                    $pickerShot = Join-Path $shotDirP 'uploader-picker.png'
+                    $canvas.Save($pickerShot, [System.Drawing.Imaging.ImageFormat]::Png)
+                    $canvas.Dispose()
+                    Write-Host ('  Build drop-down (open) picture saved: ' + $pickerShot)
                 } catch {
-                    Write-Host ('  (open drop-down picture skipped: ' + $_.Exception.Message + ')')
-                } finally {
-                    $ui.BuildBox.DroppedDown = $false
+                    $pickUi.Add('the open drop-down picture threw: ' + $_.Exception.Message)
                 }
+                $formBmp.Dispose()
                 $testForm.Hide()
+                foreach ($dlgShot in @(
+                        @{ File = 'uploader-keep-dialog.png'; Make = { New-NameDialog -Title 'Keep this build' -Prompt ('Keep Build 308 on this computer under a name you choose. Get latest code will not remove it.') -Default 'Build 308' -Action 'Keep' } },
+                        @{ File = 'uploader-older-dialog.png'; Make = { New-OlderBuildDialog -Builds @(@{ Tag = 'build-323-2323232'; BuiltAt = '2026-11-08T15:30:00Z' }, @{ Tag = 'build-320-2020202'; BuiltAt = '2026-11-08T15:00:00Z' }, @{ Tag = 'build-313-3c15a66'; BuiltAt = '2026-11-07T17:36:00Z' }, @{ Tag = 'build-310-1010101'; BuiltAt = '2026-11-07T17:20:00Z' }, @{ Tag = 'build-308-2808722'; BuiltAt = '2026-11-07T17:01:00Z' }, @{ Tag = 'build-301-ac5e41e'; BuiltAt = '2026-11-07T13:19:00Z' }) -Source 'api' } })) {
+                    $dForm = & $dlgShot.Make
+                    try {
+                        $dForm.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+                        $dForm.Location = New-Object System.Drawing.Point(40, 40)
+                        $dForm.Show()
+                        [System.Windows.Forms.Application]::DoEvents()
+                        $dForm.Refresh()
+                        $db = New-Object System.Drawing.Bitmap $dForm.Width, $dForm.Height
+                        $dForm.DrawToBitmap($db, (New-Object System.Drawing.Rectangle 0, 0, $dForm.Width, $dForm.Height))
+                        $db.Save((Join-Path $shotDirP $dlgShot.File), [System.Drawing.Imaging.ImageFormat]::Png)
+                        $db.Dispose()
+                        Write-Host ('  Dialog picture saved: ' + (Join-Path $shotDirP $dlgShot.File))
+                    } finally { $dForm.Close(); $dForm.Dispose() }
+                }
             }
-            # Pick 308.
-            $ui.BuildBox.SelectedIndex = 1
-            if ($script:InstalledTag -ne 'build-308-2808722') { $pickUi.Add('picking 308 left the picked build at ' + $script:InstalledTag) }
-            if (($script:ProjectDir -ne (Join-Path $uiRoot 'builds\build-308-2808722')) -or ((Read-SelectedTag $script:SelectedFile) -ne 'build-308-2808722')) { $pickUi.Add('picking 308 should move the project folder and save the pick') }
-            if (($script:SwitchCalls -ne 1) -or ($ui.Status.Text -ne 'Using Build 308. Ready to upload.')) { $pickUi.Add('picking 308 should reload the Route Map once and say so, got ' + $script:SwitchCalls + ' and: ' + $ui.Status.Text) }
-            if ($ui.BuildMeta.Text -notlike '*Commit 2808722*') { $pickUi.Add('the details under the drop-down should be 308''s, got: ' + $ui.BuildMeta.Text) }
-            if ($script:NoticeShown) { $pickUi.Add('picking an older build that sits next to the newest should not raise a newer-code notice') }
-            if ($script:TesterBuildTag -ne 'build-308-2808722') { $pickUi.Add('the tester build named in sent results should follow the picked build, got: ' + $script:TesterBuildTag) }
-            # Picking the same one again does nothing; a build with no Auton Test file says so.
-            $ui.BuildBox.SelectedIndex = 1
-            if ($script:SwitchCalls -ne 1) { $pickUi.Add('picking the build that is already picked should not reload anything') }
+
+            # The name dialog: the button is off until the name is good, and the problem shows.
+            $nd = New-NameDialog -Title 'Keep this build' -Prompt 'x' -Default '' -Action 'Keep'
+            try {
+                & $expectP ((-not $script:Dlg.Ok.Enabled) -and ($script:Dlg.Error.Text -eq 'Enter a name.') -and ($script:Dlg.Box.MaxLength -eq 40)) 'the name dialog should refuse an empty name and allow 40 characters'
+                $script:Dlg.Box.Text = '  Build 308 '
+                & $expectP ($script:Dlg.Ok.Enabled -and (-not $script:Dlg.Error.Text)) 'the name dialog should accept a good name'
+                & $expectP (($script:Dlg.Ok.Right -le $nd.ClientSize.Width) -and ($script:Dlg.Cancel.Right -lt $script:Dlg.Ok.Left) -and ($script:Dlg.Ok.Bottom -lt $nd.ClientSize.Height)) 'the name dialog buttons should sit inside it, Cancel left of the main button'
+            } finally { $nd.Dispose() }
+            $od = New-OlderBuildDialog -Builds @(@{ Tag = 'build-320-2020202'; BuiltAt = '2026-11-08T16:00:00Z' }, @{ Tag = 'build-310-1010101'; BuiltAt = '' }, @{ Tag = 'build-308-2808722'; BuiltAt = '2026-11-07T17:01:00Z' }) -Source 'atom'
+            try {
+                & $expectP (($script:Dlg.List.Items.Count -eq 3) -and ($script:Dlg.List.Items[0].SubItems[2].Text -eq 'On this computer') -and ($script:Dlg.List.Items[2].SubItems[2].Text -eq 'Practice auton (on this computer)') -and ($script:Dlg.List.Items[1].SubItems[2].Text -eq '') -and ($script:Dlg.Help.Text -like '*only the newest few*') -and (-not $script:Dlg.Ok.Enabled)) 'the older list should mark builds here and kept, say when it is only the newest few, and wait for a pick'
+                # Selection events need the list's window, which a dialog not yet shown does not have.
+                [void]$od.Handle
+                [void]$script:Dlg.List.Handle
+                $script:Dlg.List.Items[1].Selected = $true
+                & $expectP (($script:Dlg.Ok.Enabled) -and ($script:Dlg.Tags[$script:Dlg.List.SelectedIndices[0]] -eq 'build-310-1010101')) 'picking a row in the older list should allow Use this build for that tag'
+            } finally { $od.Dispose() }
+
+            # Older build... and a listed build that is not here: neither switches at once; the list or the download starts.
+            $script:OlderCalls = 0
+            ${function:Start-OlderBuildList} = { $script:OlderCalls++ }
+            $ui.BuildBox.SelectedIndex = $ui.BuildBox.Items.Count - 1
+            & $expectP (($script:OlderCalls -eq 1) -and ($script:SelectedTag -eq 'build-308-2808722') -and ($ui.BuildBox.SelectedIndex -eq (Get-PickerIndex 'build-308-2808722'))) 'Older build... should open the list and leave the picked build showing'
+            $script:OneAsked = ''
+            ${function:Start-OneBuildDownload} = { param([string]$Tag) $script:OneAsked = $Tag }
+            $ui.BuildBox.SelectedIndex = Get-PickerIndex 'build-283-5c76fff'
+            & $expectP (($script:OneAsked -eq 'build-283-5c76fff') -and ($script:SelectedTag -eq 'build-308-2808722') -and ($ui.BuildBox.SelectedIndex -eq (Get-PickerIndex 'build-308-2808722'))) ('a listed build that is not here should be downloaded, not picked yet, got ' + $script:OneAsked)
+            # Busy: the drop-down and the links lock like the Mode box, and a pick is undone.
+            Set-Busy $true 'download' 'x'
+            & $expectP ((-not $ui.BuildBox.Enabled) -and (-not $ui.RenameLink.Enabled) -and (-not $ui.KeepLink.Enabled)) 'the drop-down and keep links should be locked while busy'
+            $ui.BuildBox.SelectedIndex = 0
+            & $expectP (($script:SelectedTag -eq 'build-308-2808722') -and ($ui.BuildBox.SelectedIndex -eq (Get-PickerIndex 'build-308-2808722'))) 'a pick while busy should be undone'
+            Set-Busy $false
+            & $expectP ($ui.BuildBox.Enabled -and $ui.RenameLink.Enabled) 'the drop-down should unlock after busy'
+            # A build without the picked mode says so.
             Remove-Item -LiteralPath (Join-Path $uiRoot 'builds\build-304-497d4f7\modes') -Recurse -Force
             $ui.ModeBox.SelectedIndex = 1
-            $ui.BuildBox.SelectedIndex = 2
-            if ($ui.Status.Text -notlike 'Build 304 has no Auton Test version*') { $pickUi.Add('a build without the picked mode should say so, got: ' + $ui.Status.Text) }
+            $ui.BuildBox.SelectedIndex = Get-PickerIndex 'build-304-497d4f7'
+            & $expectP ($ui.Status.Text -like 'Build 304 has no Auton Test version*') ('a build without the picked mode should say so, got: ' + $ui.Status.Text)
             $ui.ModeBox.SelectedIndex = 0
-            # Busy: the drop-down locks like the Mode box and comes back after.
-            Set-Busy $true 'download' 'x'
-            if ($ui.BuildBox.Enabled) { $pickUi.Add('the drop-down should be locked while busy') }
-            Set-Busy $false
-            if (-not $ui.BuildBox.Enabled) { $pickUi.Add('the drop-down should unlock after busy') }
-            $ui.BuildBox.SelectedIndex = 1
-            # A newer build on GitHub that is not here yet still gets its notice.
-            $script:LatestTag = 'build-320-9999999'
+            # A damaged kept.json: no crash, no kept builds, left alone, noted for Details, and saved as .bak on the next change.
+            $badKept = '{ "version": 1, "kept": { "build-308-2808722": { "name": "Practice'
+            [System.IO.File]::WriteAllText((Join-Path $uiRoot 'kept.json'), $badKept, $utf8Ui)
+            Initialize-KeptBuilds
             Update-BuildInfo
-            if ((-not $script:NoticeShown) -or ($ui.Notice.Text -notlike '*build-320-9999999*')) { $pickUi.Add('a newer build that is not downloaded should raise the notice') }
-            if ($ui.BuildBox.Items[0] -like '*latest*') { $pickUi.Add('no stored build is the latest when the latest is not downloaded') }
-            $script:LatestTag = ''
+            & $expectP (($script:Kept.Count -eq 0) -and $script:KeptDamaged -and ($script:KeptNote -like 'kept.json could not be read*') -and (([System.IO.File]::ReadAllText((Join-Path $uiRoot 'kept.json'))) -ceq $badKept)) 'a damaged kept.json should read as no kept builds, be noted, and be left alone'
+            & $expectP ($script:PickerEntries[(Get-PickerIndex 'build-308-2808722')].Group -eq 'other') 'with a damaged kept.json the once-kept build shows as an ordinary build'
+            ${function:Show-NameDialog} = { param([string]$Title, [string]$Prompt, [string]$Default, [string]$Action) return 'Old one' }
+            Invoke-KeepBuild
+            & $expectP ((([System.IO.File]::ReadAllText((Join-Path $uiRoot 'kept.json.bak'))) -ceq $badKept) -and ((Read-KeptBuilds (Join-Path $uiRoot 'kept.json')).Kept['build-304-497d4f7'] -ceq 'Old one') -and (-not $script:KeptDamaged)) 'keeping a build should save the damaged kept.json as .bak and write a good one'
+            # A newer build on GitHub that is not here yet: the notice, and it leads the list as not downloaded.
+            $script:LatestTag = 'build-330-3303303'
             Update-BuildInfo
-            # One build is not a choice: the title comes back and the drop-down goes.
-            Remove-Item -LiteralPath (Join-Path $uiRoot 'builds\build-313-3c15a66') -Recurse -Force
+            & $expectP ($script:NoticeShown -and ($ui.Notice.Text -like '*build-330-3303303*')) 'a newer build that is not downloaded should raise the notice'
+            & $expectP ($ui.BuildBox.Items[0] -like 'Build 330   Not downloaded   newest, test build') ('the newest row should be the build not yet here, got ' + $ui.BuildBox.Items[0])
+            $script:LatestTag = 'build-320-2020202'
+            # One build is still a choice (keep it, or open an older one); no builds at all shows the title.
+            foreach ($t in @('build-320-2020202', 'build-313-3c15a66', 'build-308-2808722', 'build-294-3321f7c')) { Remove-Item -LiteralPath (Join-Path $uiRoot ('builds\' + $t)) -Recurse -Force }
+            Update-BuildInfo
+            & $expectP ((& $ownVisible $ui.BuildBox) -and (-not (& $ownVisible $ui.BuildTitle))) 'one build should still show the drop-down'
             Remove-Item -LiteralPath (Join-Path $uiRoot 'builds\build-304-497d4f7') -Recurse -Force
             Update-BuildInfo
-            if ((& $ownVisible $ui.BuildBox) -or (-not (& $ownVisible $ui.BuildTitle)) -or ($ui.BuildTitle.Text -ne 'Build 308')) { $pickUi.Add('with one build the title should show and the drop-down should hide') }
-            $sizeWithoutPicker = $script:UploadLayoutSize
-            if ($sizeWithPicker.Height -gt ($sizeWithoutPicker.Height + (Px 2))) { $pickUi.Add('the drop-down made the Upload view taller: ' + $sizeWithPicker + ' against ' + $sizeWithoutPicker) }
-            Write-Host ('  Upload view height: ' + $sizeWithPicker.Height + ' with the drop-down, ' + $sizeWithoutPicker.Height + ' without (Details open, ' + $script:Scale + 'x scale)')
+            & $expectP ((-not (& $ownVisible $ui.BuildBox)) -and (& $ownVisible $ui.BuildTitle) -and ($ui.BuildTitle.Text -eq 'No robot code downloaded yet') -and (-not (& $ownVisible $ui.KeepLink)) -and (-not (& $ownVisible $ui.RenameLink))) 'with no builds the title should show and the drop-down and links hide'
         } catch {
             $pickUi.Add('threw: ' + $_.Exception.Message + ' at line ' + $_.InvocationInfo.ScriptLineNumber)
         } finally {
             $InstallDir = $savedInstUi; $script:SelectedFile = $savedSelUi; $script:LatestTag = $savedLatestUi
             ${function:Switch-CloudBuild} = $savedSwitchUi
+            ${function:Show-NameDialog} = $savedNameDlg; ${function:Start-OlderBuildList} = $savedOlderFn; ${function:Start-OneBuildDownload} = $savedOneFn
+            $script:Kept = $savedKeptUi; $script:KeptDamaged = $savedKeptDamagedUi; $script:FullBuilds = $savedFullUi; $script:FullKnown = $savedFullKnownUi
             Set-SelectedBuild $savedTagUi
             $script:InstalledTag = $savedInstalledUi
             Update-BuildInfo
             Remove-Item -LiteralPath $uiRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
-        if ($pickUi.Count -eq 0) { Write-Host '  Build drop-down: OK' } else {
+        if ($pickUi.Count -eq 0) { Write-Host ('  Build drop-down: OK (' + $script:PickChecks + ' checks)') } else {
             foreach ($pu in $pickUi) { $failures.Add('build drop-down: ' + $pu) }
             Write-Host ('  Build drop-down: FAIL (' + ($pickUi -join '; ') + ')')
         }
@@ -8528,7 +9631,7 @@ OBJ_MID_LEFT,stack,-23.6,0.0,blue,0.0
 
         # 3b. CI only: download the latest release the same way a first launch does.
         if ($env:SCOURGE_SELFTEST_DOWNLOAD -eq '1') {
-            $dl = Save-LatestRelease -ReleasesUrl $script:ReleasesUrl -InstallDir $InstallDir -AssetNames $script:AssetNames -SelectedTag $script:SelectedTag
+            $dl = Save-LatestRelease -ReleasesUrl $script:ReleasesUrl -InstallDir $InstallDir -AssetNames $script:AssetNames -SelectedTag $script:SelectedTag -FullBuildsUrl $script:FullBuildsUrl -FullBuildsCache (Join-Path $InstallDir 'full-builds.json') -FullCount $script:FullBuildsToShow
             if (@('downloaded', 'current') -contains [string]$dl.Status) {
                 # The window does this when a download finishes: the newest build becomes the picked one.
                 Set-SelectedBuild (Get-NewestTag @(Get-StoredBuilds $InstallDir | ForEach-Object { [string]$_.Tag })) -Save

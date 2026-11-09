@@ -934,6 +934,10 @@ $SharedCode = {
         if ($Selected -and $newest -and ($Selected -cne $newest)) {
             return @{ Text = ($text + ' Still using ' + (& $label $Selected) + ' (you picked it). Pick ' + (& $label $newest) + ' in the drop-down to use it.'); Kind = 'info' }
         }
+        # Builds came down but none of them is the one in use: say which build Upload will send.
+        if (($Status -eq 'downloaded') -and $Selected -and (@($Downloaded) -cnotcontains $Selected)) {
+            return @{ Text = ($text + ' Using ' + (& $label $Selected) + '.'); Kind = 'info' }
+        }
         if ($Status -eq 'downloaded') { return @{ Text = ($text + ' Ready to upload.'); Kind = 'success' } }
         return @{ Text = $text; Kind = 'info' }
     }
@@ -952,11 +956,13 @@ $SharedCode = {
             $dest = Get-BuildFolder -InstallDir $InstallDir -Tag $tag
             if (Test-Path $dest) { return '' }
             New-Item -ItemType Directory -Path (Split-Path $dest -Parent) -Force | Out-Null
+            # version.json goes into the folder first, so the one rename below leaves a whole build.
+            Copy-Item -LiteralPath $versionPath -Destination (Join-Path $project 'version.json') -Force
             Move-Item -LiteralPath $project -Destination $dest
-            Copy-Item -LiteralPath $versionPath -Destination (Join-Path $dest 'version.json') -Force
         } catch {
             # Put the folder back if it was already moved, so the old layout is whole again.
             if ($dest -and (Test-Path $dest) -and (-not (Test-Path $project))) { try { Move-Item -LiteralPath $dest -Destination $project } catch { } }
+            if (Test-Path $project) { Remove-Item -LiteralPath (Join-Path $project 'version.json') -Force -ErrorAction SilentlyContinue }
             return ''
         }
         Remove-Item -LiteralPath $versionPath -Force -ErrorAction SilentlyContinue
@@ -1854,7 +1860,7 @@ $SharedCode = {
     # Turns the text of a GET /map answer into plain data.
     # Returns @{ Status = 'ok'; Sim; SimIsLatest; Recorded; RecordedUpdated; Note } or
     # @{ Status = 'error'; Error }. Sim and Recorded are $null when the service had none.
-    #   Sim      = @{ Tag; Build; Routes = @( @{ Key; Side; Field ('override' or 'pinnacle'); Name; Id; TotalMs; T; X; Y; H; Marks; Events } ) }
+    #   Sim      = @{ Tag; Build; Routes = @( @{ Key; Side; Field ('override', 'skills' or 'pinnacle'); Name; Id; TotalMs; T; X; Y; H; Marks; Events } ) }
     #              Key is the route slot ('A'), 'AWP' for the built-in routine, or 'skills' (one fixed start, Left frame only).
     #   Recorded = @{ Routes = @( @{ Slot; HasStart; StartX; StartY; Wp = @( @{ X; Y; H; Step } ) } ); Sessions }
     function ConvertFrom-CloudMap {
@@ -1884,11 +1890,14 @@ $SharedCode = {
                         $slotV = Get-JsonValue $r 'slot'
                         if (($null -ne $slotV) -and ([string]$slotV).Trim()) { $key = ([string]$slotV).Trim() }
                         # Skills runs once from a fixed start in field coordinates, so it is always the Left frame.
+                        # The tag 'skills' (newer data) and the slot 'skills' (older data) both mean it.
+                        $fieldTag = [string](Get-JsonValue $r 'field')
+                        if (($fieldTag -ceq 'skills') -or ([string](Get-JsonValue $r 'id') -ieq 'skills')) { if ($fieldTag -cne 'pinnacle') { $key = 'skills' } }
                         if ($key -ieq 'skills') { $key = 'skills'; $side = 'L' }
                         if (($side -cne 'L') -and ($side -cne 'R')) { continue }
                         # A Pinnacle route is in true field coordinates, so it is never mirrored.
                         $fieldName = 'override'
-                        if ([string](Get-JsonValue $r 'field') -ceq 'pinnacle') { $fieldName = 'pinnacle' }
+                        if ($fieldTag -ceq 'pinnacle') { $fieldName = 'pinnacle' } elseif ($key -ceq 'skills') { $fieldName = 'skills' }
                         $pts = ConvertFrom-CloudSamples (Get-JsonValue $r 'samples') 0.001
                         [void]$routes.Add(@{
                             Key = $key; Side = $side; Field = $fieldName; Name = [string](Get-JsonValue $r 'name'); Id = [string](Get-JsonValue $r 'id'); TotalMs = (Get-JsonNumber (Get-JsonValue $r 'total_ms'))
@@ -2880,6 +2889,7 @@ $script:CloudFilling = $false
 $script:MirrorCache = @{}
 $script:MapFieldR = $null
 $script:PinnacleField = $null
+$script:SkillsField = $null
 # Where the team code is kept: encrypted for this Windows user, never in the repo or the log.
 $script:SettingsPath = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'ScourgeUploader\settings.json'
 $script:MapCache = [hashtable]::Synchronized(@{})
@@ -4019,7 +4029,7 @@ function Test-CloudRouteKnown {
     return $false
 }
 
-# The field a route is on, 'override' unless the prediction says it is a Pinnacle route.
+# The field a route is on: 'pinnacle' when the prediction says so, 'skills' for the Skills route, otherwise 'override'.
 function Get-CloudRouteField {
     $cl = $script:Cloud
     if (($null -ne $cl.Data) -and ($null -ne $cl.Data.Sim)) {
@@ -4027,6 +4037,7 @@ function Get-CloudRouteField {
             if (([string]$r.Key -ieq [string]$cl.Route) -and ([string]$r.Field -ceq 'pinnacle')) { return 'pinnacle' }
         }
     }
+    if ([string]$cl.Route -ieq 'skills') { return 'skills' }
     return 'override'
 }
 
@@ -4625,7 +4636,9 @@ function Complete-PlanStroke {
     $side = $p.Side
     $first = (@($p.Lines).Count -eq 0)
     if ($first) { $side = [string]$script:Cloud.Side }
+    # A Skills view has no field of its own for plans: they are drawn on the Override match field.
     $fieldNow = Get-CloudRouteField
+    if ($fieldNow -ceq 'skills') { $fieldNow = 'override' }
     Set-PlanState $r.Lines $side $p.Actions
     # The first line fixes the plan's field, the way it fixes the side.
     if ($first) { $p.Field = $fieldNow }
@@ -4986,19 +4999,38 @@ function Complete-PlanSend {
 # The field with every point reflected for the Right side (the same y = -x reflection
 # recordings use). Goals, toggles, and loose objects all map onto the field.
 function Get-ViewField {
-    param([string]$Side)
+    param([string]$Side, [string]$Id = 'override')
+    # Skills is one fixed start and is never mirrored.
+    if ($Id -ceq 'skills') { return (Get-SkillsField) }
     $f = Get-MapField
     if ($Side -ne 'R') { return $f }
     if ($null -ne $script:MapFieldR) { return $script:MapFieldR }
     $goals = New-Object System.Collections.ArrayList
-    foreach ($g in $f.Goals) { [void]$goals.Add(@($g[0], (0.0 - $g[2]), (0.0 - $g[1]))) }
+    foreach ($g in $f.Goals) { [void]$goals.Add(@($g[0], (0.0 - $g[2]), (0.0 - $g[1]), $g[3])) }
     $toggles = New-Object System.Collections.ArrayList
     foreach ($t in $f.Toggles) { [void]$toggles.Add(@((0.0 - $t[1]), (0.0 - $t[0]))) }
+    # A Pin's long axis turns with the reflection: direction (cos a, sin a) becomes (-sin a, -cos a).
     $objects = New-Object System.Collections.ArrayList
-    foreach ($o in $f.Objects) { [void]$objects.Add(@((0.0 - $o[1]), (0.0 - $o[0]))) }
+    foreach ($o in $f.Objects) {
+        $m = $o.Clone()
+        $m.X = 0.0 - $o.Y; $m.Y = 0.0 - $o.X
+        $a = [double]$o.Angle * [math]::PI / 180.0
+        $m.Angle = ([math]::Atan2((0.0 - [math]::Cos($a)), (0.0 - [math]::Sin($a))) * 180.0 / [math]::PI + 360.0) % 360.0
+        [void]$objects.Add($m)
+    }
+    $loaders = New-Object System.Collections.ArrayList
+    foreach ($l in $f.Loaders) {
+        $zone = $null
+        if ($null -ne $l.Zone) {
+            $zx = @((0.0 - $l.Zone[3]), (0.0 - $l.Zone[1])); $zy = @((0.0 - $l.Zone[2]), (0.0 - $l.Zone[0]))
+            $zone = @($zx[0], $zy[0], $zx[1], $zy[1])
+        }
+        [void]$loaders.Add(@{ X = (0.0 - $l.Y); Y = (0.0 - $l.X); Zone = $zone })
+    }
     $script:MapFieldR = @{
+        Id = 'override'
         Wall = $f.Wall; RobotLength = $f.RobotLength; RobotWidth = $f.RobotWidth; RobotFront = $f.RobotFront; RobotBack = $f.RobotBack
-        Goals = @($goals.ToArray()); Toggles = @($toggles.ToArray()); Objects = @($objects.ToArray())
+        Goals = @($goals.ToArray()); Toggles = @($toggles.ToArray()); Objects = @($objects.ToArray()); Loaders = @($loaders.ToArray())
     }
     return $script:MapFieldR
 }
@@ -5034,12 +5066,58 @@ function Merge-Bounds {
 }
 
 # Where things are on the field, in the LEFT frame (see include/field.hpp in the
-# robot code). Goal spots, toggle spots, and the loose Cup and Pin spots are
-# measured from the field kit's drawings, not from a real field, so they are
-# approximate. The opponent's Goals are ours turned 180 degrees about the center.
+# robot code). Goal spots, toggle spots, and the Cups and Pins are measured from the
+# field kit's drawings, not from a real field, so they are approximate. The opponent's
+# Goals are ours turned 180 degrees about the center. The layout is the one in the robot
+# repo's tools/autopath/field.py (override_objects): the same numbers, so both maps agree.
+#   Goals    = (kind, x, y, holds a standing Pin at the start of a match)
+#   Objects  = @{ Name; Kind ('cup', 'stack', 'pin_flat'); X; Y; R; Tip ('red', 'blue' or ''); Len; W; Angle }
+#   Loaders  = @{ X; Y; Zone = (x0, y0, x1, y1) or $null }  (a red Load Zone sits by the near two)
 function Get-MapField {
     if ($null -ne $script:MapField) { return $script:MapField }
+    $cupR = 1.58; $gap = 3.16; $pinLen = 6.5; $pinW = 3.02; $off = 4.4
+    $objects = New-Object System.Collections.ArrayList
+    $newObj = { param($n, $k, $x, $y) @{ Name = $n; Kind = $k; X = [double]$x; Y = [double]$y; R = $cupR; Tip = ''; Len = 0.0; W = 0.0; Angle = 0.0 } }
+    # Three touching Cups along a wall, the middle one holding a standing Pin.
+    foreach ($wg in @(
+            @('OBJ_WALL_NEAR_RIGHT', 23.6, -68.7, $true), @('OBJ_WALL_NEAR_LEFT', -23.6, -68.7, $true),
+            @('OBJ_WALL_SIDE', 68.7, -23.6, $false), @('OBJ_WALL_SIDE_UP', 68.7, 23.6, $false),
+            @('OBJ_WALL_FAR_RIGHT', 23.6, 68.7, $true), @('OBJ_WALL_FAR_LEFT', -23.6, 68.7, $true),
+            @('OBJ_WALL_LEFT_UP', -68.7, 23.6, $false), @('OBJ_WALL_LEFT_DOWN', -68.7, -23.6, $false))) {
+        $i = 0
+        foreach ($k in @(-1, 0, 1)) {
+            $i++
+            if ($wg[3]) { $cx = $wg[1] + $k * $gap; $cy = $wg[2] } else { $cx = $wg[1]; $cy = $wg[2] + $k * $gap }
+            $kind = 'cup'; if ($k -eq 0) { $kind = 'stack' }
+            [void]$objects.Add((& $newObj ($wg[0] + '_' + $i) $kind ([math]::Round($cx, 3)) ([math]::Round($cy, 3))))
+        }
+    }
+    # A Cup with four Pins lying around it, on the Autonomous Line. The colored tips point away from the Cup: red at +x and -y, blue at -x and +y.
+    foreach ($cl in @(@('OBJ_CLUSTER_1', -47.2, -47.2), @('OBJ_CLUSTER_2', -23.6, -23.6), @('OBJ_CLUSTER_3', 23.6, 23.6), @('OBJ_CLUSTER_4', 47.2, 47.2))) {
+        [void]$objects.Add((& $newObj $cl[0] 'cup' $cl[1] $cl[2]))
+        foreach ($pn in @(@('XP', 1, 0, 0.0, 'red'), @('YN', 0, -1, 270.0, 'red'), @('XN', -1, 0, 180.0, 'blue'), @('YP', 0, 1, 90.0, 'blue'))) {
+            $o = & $newObj ($cl[0] + '_PIN_' + $pn[0]) 'pin_flat' ([math]::Round($cl[1] + $pn[1] * $off, 3)) ([math]::Round($cl[2] + $pn[2] * $off, 3))
+            $o.Len = $pinLen; $o.W = $pinW; $o.Angle = [double]$pn[3]; $o.Tip = $pn[4]
+            [void]$objects.Add($o)
+        }
+    }
+    # A Cup with a standing Pin; the Midfield ones show a red or blue half up.
+    foreach ($st in @(
+            @('OBJ_DIAGONAL_SIDE', 47.2, -47.2, ''), @('OBJ_DIAGONAL_INNER', 23.6, -23.6, ''),
+            @('OBJ_DIAGONAL_FAR_INNER', -23.6, 23.6, ''), @('OBJ_DIAGONAL_FAR', -47.2, 47.2, ''),
+            @('OBJ_MID_NEAR', 0.0, -23.6, 'red'), @('OBJ_MID_SIDE', 23.6, 0.0, 'red'),
+            @('OBJ_MID_FAR', 0.0, 23.6, 'blue'), @('OBJ_MID_LEFT', -23.6, 0.0, 'blue'))) {
+        $o = & $newObj $st[0] 'stack' $st[1] $st[2]
+        $o.Tip = $st[3]
+        [void]$objects.Add($o)
+    }
+    # Loaders sit in the corners. A red Load Zone runs 24.3 in along the wall and 11.5 in out from each near corner.
+    $loaders = @(
+        @{ X = -58.7; Y = -68.5; Zone = @(-70.1, -70.1, (-70.1 + 24.3), (-70.1 + 11.5)) },
+        @{ X = 58.7; Y = -68.5; Zone = @((70.1 - 24.3), -70.1, 70.1, (-70.1 + 11.5)) },
+        @{ X = -58.7; Y = 68.5; Zone = $null }, @{ X = 58.7; Y = 68.5; Zone = $null })
     $script:MapField = @{
+        Id = 'override'
         Wall = 70.1
         RobotLength = 17.0
         RobotWidth = 16.0
@@ -5047,17 +5125,35 @@ function Get-MapField {
         RobotFront = 7.0
         RobotBack = 10.0
         Goals = @(
-            @('alliance', 23.6, -47.2), @('alliance', 47.2, -23.6),
-            @('neutral', -23.6, -47.2), @('neutral', 47.2, 23.6), @('neutral', 0.0, 0.0),
-            @('opponent', -23.6, 47.2), @('opponent', -47.2, 23.6),
-            @('neutral', 23.6, 47.2), @('neutral', -47.2, -23.6)
+            @('alliance', 23.6, -47.2, $false), @('alliance', 47.2, -23.6, $false),
+            @('neutral', -23.6, -47.2, $true), @('neutral', 47.2, 23.6, $true), @('neutral', 0.0, 0.0, $true),
+            @('opponent', -23.6, 47.2, $false), @('opponent', -47.2, 23.6, $false),
+            @('neutral', 23.6, 47.2, $true), @('neutral', -47.2, -23.6, $true)
         )
         Toggles = @(@(0.0, -70.1), @(70.1, 0.0), @(-70.1, 0.0), @(0.0, 70.1))
-        Objects = @(@(-23.6, -68.7), @(23.6, -68.7), @(68.7, -23.6), @(0.0, -23.6), @(23.6, 0.0), @(47.2, -47.2), @(23.6, -23.6))
+        Objects = @($objects.ToArray())
+        Loaders = $loaders
     }
     return $script:MapField
 }
 
+# The Skills field: the match field with every Goal empty and no other alliance, so the blue Goals
+# are ordinary Goals. Everything else is the same.
+function Get-SkillsField {
+    if ($null -ne $script:SkillsField) { return $script:SkillsField }
+    $f = Get-MapField
+    $s = $f.Clone()
+    $s.Id = 'skills'
+    $goals = New-Object System.Collections.ArrayList
+    foreach ($g in $f.Goals) {
+        $kind = [string]$g[0]
+        if ($kind -eq 'opponent') { $kind = 'alliance' }
+        [void]$goals.Add(@($kind, $g[1], $g[2], $false))
+    }
+    $s.Goals = @($goals.ToArray())
+    $script:SkillsField = $s
+    return $script:SkillsField
+}
 # The Pinnacle field, in true field coordinates (never mirrored, unlike the Override field).
 # Positions are read off the figures in the Pinnacle manual v2.0, so they are good to about
 # 1 in. Goals are (kind, x, y); rollers and loaders are (x, y); Pins are (x, y, angle in
@@ -5166,6 +5262,69 @@ function Show-PinnacleField {
     }
 }
 
+# Paints what stands on the Override field (and the Skills field, which is the same layout):
+# Load Zones, Loaders, Cups as rings, stacks as a ring and a dot, lying Pins as bars with a
+# colored tip, then the Goals. A neutral Goal that starts a match shows its standing Pin.
+function Show-OverrideObjects {
+    param($G, $Pal, $Field, [double]$Ox, [double]$Oy, [double]$Sc)
+    foreach ($l in $Field.Loaders) {
+        if ($null -ne $l.Zone) {
+            $zx = $Ox + $l.Zone[0] * $Sc; $zy = $Oy - $l.Zone[3] * $Sc
+            $G.DrawRectangle($Pal.ZonePen, [single]$zx, [single]$zy, [single](($l.Zone[2] - $l.Zone[0]) * $Sc), [single](($l.Zone[3] - $l.Zone[1]) * $Sc))
+        }
+        # A diamond, like the web map's Loader mark.
+        $lr = [double][math]::Max((Px 4), 2.6 * $Sc)
+        $lx = $Ox + $l.X * $Sc; $ly = $Oy - $l.Y * $Sc
+        $G.DrawPolygon($Pal.MutedPen, [System.Drawing.PointF[]]@(
+            [System.Drawing.PointF]::new([single]$lx, [single]($ly - $lr)), [System.Drawing.PointF]::new([single]($lx + $lr), [single]$ly),
+            [System.Drawing.PointF]::new([single]$lx, [single]($ly + $lr)), [System.Drawing.PointF]::new([single]($lx - $lr), [single]$ly)))
+    }
+    $cr = [double][math]::Max((Px 3), 1.58 * $Sc)
+    foreach ($o in $Field.Objects) {
+        $cx = $Ox + $o.X * $Sc; $cy = $Oy - $o.Y * $Sc
+        if ($o.Kind -eq 'pin_flat') {
+            $a = [double]$o.Angle * [math]::PI / 180.0
+            $ux = [math]::Cos($a); $uy = -[math]::Sin($a)
+            $vx = -$uy; $vy = $ux
+            $hl = [math]::Max((Px 3), $o.Len / 2.0 * $Sc); $hw = [math]::Max((Px 1.5), $o.W / 2.0 * $Sc)
+            $box = [System.Drawing.PointF[]]@(
+                [System.Drawing.PointF]::new([single]($cx + $ux * $hl + $vx * $hw), [single]($cy + $uy * $hl + $vy * $hw)),
+                [System.Drawing.PointF]::new([single]($cx + $ux * $hl - $vx * $hw), [single]($cy + $uy * $hl - $vy * $hw)),
+                [System.Drawing.PointF]::new([single]($cx - $ux * $hl - $vx * $hw), [single]($cy - $uy * $hl - $vy * $hw)),
+                [System.Drawing.PointF]::new([single]($cx - $ux * $hl + $vx * $hw), [single]($cy - $uy * $hl + $vy * $hw)))
+            $G.FillPolygon($Pal.ObjBrush, $box)
+            if ($o.Tip) {
+                # The colored end, 2.4 in long.
+                $tl = [math]::Min((2.4 * $Sc), (2.0 * $hl))
+                $tip = [System.Drawing.PointF[]]@(
+                    [System.Drawing.PointF]::new([single]($cx + $ux * $hl + $vx * $hw), [single]($cy + $uy * $hl + $vy * $hw)),
+                    [System.Drawing.PointF]::new([single]($cx + $ux * $hl - $vx * $hw), [single]($cy + $uy * $hl - $vy * $hw)),
+                    [System.Drawing.PointF]::new([single]($cx + $ux * ($hl - $tl) - $vx * $hw), [single]($cy + $uy * ($hl - $tl) - $vy * $hw)),
+                    [System.Drawing.PointF]::new([single]($cx + $ux * ($hl - $tl) + $vx * $hw), [single]($cy + $uy * ($hl - $tl) + $vy * $hw)))
+                if ($o.Tip -eq 'red') { $G.FillPolygon($Pal.TipRed, $tip) } else { $G.FillPolygon($Pal.TipBlue, $tip) }
+            }
+            $G.DrawPolygon($Pal.GridPen, $box)
+        } else {
+            $G.DrawEllipse($Pal.ObjPen, [single]($cx - $cr), [single]($cy - $cr), [single](2.0 * $cr), [single](2.0 * $cr))
+            if ($o.Kind -eq 'stack') {
+                $dr = $cr * 0.45
+                $brush = $Pal.ObjDot
+                if ($o.Tip -eq 'red') { $brush = $Pal.TipRed } elseif ($o.Tip -eq 'blue') { $brush = $Pal.TipBlue }
+                $G.FillEllipse($brush, [single]($cx - $dr), [single]($cy - $dr), [single](2.0 * $dr), [single](2.0 * $dr))
+            }
+        }
+    }
+    $goalR = [math]::Max((Px 5), 2.4 * $Sc)
+    foreach ($gl in $Field.Goals) {
+        $gx = $Ox + $gl[1] * $Sc; $gy = $Oy - $gl[2] * $Sc
+        Show-MapShape $G $Pal ([string]$gl[0]) $gx $gy $goalR
+        if ($gl[3]) {
+            $pr = $goalR * 0.42
+            $G.FillEllipse($Pal.ObjDot, [single]($gx - $pr), [single]($gy - $pr), [single](2.0 * $pr), [single](2.0 * $pr))
+        }
+    }
+}
+
 # One small symbol, centered on (X, Y), R pixels from center to edge. Goals use
 # alliance, neutral, opponent. Marks use drop, pin, stack, toggle, push.
 function Show-MapShape {
@@ -5247,8 +5406,10 @@ function Show-RouteMapCanvas {
     $m = $script:Map
     $vside = Get-CloudViewSide
     # The Pinnacle field is never mirrored; the Override field is drawn from the picked side.
-    $pin = ((Get-ViewFieldName) -ceq 'pinnacle')
-    if ($pin) { $field = Get-PinnacleField } else { $field = Get-ViewField $vside }
+    $fieldName = Get-ViewFieldName
+    $pin = ($fieldName -ceq 'pinnacle')
+    $skills = ($fieldName -ceq 'skills')
+    if ($pin) { $field = Get-PinnacleField } else { $field = Get-ViewField $vside $fieldName }
     $inv = [System.Globalization.CultureInfo]::InvariantCulture
     $G.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
     $G.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
@@ -5274,6 +5435,12 @@ function Show-RouteMapCanvas {
         $pal.WarnBrush = New-Object System.Drawing.SolidBrush($c.Warn)
         $pal.BadBrush = New-Object System.Drawing.SolidBrush($c.Bad)
         $pal.GridPen = & $mkPen $c.Line $thin
+        $pal.ObjPen = & $mkPen ([System.Drawing.Color]::FromArgb(190, $c.Muted)) ($thin * 1.5)
+        $pal.ObjDot = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(200, $c.Muted))
+        $pal.TipRed = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(198, 47, 47))
+        $pal.TipBlue = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(47, 98, 201))
+        $pal.ZonePen = & $mkPen $c.Border $thin
+        $pal.ZonePen.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
         $pal.BorderPen = & $mkPen $c.Border ($thin * 1.5)
         $pal.AutoPen = & $mkPen $c.Warn ($thin * 1.5)
         $pal.AutoPen.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
@@ -5357,13 +5524,13 @@ function Show-RouteMapCanvas {
         if ($pin) {
             Show-PinnacleField $G $pal $field $ox $oy $sc
         } else {
-        # Floor, our side of the Autonomous Line (below y = x), tile seams, wall.
+        # Floor, our side of the Autonomous Line (below y = x, left out in Skills, which has no other side), tile seams, wall.
         $G.FillRectangle($pal.BackBrush, [single]$left, [single]$top, [single]$side, [single]$side)
         $tint = [System.Drawing.PointF[]]@(
             [System.Drawing.PointF]::new([single]$left, [single]($top + $side)),
             [System.Drawing.PointF]::new([single]($left + $side), [single]($top + $side)),
             [System.Drawing.PointF]::new([single]($left + $side), [single]$top))
-        $G.FillPolygon($pal.TintBrush, $tint)
+        if (-not $skills) { $G.FillPolygon($pal.TintBrush, $tint) }
         # Tiles are about 23.6 in, the spacing of the Goals.
         foreach ($k in -2..2) {
             $gx = $ox + 23.6 * $k * $sc
@@ -5386,18 +5553,9 @@ function Show-RouteMapCanvas {
                 $G.DrawLine($pal.TogglePen, [single]$tx, [single]($ty - $half), [single]$tx, [single]($ty + $half))
             }
         }
-        # Loose Cups and Pins on our side, as small dots.
-        $dot = [math]::Max((Px 2), 0.9 * $sc)
-        foreach ($o in $field.Objects) {
-            $G.FillEllipse($pal.ObjBrush, [single]($ox + $o[0] * $sc - $dot), [single]($oy - $o[1] * $sc - $dot), [single](2.0 * $dot), [single](2.0 * $dot))
+        # Load Zones, Loaders, then every Cup and Pin, then the Goals on top.
+        Show-OverrideObjects $G $pal $field $ox $oy $sc
         }
-        # Goals: alliance filled circle, neutral open circle, opponent square.
-        $goalR = [math]::Max((Px 5), 2.4 * $sc)
-        foreach ($gl in $field.Goals) {
-            Show-MapShape $G $pal ([string]$gl[0]) ($ox + $gl[1] * $sc) ($oy - $gl[2] * $sc) $goalR
-        }
-        }
-
         # Recordings: the others faint, the selected one strong.
         $drawn = 0
         if ($drawing) { $drawn = 30 }
@@ -5531,6 +5689,8 @@ function Show-RouteMapCanvas {
         if ($lineItems.Count -gt 0) { [void]$rows.Add($lineItems.ToArray()) }
         if (-not $drawing) { [void]$rows.Add(@(@('drop', 'Drop'), @('pin', 'Pin'), @('stack', 'Stack'), @('toggle', 'Toggle'), @('push', 'Push'))) }
         $goalRow = @(@('alliance', 'Alliance goal'), @('neutral', 'Neutral goal'), @('opponent', 'Opponent goal'))
+        # Skills has no other alliance.
+        if ($skills) { $goalRow = @(@('alliance', 'Goal'), @('neutral', 'Neutral goal')) }
         # The Autonomous Line is Override's; the Pinnacle field has none.
         if (-not $pin) { $goalRow += ,@('line', 'Autonomous Line') }
         [void]$rows.Add($goalRow)
@@ -7365,6 +7525,8 @@ if ($SelfTest) {
         & $expectB (($msg.Text -eq 'Downloaded build 320. Ready to upload.') -and ($msg.Kind -eq 'success')) ('status: the newest pick should say ready, got: ' + $msg.Text)
         $msg = Get-DownloadStatusText -Status 'current' -Downloaded @() -After $newer -Selected 'build-320-9999999'
         & $expectB ($msg.Text -eq 'You already have the latest code.') ('status: current on the newest should keep its old text, got: ' + $msg.Text)
+        $msg = Get-DownloadStatusText -Status 'downloaded' -Downloaded @('build-308-2808722', 'build-304-497d4f7') -After $newer -Selected 'build-320-9999999'
+        & $expectB (($msg.Text -eq 'Downloaded 2 builds (build 308, build 304). Using build 320.') -and ($msg.Kind -eq 'info')) ('status: older builds fetched while another is in use should name the one in use, got: ' + $msg.Text)
 
         # Moving a single-build install forward: project\ and version.json become builds\<tag>.
         $legacy = Join-Path $buildRoot 'legacy'
@@ -7389,6 +7551,16 @@ if ($SelfTest) {
         [System.IO.File]::WriteAllText((Join-Path $bad 'version.json'), '{ not json', (New-Object System.Text.UTF8Encoding($false)))
         & $expectB (((Move-LegacyProject -InstallDir $bad) -eq '') -and (Test-Path (Join-Path $bad 'project\bin')) -and (Test-Path (Join-Path $bad 'version.json'))) 'legacy: a damaged version.json should leave project\ where it is'
 
+        # A cut right after the rename (the new folder in place, nothing else done) still leaves a whole build.
+        $cut = Join-Path $buildRoot 'cutlegacy'
+        $cutOld = & $mkBuild $cut 'build-291-0b0b0b0' '2026-11-06T00:00:00Z'
+        Move-Item -LiteralPath $cutOld -Destination (Join-Path $cut 'project')
+        Move-Item -LiteralPath (Join-Path $cut 'project\version.json') -Destination (Join-Path $cut 'version.json')
+        Remove-Item -LiteralPath (Join-Path $cut 'builds') -Recurse -Force
+        $script:CutMoves = 0
+        function Move-Item { param([string]$LiteralPath, [string]$Destination) $script:CutMoves++; if ($script:CutMoves -eq 1) { Microsoft.PowerShell.Management\Move-Item -LiteralPath $LiteralPath -Destination $Destination; throw 'cut' } }
+        try { [void](Move-LegacyProject -InstallDir $cut) } finally { Remove-Item function:Move-Item -ErrorAction SilentlyContinue }
+        & $expectB (Test-BuildComplete (Join-Path $cut 'builds\build-291-0b0b0b0')) 'legacy: a cut right after the rename should leave a whole build'
         # If the move cannot be done, the window keeps reading the old layout, and a folder that is no longer
         # a whole build (a delete that hit a locked file) is cleared at the next start.
         $InstallDir = $bad
@@ -7890,6 +8062,116 @@ if ($SelfTest) {
             Set-CloudRoute 'AWP'
             if ((-not $script:Ui.MapSideL.Enabled) -or (-not $script:Ui.MapSideR.Enabled)) { $failures.Add('Route Map cloud: side buttons should come back for AWP') }
             Set-CloudSide 'L'
+            Set-CloudData $simOnly '2026-10-30T23:05:00Z'
+
+            # The Override layout: every Cup, Pin and stack, against the list the robot repo's field.py gives (name, kind, x, y, tip, angle).
+            $fieldPyRows = @'
+OBJ_WALL_NEAR_RIGHT_1,cup,20.44,-68.7,,0.0
+OBJ_WALL_NEAR_RIGHT_2,stack,23.6,-68.7,,0.0
+OBJ_WALL_NEAR_RIGHT_3,cup,26.76,-68.7,,0.0
+OBJ_WALL_NEAR_LEFT_1,cup,-26.76,-68.7,,0.0
+OBJ_WALL_NEAR_LEFT_2,stack,-23.6,-68.7,,0.0
+OBJ_WALL_NEAR_LEFT_3,cup,-20.44,-68.7,,0.0
+OBJ_WALL_SIDE_1,cup,68.7,-26.76,,0.0
+OBJ_WALL_SIDE_2,stack,68.7,-23.6,,0.0
+OBJ_WALL_SIDE_3,cup,68.7,-20.44,,0.0
+OBJ_WALL_SIDE_UP_1,cup,68.7,20.44,,0.0
+OBJ_WALL_SIDE_UP_2,stack,68.7,23.6,,0.0
+OBJ_WALL_SIDE_UP_3,cup,68.7,26.76,,0.0
+OBJ_WALL_FAR_RIGHT_1,cup,20.44,68.7,,0.0
+OBJ_WALL_FAR_RIGHT_2,stack,23.6,68.7,,0.0
+OBJ_WALL_FAR_RIGHT_3,cup,26.76,68.7,,0.0
+OBJ_WALL_FAR_LEFT_1,cup,-26.76,68.7,,0.0
+OBJ_WALL_FAR_LEFT_2,stack,-23.6,68.7,,0.0
+OBJ_WALL_FAR_LEFT_3,cup,-20.44,68.7,,0.0
+OBJ_WALL_LEFT_UP_1,cup,-68.7,20.44,,0.0
+OBJ_WALL_LEFT_UP_2,stack,-68.7,23.6,,0.0
+OBJ_WALL_LEFT_UP_3,cup,-68.7,26.76,,0.0
+OBJ_WALL_LEFT_DOWN_1,cup,-68.7,-26.76,,0.0
+OBJ_WALL_LEFT_DOWN_2,stack,-68.7,-23.6,,0.0
+OBJ_WALL_LEFT_DOWN_3,cup,-68.7,-20.44,,0.0
+OBJ_CLUSTER_1,cup,-47.2,-47.2,,0.0
+OBJ_CLUSTER_1_PIN_XP,pin_flat,-42.8,-47.2,red,0.0
+OBJ_CLUSTER_1_PIN_YN,pin_flat,-47.2,-51.6,red,270.0
+OBJ_CLUSTER_1_PIN_XN,pin_flat,-51.6,-47.2,blue,180.0
+OBJ_CLUSTER_1_PIN_YP,pin_flat,-47.2,-42.8,blue,90.0
+OBJ_CLUSTER_2,cup,-23.6,-23.6,,0.0
+OBJ_CLUSTER_2_PIN_XP,pin_flat,-19.2,-23.6,red,0.0
+OBJ_CLUSTER_2_PIN_YN,pin_flat,-23.6,-28.0,red,270.0
+OBJ_CLUSTER_2_PIN_XN,pin_flat,-28.0,-23.6,blue,180.0
+OBJ_CLUSTER_2_PIN_YP,pin_flat,-23.6,-19.2,blue,90.0
+OBJ_CLUSTER_3,cup,23.6,23.6,,0.0
+OBJ_CLUSTER_3_PIN_XP,pin_flat,28.0,23.6,red,0.0
+OBJ_CLUSTER_3_PIN_YN,pin_flat,23.6,19.2,red,270.0
+OBJ_CLUSTER_3_PIN_XN,pin_flat,19.2,23.6,blue,180.0
+OBJ_CLUSTER_3_PIN_YP,pin_flat,23.6,28.0,blue,90.0
+OBJ_CLUSTER_4,cup,47.2,47.2,,0.0
+OBJ_CLUSTER_4_PIN_XP,pin_flat,51.6,47.2,red,0.0
+OBJ_CLUSTER_4_PIN_YN,pin_flat,47.2,42.8,red,270.0
+OBJ_CLUSTER_4_PIN_XN,pin_flat,42.8,47.2,blue,180.0
+OBJ_CLUSTER_4_PIN_YP,pin_flat,47.2,51.6,blue,90.0
+OBJ_DIAGONAL_SIDE,stack,47.2,-47.2,,0.0
+OBJ_DIAGONAL_INNER,stack,23.6,-23.6,,0.0
+OBJ_DIAGONAL_FAR_INNER,stack,-23.6,23.6,,0.0
+OBJ_DIAGONAL_FAR,stack,-47.2,47.2,,0.0
+OBJ_MID_NEAR,stack,0.0,-23.6,red,0.0
+OBJ_MID_SIDE,stack,23.6,0.0,red,0.0
+OBJ_MID_FAR,stack,0.0,23.6,blue,0.0
+OBJ_MID_LEFT,stack,-23.6,0.0,blue,0.0
+'@
+            $oRows = @($fieldPyRows -split "`r?`n" | Where-Object { $_ })
+            $mfo = Get-MapField
+            $kindCount = @{}
+            foreach ($mo in $mfo.Objects) { $kindCount[[string]$mo.Kind] = 1 + [int]$kindCount[[string]$mo.Kind] }
+            if (($mfo.Objects.Count -ne 52) -or ($kindCount['cup'] -ne 20) -or ($kindCount['stack'] -ne 16) -or ($kindCount['pin_flat'] -ne 16)) { $failures.Add('Route Map field: expected 20 cups, 16 stacks and 16 flat pins (52), got ' + $mfo.Objects.Count + ' ' + (($kindCount.Keys | Sort-Object | ForEach-Object { $_ + '=' + $kindCount[$_] }) -join ' ')) }
+            $oBad = 0
+            for ($oi = 0; $oi -lt $oRows.Count; $oi++) {
+                $cols = $oRows[$oi].Split(',')
+                $mo = $mfo.Objects[$oi]
+                if (($mo.Name -cne $cols[0]) -or ($mo.Kind -cne $cols[1]) -or (-not (& $near $mo.X ([double]::Parse($cols[2], [System.Globalization.CultureInfo]::InvariantCulture)))) -or (-not (& $near $mo.Y ([double]::Parse($cols[3], [System.Globalization.CultureInfo]::InvariantCulture)))) -or ($mo.Tip -cne $cols[4]) -or (($mo.Kind -ceq 'pin_flat') -and (-not (& $near $mo.Angle ([double]::Parse($cols[5], [System.Globalization.CultureInfo]::InvariantCulture)))))) { $oBad++ }
+            }
+            if (($oRows.Count -ne 52) -or ($oBad -ne 0)) { $failures.Add('Route Map field: ' + $oBad + ' of ' + $oRows.Count + ' objects differ from field.py') }
+            $mfr = Get-ViewField 'R'
+            $xp = @($mfr.Objects | Where-Object { $_.Name -ceq 'OBJ_CLUSTER_1_PIN_XP' })[0]
+            if (($mfr.Objects.Count -ne 52) -or (-not (& $near $xp.X 47.2)) -or (-not (& $near $xp.Y 42.8)) -or (-not (& $near $xp.Angle 270.0)) -or ($xp.Tip -cne 'red')) { $failures.Add('Route Map field: the Right side should reflect objects across y = -x and turn their Pins with them') }
+            # Skills is the match field with every Goal empty and no other alliance.
+            $sf = Get-SkillsField
+            $holdM = @($mfo.Goals | Where-Object { $_[3] }).Count
+            $holdS = @($sf.Goals | Where-Object { $_[3] }).Count
+            $allyS = @($sf.Goals | Where-Object { $_[0] -eq 'alliance' }).Count
+            $oppS = @($sf.Goals | Where-Object { $_[0] -eq 'opponent' }).Count
+            $sameGoals = $true
+            for ($gi = 0; $gi -lt 9; $gi++) { if (($sf.Goals[$gi][1] -ne $mfo.Goals[$gi][1]) -or ($sf.Goals[$gi][2] -ne $mfo.Goals[$gi][2])) { $sameGoals = $false } }
+            if (($sf.Goals.Count -ne 9) -or ($holdM -ne 5) -or ($holdS -ne 0) -or ($allyS -ne 4) -or ($oppS -ne 0) -or (-not $sameGoals)) { $failures.Add('Route Map field: Skills should be the match Goals with the five Pins out and the blue Goals ordinary (hold ' + $holdM + ' to ' + $holdS + ', alliance ' + $allyS + ', opponent ' + $oppS + ')') }
+            if ((-not [object]::ReferenceEquals($sf.Objects, $mfo.Objects)) -or (-not [object]::ReferenceEquals($sf.Toggles, $mfo.Toggles)) -or (-not [object]::ReferenceEquals($sf.Loaders, $mfo.Loaders)) -or ($sf.Id -ne 'skills') -or ($mfo.Id -ne 'override')) { $failures.Add('Route Map field: Skills should share the match field''s objects, toggles and loaders') }
+            if ((Get-ViewField 'R' 'skills').Id -ne 'skills') { $failures.Add('Route Map field: Skills is never mirrored') }
+            # Which field a prediction selects: a skills route by its tag, by its slot, or by both; AWP the match field.
+            $skTagOnly = ConvertFrom-CloudMap ($skillsJson.Replace('{"id":"skills","slot":"skills"', '{"id":"s1","field":"skills"'))
+            $skTagSlot = ConvertFrom-CloudMap ($skillsJson.Replace('"slot":"skills"', '"slot":"skills","field":"skills"'))
+            foreach ($skCase in @(@('tag only', $skTagOnly), @('slot only (older data)', $skillsOnly), @('tag and slot', $skTagSlot))) {
+                $skData = $skCase[1]
+                $skData.Recorded = $null
+                $skR = @($skData.Sim.Routes | Where-Object { $_.Key -eq 'skills' })
+                if (($skR.Count -ne 1) -or ($skR[0].Field -ne 'skills') -or ($skR[0].Side -ne 'L')) { $failures.Add('Route Map field: a Skills route (' + $skCase[0] + ') should parse onto the skills field, Left frame') }
+                Set-CloudData $skData '2026-10-30T23:06:00Z'
+                Set-CloudSide 'R'
+                Set-CloudRoute 'skills'
+                if (((Get-ViewFieldName) -ne 'skills') -or ((Get-ViewField (Get-CloudViewSide) (Get-ViewFieldName)).Id -ne 'skills')) { $failures.Add('Route Map field: the Skills route (' + $skCase[0] + ') should show the Skills field') }
+                Set-CloudRoute 'AWP'
+                if ((Get-ViewFieldName) -ne 'override') { $failures.Add('Route Map field: AWP should show the match field after Skills (' + $skCase[0] + ')') }
+                Set-CloudSide 'L'
+            }
+            if (($skTagOnly.Sim.Routes | Where-Object { $_.Field -eq 'pinnacle' }).Count -ne 0) { $failures.Add('Route Map field: a Skills route is not a Pinnacle route') }
+            # Pictures: the whole field for Skills and for AWP (the RECF one is saved below).
+            $wasWhole0 = $script:Map.Whole
+            $script:Map.Whole = $true
+            Set-CloudData $skTagOnly '2026-10-30T23:06:00Z'
+            Set-CloudRoute 'skills'
+            & $paintCanvas 'uploader-route-map-skills.png'
+            Set-CloudRoute 'AWP'
+            & $paintCanvas 'uploader-route-map-awp.png'
+            $script:Map.Whole = $wasWhole0
+            if ($script:MapPaintError) { $failures.Add('Route Map drawing failed on the Skills or match field: ' + $script:Ui.Log.Text) }
             Set-CloudData $simOnly '2026-10-30T23:05:00Z'
 
             # RECF: a fixed-start route on the Pinnacle field, listed after Skills, never mirrored, and a plan drawn on it says so.

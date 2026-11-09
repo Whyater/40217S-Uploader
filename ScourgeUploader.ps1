@@ -4,10 +4,11 @@
 #   * The programmer pushes code to GitHub. A GitHub Action builds it and posts a
 #     "release" with three core files: hot.package.bin, cold.package.bin,
 #     project.pros. Newer releases may also carry the three Scourge Tester files.
-#   * This app downloads the core files into <InstallDir>\project and tester
-#     files into <InstallDir>\project\tester when they are present.
+#   * This app keeps the three newest builds, each in <InstallDir>\builds\<tag>: the
+#     core files, and the tester files in its tester folder when they are present.
+#     A drop-down picks which build the rest of the app uses.
 #   * When you click "Upload to robot", the app runs the official PROS tool
-#     (pros.exe upload ...) in that folder. PROS sends the files over USB.
+#     (pros.exe upload ...) in the picked build's folder. PROS sends the files over USB.
 #
 # Why the code looks the way it does:
 #   * WinForms windows only like to be touched from the thread that made them
@@ -22,7 +23,7 @@
 # Options:
 #   -SelfTest           build the window without showing it, run a few checks,
 #                       print a summary, exit 0 (pass) or 1 (fail). Used by CI.
-#   -InstallDir <path>  where pros-cli, the project files, and version.json live.
+#   -InstallDir <path>  where pros-cli, the builds folder, and selected.json live.
 #                       Default: %LOCALAPPDATA%\ScourgeUploader
 #   -SendCtrlC <pid>    internal helper: sends Ctrl+C to the console of that process and
 #                       exits. Record results starts it so the PROS terminal gets a normal
@@ -88,9 +89,16 @@ $script:Modes = @(
     @{ Label = 'Drive Test';   Asset = 'drive-test-hot.package.bin'; Slot = 3; Name = 'Scourge Drive Test' },
     @{ Label = 'Auto Pathing'; Asset = 'autopath-hot.package.bin';   Slot = 4; Name = 'Scourge Auto Pathing' }
 )
-$script:UploaderVersion = '2.6.3'
+$script:UploaderVersion = '2.7.0'
 $script:UploaderScriptPath = $PSCommandPath
 $script:UploaderManifestUrl = 'https://raw.githubusercontent.com/Whyater/40217S-Uploader/main/uploader.json'
+# The three newest published builds are kept on this computer, each in builds\<tag>.
+# selected.json says which one the window shows and uploads. Set-SelectedBuild points
+# the three paths below at the picked build; until one is picked they name the old
+# single-build place, where an install that could not be moved forward still has its build.
+$script:BuildsToKeep = 3
+$script:SelectedFile = Join-Path $InstallDir 'selected.json'
+$script:SelectedTag = ''
 $script:ProjectDir = Join-Path $InstallDir 'project'
 $script:BinDir     = Join-Path $script:ProjectDir 'bin'
 $script:VersionFile = Join-Path $InstallDir 'version.json'
@@ -626,24 +634,35 @@ $SharedCode = {
     # Returns @{ Status = 'ok' | 'none' | 'offline' | 'error'; Release; Error }.
     # 'none' means there is no release.json yet (no build published, or the
     # newest build is from before release.json existed).
+    # With -Tag it reads that older build's release.json instead of the newest one's.
     function Get-LatestRelease {
-        param([string]$ReleasesUrl)
+        param([string]$ReleasesUrl, [string]$Tag = '')
+        $path = '/latest/download/release.json'
+        if ($Tag) {
+            if ($Tag -notmatch '^[A-Za-z0-9._-]+$') { return @{ Status = 'error'; Error = 'The build tag has characters that are not allowed.' } }
+            $path = '/download/' + $Tag + '/release.json'
+        }
         $tmp = [System.IO.Path]::GetTempFileName()
         try {
-            try {
-                # GitHub caches the 'latest' redirect for a few minutes; a unique query string skips that
-                # cache so a build published a moment ago shows up right away.
-                $fresh = '?t=' + [DateTime]::UtcNow.Ticks
-                Invoke-WebRequest -Uri ($ReleasesUrl + '/latest/download/release.json' + $fresh) -OutFile $tmp -UseBasicParsing -TimeoutSec 20
-            } catch {
-                $code = 0
-                $resp = $_.Exception.Response
-                if ($null -ne $resp) {
-                    try { $code = [int]$resp.StatusCode } catch { }
+            # GitHub's CDN now and then answers 5xx once and is fine a second later, so a 5xx is tried again once.
+            for ($attempt = 1; $attempt -le 2; $attempt++) {
+                try {
+                    # GitHub caches the 'latest' redirect for a few minutes; a unique query string skips that
+                    # cache so a build published a moment ago shows up right away.
+                    $fresh = '?t=' + [DateTime]::UtcNow.Ticks
+                    Invoke-WebRequest -Uri ($ReleasesUrl + $path + $fresh) -OutFile $tmp -UseBasicParsing -TimeoutSec 20
+                    break
+                } catch {
+                    $code = 0
+                    $resp = $_.Exception.Response
+                    if ($null -ne $resp) {
+                        try { $code = [int]$resp.StatusCode } catch { }
+                    }
+                    if (($code -ge 500) -and ($attempt -lt 2)) { Start-Sleep -Milliseconds 800; continue }
+                    if ($code -eq 404) { return @{ Status = 'none' } }
+                    if ($code -eq 0) { return @{ Status = 'offline'; Error = $_.Exception.Message } }
+                    return @{ Status = 'error'; Error = ('GitHub answered with HTTP ' + $code + '.') }
                 }
-                if ($code -eq 404) { return @{ Status = 'none' } }
-                if ($code -eq 0) { return @{ Status = 'offline'; Error = $_.Exception.Message } }
-                return @{ Status = 'error'; Error = ('GitHub answered with HTTP ' + $code + '.') }
             }
             try {
                 $rel = [System.IO.File]::ReadAllText($tmp, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
@@ -726,13 +745,236 @@ $SharedCode = {
         } finally { Remove-Item -Path $tmp -Force -ErrorAction SilentlyContinue }
     }
 
-    # Download the newest release into <InstallDir>\project.
-    # Returns @{ Status = 'downloaded' | 'current' | 'none' | 'offline' | 'error'; Release; Error }.
-    function Save-LatestRelease {
-        param([string]$ReleasesUrl, [string]$InstallDir, [string[]]$AssetNames, [string]$InstalledTag, $Sync = $null)
-        $info = Get-LatestRelease -ReleasesUrl $ReleasesUrl
-        if ($info.Status -ne 'ok') { return $info }
-        $rel = $info.Release
+    # ------------------------------------------------------------------
+    # Several builds on one computer. Each build is its own folder, builds\<tag>,
+    # with the layout one build always had (project.pros, bin\, tester\, modes\)
+    # plus that build's version.json. selected.json holds the tag the window uses.
+    # These take plain data and no window state, so a background thread and
+    # -SelfTest can use them too.
+    # ------------------------------------------------------------------
+
+    # "build-313-3c15a66" -> 313. Any other tag -> -1, which sorts after every numbered build.
+    function Get-BuildNumber {
+        param([string]$Tag)
+        if ($Tag -match '^build-(\d{1,9})-[0-9a-fA-F]+$') { return [int]$Matches[1] }
+        return -1
+    }
+
+    # Newest first. The build number decides, not the date: the number is what the
+    # build server counts up, and a tag from a clock that was wrong still sorts right.
+    # Items are @{ Tag; BuiltAt }; BuiltAt only breaks a tie (and orders unnumbered tags).
+    function Sort-Builds {
+        param($Builds)
+        $items = @($Builds | Where-Object { $null -ne $_ })
+        if ($items.Count -le 1) { return $items }
+        return @($items | Sort-Object `
+            @{ Expression = { Get-BuildNumber ([string]$_.Tag) }; Descending = $true }, `
+            @{ Expression = { [string]$_.BuiltAt }; Descending = $true }, `
+            @{ Expression = { [string]$_.Tag }; Descending = $false })
+    }
+
+    # The build tags a releases.atom feed lists, in feed order, without repeats. Tags that
+    # are not build-N-sha (for example the Mac app's own releases) are left out.
+    function Read-ReleasesAtom {
+        param([string]$Text)
+        $tags = New-Object System.Collections.Generic.List[string]
+        foreach ($m in [regex]::Matches($Text, '(?:releases/tag/|Repository/\d+/)([A-Za-z0-9._-]+)["<]')) {
+            $t = $m.Groups[1].Value
+            if (((Get-BuildNumber $t) -ge 0) -and (-not $tags.Contains($t))) { $tags.Add($t) }
+        }
+        return @($tags.ToArray())
+    }
+
+    # Asks the public releases feed which builds exist. GitHub does not promise this feed's
+    # shape, so any trouble just means "earlier builds unavailable" and the caller carries on.
+    # Returns @{ Status = 'ok' | 'error'; Tags; Error }.
+    function Get-PublishedBuildTags {
+        param([string]$ReleasesUrl)
+        $tmp = [System.IO.Path]::GetTempFileName()
+        try {
+            try {
+                Invoke-WebRequest -Uri ($ReleasesUrl + '.atom?t=' + [DateTime]::UtcNow.Ticks) -OutFile $tmp -UseBasicParsing -TimeoutSec 20
+                $text = [System.IO.File]::ReadAllText($tmp, [System.Text.Encoding]::UTF8)
+            } catch {
+                return @{ Status = 'error'; Tags = @(); Error = $_.Exception.Message }
+            }
+            return @{ Status = 'ok'; Tags = @(Read-ReleasesAtom $text); Error = '' }
+        } finally {
+            Remove-Item -Path $tmp -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # The tag becomes a folder name, so only the same safe characters the release check allows.
+    function Get-BuildFolder {
+        param([string]$InstallDir, [string]$Tag)
+        if (($Tag -notmatch '^[A-Za-z0-9._-]+$') -or ($Tag -match '^\.+$')) { throw 'That is not a valid build tag.' }
+        return (Join-Path (Join-Path $InstallDir 'builds') $Tag)
+    }
+
+    # A build counts only when its three core files and its version.json are all there.
+    function Test-BuildComplete {
+        param([string]$Folder)
+        return (Test-Path (Join-Path $Folder 'project.pros')) -and
+               (Test-Path (Join-Path $Folder 'bin\hot.package.bin')) -and
+               (Test-Path (Join-Path $Folder 'bin\cold.package.bin')) -and
+               (Test-Path (Join-Path $Folder 'version.json'))
+    }
+
+    # Every complete build in builds\, newest first, as @{ Tag; BuiltAt; Name; Folder }.
+    # A half-downloaded folder (.download), a leftover (.old), or a folder whose
+    # version.json names a different tag is not a build.
+    function Get-StoredBuilds {
+        param([string]$InstallDir)
+        $root = Join-Path $InstallDir 'builds'
+        if (-not (Test-Path $root)) { return @() }
+        $list = New-Object System.Collections.ArrayList
+        foreach ($d in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)) {
+            if ($d.Name -match '\.(download|old)$') { continue }
+            if (-not (Test-BuildComplete $d.FullName)) { continue }
+            try {
+                $v = [System.IO.File]::ReadAllText((Join-Path $d.FullName 'version.json'), [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+            } catch { continue }
+            if ([string]$v.tag -ne $d.Name) { continue }
+            $built = $v.built_at
+            if ($built -is [datetime]) { $built = $built.ToUniversalTime().ToString('o') }
+            [void]$list.Add(@{ Tag = $d.Name; BuiltAt = [string]$built; Name = [string]$v.name; Folder = $d.FullName })
+        }
+        return @(Sort-Builds $list.ToArray())
+    }
+
+    # Which builds stay. The $Keep newest stay, and so does every tag in $Protect (the
+    # one picked, the one just released) even when it is older. While something is
+    # using the builds ($Busy) nothing goes. Returns @{ Keep; Evict } as tag lists.
+    function Select-BuildsToKeep {
+        param($Builds, [string[]]$Protect = @(), [int]$Keep = 3, [bool]$Busy = $false)
+        $sorted = @(Sort-Builds $Builds)
+        $keepTags = New-Object System.Collections.Generic.List[string]
+        $evict = New-Object System.Collections.Generic.List[string]
+        for ($i = 0; $i -lt $sorted.Count; $i++) {
+            $t = [string]$sorted[$i].Tag
+            if ($Busy -or ($i -lt $Keep) -or ($Protect -contains $t)) { $keepTags.Add($t) } else { $evict.Add($t) }
+        }
+        return @{ Keep = @($keepTags.ToArray()); Evict = @($evict.ToArray()) }
+    }
+
+    # Deletes the builds Select-BuildsToKeep drops. Best effort: a folder Explorer or a
+    # virus scanner has open can be left half deleted; Initialize-Builds clears such pieces at the next start. Returns the tags that went.
+    function Remove-OldBuilds {
+        param([string]$InstallDir, [string[]]$Protect = @(), [int]$Keep = 3, [bool]$Busy = $false, $Sync = $null)
+        $keepPlan = Select-BuildsToKeep -Builds (Get-StoredBuilds $InstallDir) -Protect $Protect -Keep $Keep -Busy $Busy
+        $gone = New-Object System.Collections.Generic.List[string]
+        foreach ($t in $keepPlan.Evict) {
+            try {
+                Remove-Item -LiteralPath (Get-BuildFolder -InstallDir $InstallDir -Tag $t) -Recurse -Force -ErrorAction Stop
+                $gone.Add($t)
+            } catch {
+                Add-SharedLog $Sync ('Could not remove old build ' + $t + ', it will be tried again later: ' + $_.Exception.Message)
+            }
+        }
+        return @($gone.ToArray())
+    }
+
+    # The tag in selected.json, or '' when the file is missing, damaged, or names something unsafe.
+    function Read-SelectedTag {
+        param([string]$Path)
+        try {
+            if (-not (Test-Path -LiteralPath $Path)) { return '' }
+            $d = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+            $t = [string]$d.tag
+            if (($t -match '^[A-Za-z0-9._-]+$') -and ($t -notmatch '^\.+$')) { return $t }
+        } catch { }
+        return ''
+    }
+
+    # Written whole and then moved into place, so a crash never leaves half a pointer.
+    function Write-SelectedTag {
+        param([string]$Path, [string]$Tag)
+        $tmp = $Path + '.tmp'
+        [System.IO.File]::WriteAllText($tmp, (@{ tag = $Tag } | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $tmp -Destination $Path -Force
+    }
+
+    function Get-NewestTag {
+        param([string[]]$Tags)
+        $items = @($Tags | Where-Object { $_ } | ForEach-Object { @{ Tag = [string]$_; BuiltAt = '' } })
+        if ($items.Count -eq 0) { return '' }
+        return [string](@(Sort-Builds $items)[0].Tag)
+    }
+
+    # The tag to use when the wanted one may be gone: the wanted tag if it is stored, else the newest stored.
+    function Resolve-SelectedTag {
+        param([string]$Wanted, [string[]]$Stored)
+        if ($Wanted -and (@($Stored) -contains $Wanted)) { return $Wanted }
+        return (Get-NewestTag $Stored)
+    }
+
+    # After Get latest code: someone who had the newest build picked moves up to the new newest;
+    # someone who picked an older build on purpose stays on it.
+    function Get-TagAfterDownload {
+        param([string[]]$Before, [string[]]$After, [string]$Selected)
+        if ((-not $Selected) -or (@($After) -notcontains $Selected)) { return (Get-NewestTag $After) }
+        if ($Selected -ceq (Get-NewestTag $Before)) { return (Get-NewestTag $After) }
+        return $Selected
+    }
+
+    # The line shown after Get latest code. When a build picked on purpose is not the newest one
+    # stored, it says so, because Upload still sends the picked one.
+    function Get-DownloadStatusText {
+        param([string]$Status, [string[]]$Downloaded, [string[]]$After, [string]$Selected)
+        $label = { param([string]$t) if ($t -match '^build-(\d+)-') { 'build ' + $Matches[1] } else { $t } }
+        $newest = Get-NewestTag $After
+        $text = ''
+        if ($Status -eq 'downloaded') {
+            $names = @($Downloaded | ForEach-Object { & $label $_ })
+            if ($names.Count -le 1) { $text = 'Downloaded ' + ($names -join '') + '.' }
+            else { $text = 'Downloaded ' + $names.Count + ' builds (' + ($names -join ', ') + ').' }
+        } else {
+            $text = 'You already have the latest code.'
+        }
+        if ($Selected -and $newest -and ($Selected -cne $newest)) {
+            return @{ Text = ($text + ' Still using ' + (& $label $Selected) + ' (you picked it). Pick ' + (& $label $newest) + ' in the drop-down to use it.'); Kind = 'info' }
+        }
+        # Builds came down but none of them is the one in use: say which build Upload will send.
+        if (($Status -eq 'downloaded') -and $Selected -and (@($Downloaded) -cnotcontains $Selected)) {
+            return @{ Text = ($text + ' Using ' + (& $label $Selected) + '.'); Kind = 'info' }
+        }
+        if ($Status -eq 'downloaded') { return @{ Text = ($text + ' Ready to upload.'); Kind = 'success' } }
+        return @{ Text = $text; Kind = 'info' }
+    }
+
+    # Before builds\ existed, one build lived in project\ with version.json beside it. Moves
+    # that build to builds\<tag> so nobody loses it. Returns the tag moved, or '' when
+    # there was nothing to move or it could not be done (the old folder is then left alone).
+    function Move-LegacyProject {
+        param([string]$InstallDir)
+        $project = Join-Path $InstallDir 'project'
+        $versionPath = Join-Path $InstallDir 'version.json'
+        if (-not ((Test-Path $project) -and (Test-Path $versionPath))) { return '' }
+        $dest = ''
+        try {
+            $tag = [string]([System.IO.File]::ReadAllText($versionPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json).tag
+            $dest = Get-BuildFolder -InstallDir $InstallDir -Tag $tag
+            if (Test-Path $dest) { return '' }
+            New-Item -ItemType Directory -Path (Split-Path $dest -Parent) -Force | Out-Null
+            # version.json goes into the folder first, so the one rename below leaves a whole build.
+            Copy-Item -LiteralPath $versionPath -Destination (Join-Path $project 'version.json') -Force
+            Move-Item -LiteralPath $project -Destination $dest
+        } catch {
+            # Put the folder back if it was already moved, so the old layout is whole again.
+            if ($dest -and (Test-Path $dest) -and (-not (Test-Path $project))) { try { Move-Item -LiteralPath $dest -Destination $project } catch { } }
+            if (Test-Path $project) { Remove-Item -LiteralPath (Join-Path $project 'version.json') -Force -ErrorAction SilentlyContinue }
+            return ''
+        }
+        Remove-Item -LiteralPath $versionPath -Force -ErrorAction SilentlyContinue
+        return $tag
+    }
+
+    # Download one release into builds\<tag>, checking every file against the fingerprints in
+    # its release.json. $Release is the Release hashtable Get-LatestRelease returns.
+    # Returns @{ Status = 'downloaded' | 'current' | 'offline' | 'error'; Release; Error }.
+    function Save-ReleaseBuild {
+        param($Release, [string]$ReleasesUrl, [string]$InstallDir, [string[]]$AssetNames, $Sync = $null)
+        $rel = $Release
         $testerNames = @('tester-hot.package.bin', 'tester-cold.package.bin', 'tester-project.pros')
         $testerMentioned = $false
         $testerCandidate = $false
@@ -749,7 +991,7 @@ $SharedCode = {
         $listedModes = @()
         if ($null -ne $rel.Sha256) { $listedModes = @($modeNames | Where-Object { $rel.Sha256.ContainsKey($_) }) }
 
-        $projectDir = Join-Path $InstallDir 'project'
+        $projectDir = Get-BuildFolder -InstallDir $InstallDir -Tag $rel.Tag
         $haveAll = $true
         foreach ($n in $AssetNames) {
             if (-not (Test-Path (Get-ReleaseAssetPath -Root $projectDir -AssetName $n))) { $haveAll = $false }
@@ -768,7 +1010,7 @@ $SharedCode = {
             if ($actual -ne ([string]$rel.Sha256[$n]).ToLowerInvariant()) { $haveAll = $false }
         }
         function Write-VersionMetadata {
-            param($Release, [string]$DownloadedAt)
+            param($Release, [string]$DownloadedAt, [string]$Folder)
             $ver = @{
                 tag           = $Release.Tag
                 name          = $Release.Name
@@ -777,11 +1019,12 @@ $SharedCode = {
                 downloaded_at = $DownloadedAt
             }
             $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-            [System.IO.File]::WriteAllText((Join-Path $InstallDir 'version.json'), ($ver | ConvertTo-Json), $utf8NoBom)
+            [System.IO.File]::WriteAllText((Join-Path $Folder 'version.json'), ($ver | ConvertTo-Json), $utf8NoBom)
         }
-        if ($haveAll -and ($rel.Tag -eq $InstalledTag)) {
+        # The folder is named for the tag, so finding every file in it means this build is already here.
+        if ($haveAll) {
             $downloadedAt = (Get-Date).ToUniversalTime().ToString('o')
-            $existingVersionPath = Join-Path $InstallDir 'version.json'
+            $existingVersionPath = Join-Path $projectDir 'version.json'
             if (Test-Path $existingVersionPath) {
                 try {
                     $existingVersion = [System.IO.File]::ReadAllText($existingVersionPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
@@ -791,14 +1034,14 @@ $SharedCode = {
                     }
                 } catch { }
             }
-            Write-VersionMetadata -Release $rel -DownloadedAt $downloadedAt
+            Write-VersionMetadata -Release $rel -DownloadedAt $downloadedAt -Folder $projectDir
             return @{ Status = 'current'; Release = $rel; TesterAvailable = $testerCandidate }
         }
 
         # Download into a side folder first, then swap it in. If the download
-        # breaks halfway, the old working code is still there. Every file comes
-        # from the same tag, so all of them belong to one build.
-        $stage = Join-Path $InstallDir 'project.download'
+        # breaks halfway, nothing else changes: the other builds are separate
+        # folders. Every file comes from the same tag, so all of them belong to one build.
+        $stage = $projectDir + '.download'
         if (Test-Path $stage) { Remove-Item -Path $stage -Recurse -Force }
         New-Item -ItemType Directory -Path (Join-Path $stage 'bin') -Force | Out-Null
         try {
@@ -811,7 +1054,7 @@ $SharedCode = {
                 } catch {
                     $resp = $_.Exception.Response
                     if (($null -ne $resp) -and ([int]$resp.StatusCode -eq 404)) {
-                        throw ('The newest build (' + $rel.Tag + ') is missing ' + $n + '. Ask the programmer to check the build.')
+                        throw ('Build ' + $rel.Tag + ' is missing ' + $n + '. Ask the programmer to check the build.')
                     }
                     throw
                 }
@@ -853,7 +1096,7 @@ $SharedCode = {
                     } catch {
                         $resp = $_.Exception.Response
                         if (($null -ne $resp) -and ([int]$resp.StatusCode -eq 404)) {
-                            throw ('The newest build (' + $rel.Tag + ') is missing ' + $n + '.')
+                            throw ('Build ' + $rel.Tag + ' is missing ' + $n + '.')
                         }
                         throw
                     }
@@ -890,17 +1133,27 @@ $SharedCode = {
             }
         }
 
-        # Swap the new folder in without ever deleting the working one first:
-        #   project -> project.old, new -> project, then delete project.old.
-        # If the middle step fails, project.old goes back to being project.
-        $old = Join-Path $InstallDir 'project.old'
+        # version.json goes in before the folder moves into place, so a build only
+        # counts as stored once it is whole.
+        try {
+            Write-VersionMetadata -Release $rel -DownloadedAt ((Get-Date).ToUniversalTime().ToString('o')) -Folder $stage
+        } catch {
+            Remove-Item -Path $stage -Recurse -Force -ErrorAction SilentlyContinue
+            return @{ Status = 'error'; Error = ('Could not write the build information. ' + $_.Exception.Message) }
+        }
+
+        # Swap the new folder in without ever deleting a working copy first:
+        #   builds\<tag> -> builds\<tag>.old, new -> builds\<tag>, then delete the .old one.
+        # (A copy exists here only when an earlier download of this tag was incomplete or failed its check.)
+        # If the middle step fails, the .old folder goes back to being the build.
+        $old = $projectDir + '.old'
         if (Test-Path $old) { Remove-Item -Path $old -Recurse -Force }
         $hadOld = Test-Path $projectDir
         try {
             if ($hadOld) { Move-Item -Path $projectDir -Destination $old }
         } catch {
             Remove-Item -Path $stage -Recurse -Force -ErrorAction SilentlyContinue
-            return @{ Status = 'error'; Error = ('Could not replace the old code (is a file open?). Your old code is unchanged. ' + $_.Exception.Message) }
+            return @{ Status = 'error'; Error = ('Could not replace the old copy of this build (is a file open?). ' + $_.Exception.Message) }
         }
         try {
             Move-Item -Path $stage -Destination $projectDir
@@ -908,12 +1161,81 @@ $SharedCode = {
             $moveError = $_.Exception.Message
             if ($hadOld) { Move-Item -Path $old -Destination $projectDir }
             Remove-Item -Path $stage -Recurse -Force -ErrorAction SilentlyContinue
-            return @{ Status = 'error'; Error = ('Could not put the new code in place. Your old code is unchanged. ' + $moveError) }
+            return @{ Status = 'error'; Error = ('Could not put the new code in place. ' + $moveError) }
         }
         if ($hadOld) { Remove-Item -Path $old -Recurse -Force -ErrorAction SilentlyContinue }
 
-        Write-VersionMetadata -Release $rel -DownloadedAt ((Get-Date).ToUniversalTime().ToString('o'))
         return @{ Status = 'downloaded'; Release = $rel; TesterAvailable = $testerReady }
+    }
+
+    # Get latest code: download the newest release and the builds just before it, so the
+    # three newest published builds are on this computer, then drop the oldest ones.
+    #   * The newest build comes from release.json (as it always did).
+    #   * The earlier tags come from the public releases feed. If the feed cannot be
+    #     read, only the newest build is fetched and the builds already here stay.
+    #   * One build failing (a damaged file) fails only that build.
+    # $SelectedTag is the build in use. It is never deleted, however old.
+    # Returns @{ Status = 'downloaded' | 'current' | 'none' | 'offline' | 'error'; Release (the newest);
+    #            Downloaded (tags fetched this time); Failed (tag -> reason); Evicted (tags removed); Error }.
+    function Save-LatestRelease {
+        param([string]$ReleasesUrl, [string]$InstallDir, [string[]]$AssetNames, [string]$SelectedTag = '', [int]$Keep = 3, $Sync = $null)
+        $info = Get-LatestRelease -ReleasesUrl $ReleasesUrl
+        if ($info.Status -ne 'ok') { return $info }
+        $latest = $info.Release
+
+        $candidates = New-Object System.Collections.ArrayList
+        [void]$candidates.Add(@{ Tag = $latest.Tag; BuiltAt = $latest.BuiltAt })
+        $feed = Get-PublishedBuildTags -ReleasesUrl $ReleasesUrl
+        if ($feed.Status -eq 'ok') {
+            foreach ($t in $feed.Tags) {
+                if (-not (@($candidates | ForEach-Object { $_.Tag }) -contains $t)) { [void]$candidates.Add(@{ Tag = $t; BuiltAt = '' }) }
+            }
+        } else {
+            Add-SharedLog $Sync ('Earlier builds unavailable: ' + $feed.Error)
+        }
+        $wanted = @(Sort-Builds $candidates.ToArray() | Select-Object -First $Keep | ForEach-Object { [string]$_.Tag })
+        # The newest release is always fetched, even if the feed lists a higher number than release.json does.
+        if ($wanted -notcontains $latest.Tag) { $wanted = @($wanted | Select-Object -First ($Keep - 1)) + $latest.Tag }
+
+        $downloaded = New-Object System.Collections.Generic.List[string]
+        $failed = @{}
+        $latestResult = $null
+        foreach ($tag in $wanted) {
+            $rel = $null
+            if ($tag -ceq $latest.Tag) {
+                $rel = $latest
+            } else {
+                $older = Get-LatestRelease -ReleasesUrl $ReleasesUrl -Tag $tag
+                if (($older.Status -eq 'ok') -and ($older.Release.Tag -ceq $tag)) {
+                    $rel = $older.Release
+                } else {
+                    $failed[$tag] = if ($older.Error) { [string]$older.Error } else { 'It has no release information.' }
+                    Add-SharedLog $Sync ('Could not get ' + $tag + ': ' + $failed[$tag])
+                    continue
+                }
+            }
+            $r = Save-ReleaseBuild -Release $rel -ReleasesUrl $ReleasesUrl -InstallDir $InstallDir -AssetNames $AssetNames -Sync $Sync
+            if ($tag -ceq $latest.Tag) { $latestResult = $r }
+            if ($r.Status -eq 'downloaded') { $downloaded.Add($tag) }
+            elseif ($r.Status -ne 'current') {
+                $failed[$tag] = [string]$r.Error
+                if ($tag -cne $latest.Tag) { Add-SharedLog $Sync ('Could not get ' + $tag + ': ' + $r.Error) }
+            }
+        }
+
+        # Only drop old builds once the newest one is safely stored.
+        $evicted = @()
+        if (($latestResult.Status -eq 'downloaded') -or ($latestResult.Status -eq 'current')) {
+            $evicted = @(Remove-OldBuilds -InstallDir $InstallDir -Protect @($SelectedTag, $latest.Tag) -Keep $Keep -Sync $Sync)
+        }
+        $out = @{ Release = $latest; Downloaded = @($downloaded.ToArray()); Failed = $failed; Evicted = $evicted; TesterAvailable = $latestResult.TesterAvailable }
+        if (($latestResult.Status -eq 'downloaded') -or ($latestResult.Status -eq 'current')) {
+            if ($downloaded.Count -gt 0) { $out.Status = 'downloaded' } else { $out.Status = 'current' }
+        } else {
+            $out.Status = $latestResult.Status
+            $out.Error = $latestResult.Error
+        }
+        return $out
     }
 
     # ------------------------------------------------------------------
@@ -1538,7 +1860,7 @@ $SharedCode = {
     # Turns the text of a GET /map answer into plain data.
     # Returns @{ Status = 'ok'; Sim; SimIsLatest; Recorded; RecordedUpdated; Note } or
     # @{ Status = 'error'; Error }. Sim and Recorded are $null when the service had none.
-    #   Sim      = @{ Tag; Build; Routes = @( @{ Key; Side; Field ('override' or 'pinnacle'); Name; Id; TotalMs; T; X; Y; H; Marks; Events } ) }
+    #   Sim      = @{ Tag; Build; Routes = @( @{ Key; Side; Field ('override', 'skills' or 'pinnacle'); Name; Id; TotalMs; T; X; Y; H; Marks; Events } ) }
     #              Key is the route slot ('A'), 'AWP' for the built-in routine, or 'skills' (one fixed start, Left frame only).
     #   Recorded = @{ Routes = @( @{ Slot; HasStart; StartX; StartY; Wp = @( @{ X; Y; H; Step } ) } ); Sessions }
     function ConvertFrom-CloudMap {
@@ -1568,11 +1890,14 @@ $SharedCode = {
                         $slotV = Get-JsonValue $r 'slot'
                         if (($null -ne $slotV) -and ([string]$slotV).Trim()) { $key = ([string]$slotV).Trim() }
                         # Skills runs once from a fixed start in field coordinates, so it is always the Left frame.
+                        # The tag 'skills' (newer data) and the slot 'skills' (older data) both mean it.
+                        $fieldTag = [string](Get-JsonValue $r 'field')
+                        if (($fieldTag -ceq 'skills') -or ([string](Get-JsonValue $r 'id') -ieq 'skills')) { if ($fieldTag -cne 'pinnacle') { $key = 'skills' } }
                         if ($key -ieq 'skills') { $key = 'skills'; $side = 'L' }
                         if (($side -cne 'L') -and ($side -cne 'R')) { continue }
                         # A Pinnacle route is in true field coordinates, so it is never mirrored.
                         $fieldName = 'override'
-                        if ([string](Get-JsonValue $r 'field') -ceq 'pinnacle') { $fieldName = 'pinnacle' }
+                        if ($fieldTag -ceq 'pinnacle') { $fieldName = 'pinnacle' } elseif ($key -ceq 'skills') { $fieldName = 'skills' }
                         $pts = ConvertFrom-CloudSamples (Get-JsonValue $r 'samples') 0.001
                         [void]$routes.Add(@{
                             Key = $key; Side = $side; Field = $fieldName; Name = [string](Get-JsonValue $r 'name'); Id = [string](Get-JsonValue $r 'id'); TotalMs = (Get-JsonNumber (Get-JsonValue $r 'total_ms'))
@@ -2217,10 +2542,20 @@ $UploaderCheckBody = {
     $m.ForClick = [bool]$A.ForClick
     $m
 }
-$DownloadBody = { Save-LatestRelease -ReleasesUrl $A.ReleasesUrl -InstallDir $A.InstallDir -AssetNames $A.AssetNames -InstalledTag $A.InstalledTag -Sync $Sync }
+$DownloadBody = { Save-LatestRelease -ReleasesUrl $A.ReleasesUrl -InstallDir $A.InstallDir -AssetNames $A.AssetNames -SelectedTag $A.SelectedTag -Keep $A.Keep -Sync $Sync }
 $MapBody = { Read-ScourgeResults -Folder $A.Folder -Skip $A.Skip -Cache $A.Cache }
-$CloudBody = { Get-CloudMap -MapUrl $A.MapUrl -Build $A.Build -Code $A.Code -CachePath $A.CachePath }
-$CloudCacheBody = { Read-CloudCache -Path $A.Path }
+$CloudBody = { $r = Get-CloudMap -MapUrl $A.MapUrl -Build $A.Build -Code $A.Code -CachePath $A.CachePath; $r.Build = [string]$A.Build; $r }
+$CloudCacheBody = {
+    # A build with no saved copy of its own may use the single copy older uploaders kept, if it is that build's.
+    $r = Read-CloudCache -Path $A.Path
+    if (($r.Status -ne 'ok') -and $A.LegacyPath) {
+        # Only if that copy is this build's own prediction; another build's would be shown as this one's.
+        $old = Read-CloudCache -Path $A.LegacyPath
+        if (($old.Status -eq 'ok') -and ($null -ne $old.Data.Sim) -and ([string]$old.Data.Sim.Tag -ceq [string]$A.Build)) { $r = $old }
+    }
+    $r.Build = [string]$A.Build
+    $r
+}
 $PlanSendBody = { Send-ProposedPlan -Url $A.Url -Code $A.Code -Body $A.Body -Client $A.Client }
 
 # ---------------------------------------------------------------------------
@@ -2274,6 +2609,67 @@ function Get-InstalledBuild {
     } catch {
         return $null
     }
+}
+
+# Points the project, bin, and version.json paths at one stored build. Everything that
+# uploads or reads the code goes through those three paths, so this is the whole "swap".
+# -Save also remembers the pick in selected.json for the next start.
+function Set-SelectedBuild {
+    param([string]$Tag, [switch]$Save)
+    if ($Tag) { $script:ProjectDir = Get-BuildFolder -InstallDir $InstallDir -Tag $Tag } else { $script:ProjectDir = Join-Path $InstallDir 'project' }
+    $script:BinDir = Join-Path $script:ProjectDir 'bin'
+    # With no pick the old single-build layout applies: its version.json sits beside project, not in it.
+    if ($Tag) { $script:VersionFile = Join-Path $script:ProjectDir 'version.json' } else { $script:VersionFile = Join-Path $InstallDir 'version.json' }
+    $script:SelectedTag = $Tag
+    if ($Save -and $Tag) {
+        try { Write-SelectedTag -Path $script:SelectedFile -Tag $Tag } catch { }
+    }
+}
+
+# Runs once at start. Brings a single-build install forward to builds\, picks the saved
+# build (or the newest when the pointer is missing, damaged, or names a build that is
+# gone), and drops builds beyond the newest three. Not while something is using the builds.
+function Initialize-Builds {
+    param([bool]$Busy = $false)
+    try { [void](Move-LegacyProject -InstallDir $InstallDir) } catch { }
+    $root = Join-Path $InstallDir 'builds'
+    if (Test-Path $root) {
+        # A download that was cut off leaves a .download folder; a swap cut off leaves .old, which is the
+        # build itself when its own folder is missing. A folder that is no longer a whole build (a delete
+        # that hit a locked file) is a leftover too.
+        foreach ($d in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)) {
+            try {
+                if (($d.Name -notlike '*.download') -and ($d.Name -notlike '*.old') -and (-not (Test-BuildComplete $d.FullName))) { Remove-Item -LiteralPath $d.FullName -Recurse -Force }
+                elseif ($d.Name -like '*.download') { Remove-Item -LiteralPath $d.FullName -Recurse -Force }
+                elseif ($d.Name -like '*.old') {
+                    $own = Join-Path $root ($d.Name.Substring(0, $d.Name.Length - 4))
+                    if (Test-Path $own) { Remove-Item -LiteralPath $d.FullName -Recurse -Force } else { Move-Item -LiteralPath $d.FullName -Destination $own }
+                }
+            } catch { }
+        }
+    }
+    $stored = @(Get-StoredBuilds $InstallDir | ForEach-Object { [string]$_.Tag })
+    $want = Resolve-SelectedTag -Wanted (Read-SelectedTag $script:SelectedFile) -Stored $stored
+    Set-SelectedBuild $want -Save
+    try { [void](Remove-OldBuilds -InstallDir $InstallDir -Protect @($want) -Keep $script:BuildsToKeep -Busy $Busy) } catch { }
+}
+
+# One line in the build drop-down: "Build 313 (latest)  Nov 7, 11:36 AM". Only the newest published
+# build is called latest, and only once this run has asked GitHub which one that is.
+function Get-BuildChoiceText {
+    param($Build, [bool]$IsLatest)
+    $tag = [string]$Build.Tag
+    if ($tag -match '^build-(\d+)-') { $text = 'Build ' + $Matches[1] } else { $text = $tag }
+    if ($IsLatest) { $text += ' (latest)' }
+    $when = ''
+    if ([string]$Build.BuiltAt) {
+        try {
+            $styles = [System.Globalization.DateTimeStyles]'AssumeUniversal, AdjustToUniversal'
+            $when = [datetime]::Parse([string]$Build.BuiltAt, [System.Globalization.CultureInfo]::InvariantCulture, $styles).ToLocalTime().ToString('MMM d, h:mm tt', [System.Globalization.CultureInfo]::InvariantCulture)
+        } catch { $when = '' }
+    }
+    if ($when) { $text += '   ' + $when }
+    return $text
 }
 
 # The CI notes look like "Built from <sha>: <commit subject>".
@@ -2493,6 +2889,7 @@ $script:CloudFilling = $false
 $script:MirrorCache = @{}
 $script:MapFieldR = $null
 $script:PinnacleField = $null
+$script:SkillsField = $null
 # Where the team code is kept: encrypted for this Windows user, never in the repo or the log.
 $script:SettingsPath = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'ScourgeUploader\settings.json'
 $script:MapCache = [hashtable]::Synchronized(@{})
@@ -2508,7 +2905,7 @@ $script:MapField = $null
 # Pick is the spot the action menu is open at; PickHit is what a menu click adds to.
 # Hot is the action picked in the list, drawn with a ring. The name and note live in their boxes.
 $script:Plan = @{
-    On = $false; Lines = @(); Actions = @(); Side = ''; Field = ''; Undo = (New-Object System.Collections.ArrayList)
+    On = $false; Lines = @(); Actions = @(); Side = ''; Field = ''; ViewField = ''; Undo = (New-Object System.Collections.ArrayList)
     Stroke = $null; StrokeLost = $false; Sending = $false; Msg = ''; MsgKind = ''; Pick = $null; PickHit = $null; Hot = -1; Filling = $false; SentCode = ''
 }
 # Where the last paint put the field: screen x = Ox + x * Sc, screen y = Oy - y * Sc.
@@ -2580,6 +2977,10 @@ function New-MainForm {
     # Robot code section
     $ui.CodeLabel = New-Label 'ROBOT CODE' 0 0 10 10 $f.Section $c.Muted
     $ui.BuildTitle = New-Label 'No robot code downloaded yet' 0 0 10 10 $f.Strong $c.Text
+    # The build drop-down takes the title's place once there are two or more builds to choose from.
+    $ui.BuildBox = New-Object System.Windows.Forms.ComboBox
+    $ui.BuildBox.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $ui.BuildBox.Visible = $false
     $ui.BuildMeta = New-Label '' 0 0 10 10 $f.Small $c.Muted
     $ui.BuildMeta.AutoEllipsis = $false
     $ui.GetButton = New-FlatButton 'Get latest code' 0 0 10 10 $false
@@ -2587,7 +2988,7 @@ function New-MainForm {
     $ui.Notice.AutoEllipsis = $false
     $ui.Notice.Visible = $false
     $ui.MidLine = New-Line 0 0 10
-    $form.Controls.AddRange(@($ui.CodeLabel, $ui.BuildTitle, $ui.BuildMeta, $ui.GetButton, $ui.Notice, $ui.MidLine))
+    $form.Controls.AddRange(@($ui.CodeLabel, $ui.BuildTitle, $ui.BuildBox, $ui.BuildMeta, $ui.GetButton, $ui.Notice, $ui.MidLine))
 
     # Upload section
     $ui.UploadLabel = New-Label 'UPLOAD' 0 0 10 10 $f.Section $c.Muted
@@ -2672,7 +3073,7 @@ function New-MainForm {
 
     # Everything above except the header belongs to the Upload view. The Route Map
     # view has its own controls and hides these.
-    $ui.UploadControls = @($ui.CodeLabel, $ui.BuildTitle, $ui.BuildMeta, $ui.GetButton, $ui.Notice, $ui.MidLine,
+    $ui.UploadControls = @($ui.CodeLabel, $ui.BuildTitle, $ui.BuildBox, $ui.BuildMeta, $ui.GetButton, $ui.Notice, $ui.MidLine,
         $ui.UploadLabel, $ui.ModeLabel, $ui.SlotLabel, $ui.NameLabel, $ui.ModeBox, $ui.SlotBox, $ui.NameBox, $ui.NameError, $ui.UploadButton,
         $ui.TestsLine, $ui.TestsLabel, $ui.TestsHelper, $ui.TesterButton, $ui.RecordButton, $ui.ResultsStatus, $ui.SendButton, $ui.OpenFolderLink,
         $ui.Dot, $ui.ConnLabel, $ui.Status, $ui.DetailsLink, $ui.Log)
@@ -2699,6 +3100,7 @@ function New-MainForm {
     $ui.OpenFolderLink.Add_LinkClicked({ Invoke-Safe { Open-ResultsFolder } })
     $ui.NameBox.Add_TextChanged({ Invoke-Safe { Update-NameError } })
     $ui.ModeBox.Add_SelectedIndexChanged({ Invoke-Safe { Set-ModeDefaults } })
+    $ui.BuildBox.Add_SelectedIndexChanged({ Invoke-Safe { Select-Build } })
     $ui.DetailsLink.Add_LinkClicked({ Invoke-Safe { Set-DetailsVisible (-not $script:DetailsShown) } })
     $ui.SegUpload.Add_Click({ Invoke-Safe { Set-View 'upload' } })
     $ui.SegMap.Add_Click({ Invoke-Safe { Set-View 'map' } })
@@ -2808,8 +3210,13 @@ function Update-Layout {
     $btnW = Px 128
     $ui.GetButton.SetBounds(($M + $inner - $btnW), ($y - (Px 4)), $btnW, (Px 32))
     $textW = $inner - $btnW - (Px 16)
+    # With two or more builds the drop-down sits where the title is (it names the build), the same
+    # width as the title. A drop-down sets its own height from the font, like the Mode box below.
+    $ui.BuildBox.Visible = $script:BuildPickerShown
+    $ui.BuildTitle.Visible = -not $script:BuildPickerShown
     $ui.BuildTitle.SetBounds($M, $y, $textW, (Px 22))
-    $y += Px 24
+    $ui.BuildBox.SetBounds($M, $y, $textW, $ui.BuildBox.Height)
+    if ($script:BuildPickerShown) { $y += [math]::Max((Px 24), ($ui.BuildBox.Height + (Px 1))) } else { $y += Px 24 }
     Set-WrappedLabel $ui.BuildMeta $M $y $textW
     $y += $ui.BuildMeta.Height
     # Keep clear of the button even when the details text is short.
@@ -3515,7 +3922,7 @@ function Update-MapPanel {
 # ---------------------------------------------------------------------------
 # Route Map from the team relay. The relay base comes from results_url in
 # uploader.json. Opening the tab, Refresh, and a good Send each fetch; the last good
-# answer is kept in Documents\Scourge Robot Data\map-cloud.json and drawn when there is
+# answer is kept per build in Documents\Scourge Robot Data\map-cloud-<tag>.json and drawn when there is
 # no network. Nothing waits on the network: the cache and the fetch are background jobs.
 # ---------------------------------------------------------------------------
 
@@ -3528,7 +3935,12 @@ function Get-MapCloudUrl {
     return $u + '/map'
 }
 
+# One saved copy per build: the prediction depends on the code, and offline the Route Map should
+# show the picked build's own. With no build (or an odd tag) it is the single copy older
+# versions of the uploader kept, which is also what a build with no copy of its own falls back to.
 function Get-CloudCachePath {
+    param([string]$Tag = '')
+    if (($Tag -match '^[A-Za-z0-9._-]+$') -and ($Tag -notmatch '^\.+$')) { return (Join-Path (Get-ResultsFolder) ('map-cloud-' + $Tag + '.json')) }
     return (Join-Path (Get-ResultsFolder) 'map-cloud.json')
 }
 
@@ -3617,7 +4029,7 @@ function Test-CloudRouteKnown {
     return $false
 }
 
-# The field a route is on, 'override' unless the prediction says it is a Pinnacle route.
+# The field a route is on: 'pinnacle' when the prediction says so, 'skills' for the Skills route, otherwise 'override'.
 function Get-CloudRouteField {
     $cl = $script:Cloud
     if (($null -ne $cl.Data) -and ($null -ne $cl.Data.Sim)) {
@@ -3625,13 +4037,15 @@ function Get-CloudRouteField {
             if (([string]$r.Key -ieq [string]$cl.Route) -and ([string]$r.Field -ceq 'pinnacle')) { return 'pinnacle' }
         }
     }
+    if ([string]$cl.Route -ieq 'skills') { return 'skills' }
     return 'override'
 }
 
 # The field on screen: while a plan has lines it stays on the plan's field, otherwise it follows the picked route.
 function Get-ViewFieldName {
     $p = $script:Plan
-    if ($p.On -and (@($p.Lines).Count -gt 0) -and $p.Field) { return [string]$p.Field }
+    # A plan is sent on the Override field even from a Skills view, but the Skills field stays on screen.
+    if ($p.On -and (@($p.Lines).Count -gt 0) -and $p.Field) { if ($p.ViewField) { return [string]$p.ViewField }; return [string]$p.Field }
     return (Get-CloudRouteField)
 }
 
@@ -3725,7 +4139,10 @@ function Get-CloudNote {
         $lines.Add($t)
     }
     if ($have -and ($null -ne $cl.Data.Sim) -and $cl.Data.Sim.Tag -and $script:InstalledTag -and ([string]$cl.Data.Sim.Tag -ne [string]$script:InstalledTag)) {
-        $lines.Add('The prediction is for ' + (Get-BuildTagLabel ([string]$cl.Data.Sim.Tag)) + ', this computer has ' + (Get-BuildTagLabel ([string]$script:InstalledTag)) + '.')
+        $lines.Add('The prediction is for ' + (Get-BuildTagLabel ([string]$cl.Data.Sim.Tag)) + ', but ' + (Get-BuildTagLabel ([string]$script:InstalledTag)) + ' is picked.')
+    }
+    if ($have -and ($null -eq $cl.Data.Sim) -and $script:InstalledTag) {
+        $lines.Add('There is no prediction for ' + (Get-BuildTagLabel ([string]$script:InstalledTag)) + ' yet.')
     }
     if ($have -and $cl.Data.Note) { $lines.Add([string]$cl.Data.Note) }
     if ((Test-CloudFixedRoute) -and (-not $script:Plan.On)) {
@@ -3740,6 +4157,7 @@ function Get-MapEmptyText {
     $cl = $script:Cloud
     if (-not $cl.Code) { return 'Enter the team code on the right to load the predicted route.' }
     if (($null -eq $cl.Data) -and ($cl.Fetching -or $cl.Pending)) { return 'Loading the predicted route...' }
+    if ($script:InstalledTag) { return ('No prediction for ' + (Get-BuildTagLabel ([string]$script:InstalledTag)) + ' yet.' + "`n" + 'Try Refresh, or pick another build.') }
     return ('No prediction for this build yet.' + "`n" + 'Get the latest build, then Refresh.')
 }
 
@@ -3789,9 +4207,16 @@ function Set-CloudResult {
     $cl = $script:Cloud
     $cl.Fetching = $false
     $status = [string]$R.Status
+    # The answer is for a build that is no longer the picked one: drop it and ask again for the picked one.
+    if ($R.Build -and ([string]$R.Build -cne [string]$script:InstalledTag)) {
+        if ($cl.Code) { $cl.Again = $false; Start-CloudFetch }
+        return
+    }
     if ($status -eq 'ok') {
         Set-CloudData $R.Data ([string]$R.Fetched)
         $cl.Fresh = $true; $cl.Offline = $false; $cl.Error = ''; $cl.Unauthorized = $false
+        # The copy older uploaders kept is no longer needed once a build has its own.
+        if ($R.Build) { Remove-Item -LiteralPath (Get-CloudCachePath) -Force -ErrorAction SilentlyContinue }
         if ($R.CacheError) { Add-LogText ('Route Map: could not save the offline copy: ' + [string]$R.CacheError) }
     } elseif ($status -eq 'unauthorized') {
         # A wrong code is forgotten, so the field comes back and asks again.
@@ -3816,8 +4241,10 @@ function Start-CloudCacheLoad {
     if ($cl.CacheLoaded) { return }
     $cl.CacheLoaded = $true
     try {
-        Start-BgJob $CloudCacheBody @{ Path = (Get-CloudCachePath) } {
+        Start-BgJob $CloudCacheBody @{ Path = (Get-CloudCachePath $script:InstalledTag); LegacyPath = (Get-CloudCachePath); Build = [string]$script:InstalledTag } {
             param($r)
+            # A different build was picked while this was reading: its copy is not the one to show.
+            if ($r.Build -and ([string]$r.Build -cne [string]$script:InstalledTag)) { return }
             if (($r.Status -eq 'ok') -and (-not $script:Cloud.Fresh)) {
                 Set-CloudData $r.Data ([string]$r.Fetched)
                 Update-MapSessions
@@ -3843,13 +4270,39 @@ function Start-CloudFetch {
     $cl.Again = $false
     Update-CloudView
     try {
-        Start-BgJob $CloudBody @{ MapUrl = (Get-MapCloudUrl $script:ResultsUrl); Build = [string]$script:InstalledTag; Code = [string]$cl.Code; CachePath = (Get-CloudCachePath) } {
+        Start-BgJob $CloudBody @{ MapUrl = (Get-MapCloudUrl $script:ResultsUrl); Build = [string]$script:InstalledTag; Code = [string]$cl.Code; CachePath = (Get-CloudCachePath $script:InstalledTag) } {
             param($r)
             Set-CloudResult $r
         }
     } catch {
         Set-CloudResult @{ Status = 'error'; Error = ('Could not start loading routes: ' + $_.Exception.Message) }
     }
+}
+
+# A different build was picked: forget the prediction shown for the old one, show the saved copy of
+# the new one right away, and ask the route service for it.
+function Switch-CloudBuild {
+    $cl = $script:Cloud
+    $cl.CacheLoaded = $false
+    $cl.Fresh = $false
+    $cl.Offline = $false
+    $cl.Error = ''
+    Set-CloudData $null ''
+    Update-MapSessions
+    Start-CloudFetch
+}
+
+# A build that was removed has no use for its saved prediction. Tags still stored are kept; with no stored
+# builds nothing is removed.
+function Remove-StaleMapCaches {
+    $stored = @(Get-StoredBuilds $InstallDir | ForEach-Object { [string]$_.Tag })
+    if ($stored.Count -eq 0) { return }
+    try {
+        foreach ($f in @(Get-ChildItem -LiteralPath (Get-ResultsFolder) -Filter 'map-cloud-*.json' -File -ErrorAction SilentlyContinue)) {
+            $tag = $f.Name.Substring(10, $f.Name.Length - 15)
+            if ($stored -notcontains $tag) { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue }
+        }
+    } catch { }
 }
 
 # Called when the uploader check finishes: carry on with a fetch that was waiting for the address.
@@ -4063,10 +4516,10 @@ function Exit-PlanMode {
 function Set-PlanState {
     param($Lines, [string]$Side, $Actions)
     $p = $script:Plan
-    [void]$p.Undo.Add(@{ Lines = $p.Lines; Side = $p.Side; Actions = $p.Actions; Field = $p.Field })
+    [void]$p.Undo.Add(@{ Lines = $p.Lines; Side = $p.Side; Actions = $p.Actions; Field = $p.Field; ViewField = $p.ViewField })
     if ($p.Undo.Count -gt 100) { $p.Undo.RemoveAt(0) }
     $p.Lines = @($Lines)
-    if ($p.Lines.Count -gt 0) { $p.Side = $Side } else { $p.Side = ''; $p.Field = '' }
+    if ($p.Lines.Count -gt 0) { $p.Side = $Side } else { $p.Side = ''; $p.Field = ''; $p.ViewField = '' }
     $p.Actions = @($Actions)
     $p.Msg = ''
     $p.Pick = $null
@@ -4079,7 +4532,7 @@ function Undo-PlanStep {
     if ($p.Sending -or ($p.Undo.Count -eq 0)) { return }
     $u = $p.Undo[$p.Undo.Count - 1]
     $p.Undo.RemoveAt($p.Undo.Count - 1)
-    $p.Lines = @($u.Lines); $p.Side = [string]$u.Side; $p.Actions = @($u.Actions); $p.Field = [string]$u.Field
+    $p.Lines = @($u.Lines); $p.Side = [string]$u.Side; $p.Actions = @($u.Actions); $p.Field = [string]$u.Field; $p.ViewField = [string]$u.ViewField
     $p.Msg = ''; $p.Pick = $null; $p.Hot = -1
     if ($p.On -and ($p.Lines.Count -gt 0) -and $p.Side) { $script:Cloud.Side = $p.Side }
     Update-PlanPanel
@@ -4184,10 +4637,12 @@ function Complete-PlanStroke {
     $side = $p.Side
     $first = (@($p.Lines).Count -eq 0)
     if ($first) { $side = [string]$script:Cloud.Side }
+    # A Skills view has no field of its own for plans: they are drawn on the Override match field.
     $fieldNow = Get-CloudRouteField
+    if ($fieldNow -ceq 'skills') { $fieldNow = 'override' }
     Set-PlanState $r.Lines $side $p.Actions
     # The first line fixes the plan's field, the way it fixes the side.
-    if ($first) { $p.Field = $fieldNow }
+    if ($first) { $p.Field = $fieldNow; $p.ViewField = Get-CloudRouteField }
 }
 
 # A click near a line opens the action menu beside it; a click near nothing says
@@ -4532,7 +4987,7 @@ function Complete-PlanSend {
     }
     $p.SentCode = ''
     if ($m.Ok) {
-        $p.Lines = @(); $p.Actions = @(); $p.Side = ''; $p.Field = ''; $p.Undo.Clear(); $p.Hot = -1
+        $p.Lines = @(); $p.Actions = @(); $p.Side = ''; $p.Field = ''; $p.ViewField = ''; $p.Undo.Clear(); $p.Hot = -1
         $p.Filling = $true
         try { $ui.PlanNameBox.Text = ''; $ui.PlanNoteBox.Text = '' } finally { $p.Filling = $false }
     }
@@ -4545,19 +5000,31 @@ function Complete-PlanSend {
 # The field with every point reflected for the Right side (the same y = -x reflection
 # recordings use). Goals, toggles, and loose objects all map onto the field.
 function Get-ViewField {
-    param([string]$Side)
+    param([string]$Side, [string]$Id = 'override')
+    # Skills is one fixed start and is never mirrored.
+    if ($Id -ceq 'skills') { return (Get-SkillsField) }
     $f = Get-MapField
     if ($Side -ne 'R') { return $f }
     if ($null -ne $script:MapFieldR) { return $script:MapFieldR }
     $goals = New-Object System.Collections.ArrayList
-    foreach ($g in $f.Goals) { [void]$goals.Add(@($g[0], (0.0 - $g[2]), (0.0 - $g[1]))) }
+    foreach ($g in $f.Goals) { [void]$goals.Add(@($g[0], (0.0 - $g[2]), (0.0 - $g[1]), $g[3])) }
     $toggles = New-Object System.Collections.ArrayList
     foreach ($t in $f.Toggles) { [void]$toggles.Add(@((0.0 - $t[1]), (0.0 - $t[0]))) }
+    # A Pin's long axis turns with the reflection: direction (cos a, sin a) becomes (-sin a, -cos a).
     $objects = New-Object System.Collections.ArrayList
-    foreach ($o in $f.Objects) { [void]$objects.Add(@((0.0 - $o[1]), (0.0 - $o[0]))) }
+    foreach ($o in $f.Objects) {
+        $m = $o.Clone()
+        $m.X = 0.0 - $o.Y; $m.Y = 0.0 - $o.X
+        $a = [double]$o.Angle * [math]::PI / 180.0
+        $m.Angle = ([math]::Atan2((0.0 - [math]::Cos($a)), (0.0 - [math]::Sin($a))) * 180.0 / [math]::PI + 360.0) % 360.0
+        [void]$objects.Add($m)
+    }
+    # Loaders and the Load Zones stay where they are: the field is the same, and only the route is
+    # drawn reflected, so the reflection must map the other objects onto their twins and leave these.
     $script:MapFieldR = @{
+        Id = 'override'
         Wall = $f.Wall; RobotLength = $f.RobotLength; RobotWidth = $f.RobotWidth; RobotFront = $f.RobotFront; RobotBack = $f.RobotBack
-        Goals = @($goals.ToArray()); Toggles = @($toggles.ToArray()); Objects = @($objects.ToArray())
+        Goals = @($goals.ToArray()); Toggles = @($toggles.ToArray()); Objects = @($objects.ToArray()); Loaders = $f.Loaders
     }
     return $script:MapFieldR
 }
@@ -4593,12 +5060,59 @@ function Merge-Bounds {
 }
 
 # Where things are on the field, in the LEFT frame (see include/field.hpp in the
-# robot code). Goal spots, toggle spots, and the loose Cup and Pin spots are
-# measured from the field kit's drawings, not from a real field, so they are
-# approximate. The opponent's Goals are ours turned 180 degrees about the center.
+# robot code). Goal spots, toggle spots, and the Cups and Pins are measured from the
+# field kit's drawings, not from a real field, so they are approximate. The opponent's
+# Goals are ours turned 180 degrees about the center. The layout is the one in the robot
+# repo's tools/autopath/field.py (override_objects): the same numbers, so both maps agree.
+#   Goals    = (kind, x, y, holds a standing Pin at the start of a match)
+#   Objects  = @{ Name; Kind ('cup', 'stack', 'pin_flat'); X; Y; R; Tip ('red', 'blue' or ''); Len; W; Angle }
+#   Loaders  = @{ X; Y; Zone = (x0, y0, x1, y1) or $null }  (a red Load Zone sits by the near two)
 function Get-MapField {
     if ($null -ne $script:MapField) { return $script:MapField }
+    $cupR = 1.58; $gap = 3.16; $pinLen = 6.5; $pinW = 3.02; $off = 4.4
+    $objects = New-Object System.Collections.ArrayList
+    $newObj = { param($n, $k, $x, $y) @{ Name = $n; Kind = $k; X = [double]$x; Y = [double]$y; R = $cupR; Tip = ''; Len = 0.0; W = 0.0; Angle = 0.0 } }
+    # Three touching Cups along a wall, the middle one holding a standing Pin.
+    foreach ($wg in @(
+            @('OBJ_WALL_NEAR_RIGHT', 23.6, -68.7, $true), @('OBJ_WALL_NEAR_LEFT', -23.6, -68.7, $true),
+            @('OBJ_WALL_SIDE', 68.7, -23.6, $false), @('OBJ_WALL_SIDE_UP', 68.7, 23.6, $false),
+            @('OBJ_WALL_FAR_RIGHT', 23.6, 68.7, $true), @('OBJ_WALL_FAR_LEFT', -23.6, 68.7, $true),
+            @('OBJ_WALL_LEFT_UP', -68.7, 23.6, $false), @('OBJ_WALL_LEFT_DOWN', -68.7, -23.6, $false))) {
+        $i = 0
+        foreach ($k in @(-1, 0, 1)) {
+            $i++
+            if ($wg[3]) { $cx = $wg[1] + $k * $gap; $cy = $wg[2] } else { $cx = $wg[1]; $cy = $wg[2] + $k * $gap }
+            $kind = 'cup'; if ($k -eq 0) { $kind = 'stack' }
+            [void]$objects.Add((& $newObj ($wg[0] + '_' + $i) $kind ([math]::Round($cx, 3)) ([math]::Round($cy, 3))))
+        }
+    }
+    # A Cup with four Pins lying around it, on the Autonomous Line. The colored tips point away from the Cup: red at +x and -y, blue at -x and +y.
+    foreach ($cl in @(@('OBJ_CLUSTER_1', -47.2, -47.2), @('OBJ_CLUSTER_2', -23.6, -23.6), @('OBJ_CLUSTER_3', 23.6, 23.6), @('OBJ_CLUSTER_4', 47.2, 47.2))) {
+        foreach ($pn in @(@('XP', 1, 0, 0.0, 'red'), @('YN', 0, -1, 270.0, 'red'), @('XN', -1, 0, 180.0, 'blue'), @('YP', 0, 1, 90.0, 'blue'))) {
+            $o = & $newObj ($cl[0] + '_PIN_' + $pn[0]) 'pin_flat' ([math]::Round($cl[1] + $pn[1] * $off, 3)) ([math]::Round($cl[2] + $pn[2] * $off, 3))
+            $o.Len = $pinLen; $o.W = $pinW; $o.Angle = [double]$pn[3]; $o.Tip = $pn[4]
+            [void]$objects.Add($o)
+        }
+        # The Cup comes after its Pins (as in field.py), so it is drawn on top of them.
+        [void]$objects.Add((& $newObj $cl[0] 'cup' $cl[1] $cl[2]))
+    }
+    # A Cup with a standing Pin; the Midfield ones show a red or blue half up.
+    foreach ($st in @(
+            @('OBJ_DIAGONAL_SIDE', 47.2, -47.2, ''), @('OBJ_DIAGONAL_INNER', 23.6, -23.6, ''),
+            @('OBJ_DIAGONAL_FAR_INNER', -23.6, 23.6, ''), @('OBJ_DIAGONAL_FAR', -47.2, 47.2, ''),
+            @('OBJ_MID_NEAR', 0.0, -23.6, 'red'), @('OBJ_MID_SIDE', 23.6, 0.0, 'red'),
+            @('OBJ_MID_FAR', 0.0, 23.6, 'blue'), @('OBJ_MID_LEFT', -23.6, 0.0, 'blue'))) {
+        $o = & $newObj $st[0] 'stack' $st[1] $st[2]
+        $o.Tip = $st[3]
+        [void]$objects.Add($o)
+    }
+    # Loaders sit in the corners. A red Load Zone runs 24.3 in along the wall and 11.5 in out from each near corner.
+    $loaders = @(
+        @{ X = -58.7; Y = -68.5; Zone = @(-70.1, -70.1, (-70.1 + 24.3), (-70.1 + 11.5)) },
+        @{ X = 58.7; Y = -68.5; Zone = @((70.1 - 24.3), -70.1, 70.1, (-70.1 + 11.5)) },
+        @{ X = -58.7; Y = 68.5; Zone = $null }, @{ X = 58.7; Y = 68.5; Zone = $null })
     $script:MapField = @{
+        Id = 'override'
         Wall = 70.1
         RobotLength = 17.0
         RobotWidth = 16.0
@@ -4606,17 +5120,35 @@ function Get-MapField {
         RobotFront = 7.0
         RobotBack = 10.0
         Goals = @(
-            @('alliance', 23.6, -47.2), @('alliance', 47.2, -23.6),
-            @('neutral', -23.6, -47.2), @('neutral', 47.2, 23.6), @('neutral', 0.0, 0.0),
-            @('opponent', -23.6, 47.2), @('opponent', -47.2, 23.6),
-            @('neutral', 23.6, 47.2), @('neutral', -47.2, -23.6)
+            @('alliance', 23.6, -47.2, $false), @('alliance', 47.2, -23.6, $false),
+            @('neutral', -23.6, -47.2, $true), @('neutral', 47.2, 23.6, $true), @('neutral', 0.0, 0.0, $true),
+            @('opponent', -23.6, 47.2, $false), @('opponent', -47.2, 23.6, $false),
+            @('neutral', 23.6, 47.2, $true), @('neutral', -47.2, -23.6, $true)
         )
         Toggles = @(@(0.0, -70.1), @(70.1, 0.0), @(-70.1, 0.0), @(0.0, 70.1))
-        Objects = @(@(-23.6, -68.7), @(23.6, -68.7), @(68.7, -23.6), @(0.0, -23.6), @(23.6, 0.0), @(47.2, -47.2), @(23.6, -23.6))
+        Objects = @($objects.ToArray())
+        Loaders = $loaders
     }
     return $script:MapField
 }
 
+# The Skills field: the match field with every Goal empty and no other alliance, so the blue Goals
+# are ordinary Goals. Everything else is the same.
+function Get-SkillsField {
+    if ($null -ne $script:SkillsField) { return $script:SkillsField }
+    $f = Get-MapField
+    $s = $f.Clone()
+    $s.Id = 'skills'
+    $goals = New-Object System.Collections.ArrayList
+    foreach ($g in $f.Goals) {
+        $kind = [string]$g[0]
+        if ($kind -eq 'opponent') { $kind = 'alliance' }
+        [void]$goals.Add(@($kind, $g[1], $g[2], $false))
+    }
+    $s.Goals = @($goals.ToArray())
+    $script:SkillsField = $s
+    return $script:SkillsField
+}
 # The Pinnacle field, in true field coordinates (never mirrored, unlike the Override field).
 # Positions are read off the figures in the Pinnacle manual v2.0, so they are good to about
 # 1 in. Goals are (kind, x, y); rollers and loaders are (x, y); Pins are (x, y, angle in
@@ -4725,6 +5257,69 @@ function Show-PinnacleField {
     }
 }
 
+# Paints what stands on the Override field (and the Skills field, which is the same layout):
+# Load Zones, Loaders, Cups as rings, stacks as a ring and a dot, lying Pins as bars with a
+# colored tip, then the Goals. A neutral Goal that starts a match shows its standing Pin.
+function Show-OverrideObjects {
+    param($G, $Pal, $Field, [double]$Ox, [double]$Oy, [double]$Sc)
+    foreach ($l in $Field.Loaders) {
+        if ($null -ne $l.Zone) {
+            $zx = $Ox + $l.Zone[0] * $Sc; $zy = $Oy - $l.Zone[3] * $Sc
+            $G.DrawRectangle($Pal.ZonePen, [single]$zx, [single]$zy, [single](($l.Zone[2] - $l.Zone[0]) * $Sc), [single](($l.Zone[3] - $l.Zone[1]) * $Sc))
+        }
+        # A diamond, like the web map's Loader mark.
+        $lr = [double][math]::Max((Px 4), 2.6 * $Sc)
+        $lx = $Ox + $l.X * $Sc; $ly = $Oy - $l.Y * $Sc
+        $G.DrawPolygon($Pal.MutedPen, [System.Drawing.PointF[]]@(
+            [System.Drawing.PointF]::new([single]$lx, [single]($ly - $lr)), [System.Drawing.PointF]::new([single]($lx + $lr), [single]$ly),
+            [System.Drawing.PointF]::new([single]$lx, [single]($ly + $lr)), [System.Drawing.PointF]::new([single]($lx - $lr), [single]$ly)))
+    }
+    $cr = [double][math]::Max((Px 3), 1.58 * $Sc)
+    foreach ($o in $Field.Objects) {
+        $cx = $Ox + $o.X * $Sc; $cy = $Oy - $o.Y * $Sc
+        if ($o.Kind -eq 'pin_flat') {
+            $a = [double]$o.Angle * [math]::PI / 180.0
+            $ux = [math]::Cos($a); $uy = -[math]::Sin($a)
+            $vx = -$uy; $vy = $ux
+            $hl = [math]::Max((Px 3), $o.Len / 2.0 * $Sc); $hw = [math]::Max((Px 1.5), $o.W / 2.0 * $Sc)
+            $box = [System.Drawing.PointF[]]@(
+                [System.Drawing.PointF]::new([single]($cx + $ux * $hl + $vx * $hw), [single]($cy + $uy * $hl + $vy * $hw)),
+                [System.Drawing.PointF]::new([single]($cx + $ux * $hl - $vx * $hw), [single]($cy + $uy * $hl - $vy * $hw)),
+                [System.Drawing.PointF]::new([single]($cx - $ux * $hl - $vx * $hw), [single]($cy - $uy * $hl - $vy * $hw)),
+                [System.Drawing.PointF]::new([single]($cx - $ux * $hl + $vx * $hw), [single]($cy - $uy * $hl + $vy * $hw)))
+            $G.FillPolygon($Pal.ObjBrush, $box)
+            if ($o.Tip) {
+                # The colored end, 2.4 in long.
+                $tl = [math]::Min((2.4 * $Sc), (2.0 * $hl))
+                $tip = [System.Drawing.PointF[]]@(
+                    [System.Drawing.PointF]::new([single]($cx + $ux * $hl + $vx * $hw), [single]($cy + $uy * $hl + $vy * $hw)),
+                    [System.Drawing.PointF]::new([single]($cx + $ux * $hl - $vx * $hw), [single]($cy + $uy * $hl - $vy * $hw)),
+                    [System.Drawing.PointF]::new([single]($cx + $ux * ($hl - $tl) - $vx * $hw), [single]($cy + $uy * ($hl - $tl) - $vy * $hw)),
+                    [System.Drawing.PointF]::new([single]($cx + $ux * ($hl - $tl) + $vx * $hw), [single]($cy + $uy * ($hl - $tl) + $vy * $hw)))
+                if ($o.Tip -eq 'red') { $G.FillPolygon($Pal.TipRed, $tip) } else { $G.FillPolygon($Pal.TipBlue, $tip) }
+            }
+            $G.DrawPolygon($Pal.GridPen, $box)
+        } else {
+            $G.DrawEllipse($Pal.ObjPen, [single]($cx - $cr), [single]($cy - $cr), [single](2.0 * $cr), [single](2.0 * $cr))
+            if ($o.Kind -eq 'stack') {
+                $dr = $cr * 0.45
+                $brush = $Pal.ObjDot
+                if ($o.Tip -eq 'red') { $brush = $Pal.TipRed } elseif ($o.Tip -eq 'blue') { $brush = $Pal.TipBlue }
+                $G.FillEllipse($brush, [single]($cx - $dr), [single]($cy - $dr), [single](2.0 * $dr), [single](2.0 * $dr))
+            }
+        }
+    }
+    $goalR = [math]::Max((Px 5), 2.4 * $Sc)
+    foreach ($gl in $Field.Goals) {
+        $gx = $Ox + $gl[1] * $Sc; $gy = $Oy - $gl[2] * $Sc
+        Show-MapShape $G $Pal ([string]$gl[0]) $gx $gy $goalR
+        if ($gl[3]) {
+            $pr = $goalR * 0.42
+            $G.FillEllipse($Pal.ObjDot, [single]($gx - $pr), [single]($gy - $pr), [single](2.0 * $pr), [single](2.0 * $pr))
+        }
+    }
+}
+
 # One small symbol, centered on (X, Y), R pixels from center to edge. Goals use
 # alliance, neutral, opponent. Marks use drop, pin, stack, toggle, push.
 function Show-MapShape {
@@ -4806,8 +5401,10 @@ function Show-RouteMapCanvas {
     $m = $script:Map
     $vside = Get-CloudViewSide
     # The Pinnacle field is never mirrored; the Override field is drawn from the picked side.
-    $pin = ((Get-ViewFieldName) -ceq 'pinnacle')
-    if ($pin) { $field = Get-PinnacleField } else { $field = Get-ViewField $vside }
+    $fieldName = Get-ViewFieldName
+    $pin = ($fieldName -ceq 'pinnacle')
+    $skills = ($fieldName -ceq 'skills')
+    if ($pin) { $field = Get-PinnacleField } else { $field = Get-ViewField $vside $fieldName }
     $inv = [System.Globalization.CultureInfo]::InvariantCulture
     $G.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
     $G.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
@@ -4833,6 +5430,12 @@ function Show-RouteMapCanvas {
         $pal.WarnBrush = New-Object System.Drawing.SolidBrush($c.Warn)
         $pal.BadBrush = New-Object System.Drawing.SolidBrush($c.Bad)
         $pal.GridPen = & $mkPen $c.Line $thin
+        $pal.ObjPen = & $mkPen ([System.Drawing.Color]::FromArgb(190, $c.Muted)) ($thin * 1.5)
+        $pal.ObjDot = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(200, $c.Muted))
+        $pal.TipRed = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(198, 47, 47))
+        $pal.TipBlue = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(47, 98, 201))
+        $pal.ZonePen = & $mkPen $c.Border $thin
+        $pal.ZonePen.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
         $pal.BorderPen = & $mkPen $c.Border ($thin * 1.5)
         $pal.AutoPen = & $mkPen $c.Warn ($thin * 1.5)
         $pal.AutoPen.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
@@ -4916,13 +5519,13 @@ function Show-RouteMapCanvas {
         if ($pin) {
             Show-PinnacleField $G $pal $field $ox $oy $sc
         } else {
-        # Floor, our side of the Autonomous Line (below y = x), tile seams, wall.
+        # Floor, our side of the Autonomous Line (below y = x, left out in Skills, which has no other side), tile seams, wall.
         $G.FillRectangle($pal.BackBrush, [single]$left, [single]$top, [single]$side, [single]$side)
         $tint = [System.Drawing.PointF[]]@(
             [System.Drawing.PointF]::new([single]$left, [single]($top + $side)),
             [System.Drawing.PointF]::new([single]($left + $side), [single]($top + $side)),
             [System.Drawing.PointF]::new([single]($left + $side), [single]$top))
-        $G.FillPolygon($pal.TintBrush, $tint)
+        if (-not $skills) { $G.FillPolygon($pal.TintBrush, $tint) }
         # Tiles are about 23.6 in, the spacing of the Goals.
         foreach ($k in -2..2) {
             $gx = $ox + 23.6 * $k * $sc
@@ -4945,18 +5548,9 @@ function Show-RouteMapCanvas {
                 $G.DrawLine($pal.TogglePen, [single]$tx, [single]($ty - $half), [single]$tx, [single]($ty + $half))
             }
         }
-        # Loose Cups and Pins on our side, as small dots.
-        $dot = [math]::Max((Px 2), 0.9 * $sc)
-        foreach ($o in $field.Objects) {
-            $G.FillEllipse($pal.ObjBrush, [single]($ox + $o[0] * $sc - $dot), [single]($oy - $o[1] * $sc - $dot), [single](2.0 * $dot), [single](2.0 * $dot))
+        # Load Zones, Loaders, then every Cup and Pin, then the Goals on top.
+        Show-OverrideObjects $G $pal $field $ox $oy $sc
         }
-        # Goals: alliance filled circle, neutral open circle, opponent square.
-        $goalR = [math]::Max((Px 5), 2.4 * $sc)
-        foreach ($gl in $field.Goals) {
-            Show-MapShape $G $pal ([string]$gl[0]) ($ox + $gl[1] * $sc) ($oy - $gl[2] * $sc) $goalR
-        }
-        }
-
         # Recordings: the others faint, the selected one strong.
         $drawn = 0
         if ($drawing) { $drawn = 30 }
@@ -5090,6 +5684,8 @@ function Show-RouteMapCanvas {
         if ($lineItems.Count -gt 0) { [void]$rows.Add($lineItems.ToArray()) }
         if (-not $drawing) { [void]$rows.Add(@(@('drop', 'Drop'), @('pin', 'Pin'), @('stack', 'Stack'), @('toggle', 'Toggle'), @('push', 'Push'))) }
         $goalRow = @(@('alliance', 'Alliance goal'), @('neutral', 'Neutral goal'), @('opponent', 'Opponent goal'))
+        # Skills has no other alliance.
+        if ($skills) { $goalRow = @(@('alliance', 'Alliance goal'), @('neutral', 'Neutral goal')) }
         # The Autonomous Line is Override's; the Pinnacle field has none.
         if (-not $pin) { $goalRow += ,@('line', 'Autonomous Line') }
         [void]$rows.Add($goalRow)
@@ -5243,7 +5839,13 @@ $script:BusyStarted = Get-Date
 $script:BusyMessage = ''
 $script:LastElapsed = -1
 $script:LsusbRunning = $false
+# InstalledTag is the build picked in the drop-down (the one the window shows and uploads).
+# StoredTags are the tags in the drop-down, newest first.
 $script:InstalledTag = ''
+$script:StoredTags = @()
+$script:BuildPickerShown = $false
+$script:BuildFilling = $false
+$script:UploadTag = ''
 $script:LatestTag = ''
 $script:UploadSlot = 1
 $script:UploadMode = 'Competition'
@@ -5368,7 +5970,7 @@ function Set-ModeDefaults {
     $ui.NameBox.Text = Get-NameForMode $ui.NameBox.Text $mode
     if (-not (Test-HaveMode $mode)) {
         if (Test-HaveCode) {
-            Set-Status ('The downloaded build has no ' + $mode.Label + ' version. Click Get latest code, or ask the programmer.') 'error'
+            Set-Status ('The selected build has no ' + $mode.Label + ' version. Click Get latest code, pick another build, or ask the programmer.') 'error'
         } else {
             Set-Status 'No robot code downloaded yet. Click Get latest code first.' 'error'
         }
@@ -5416,7 +6018,7 @@ function Set-Busy {
     $script:BusyMessage = $Message
     $script:BusyStarted = Get-Date
     $script:LastElapsed = -1
-    foreach ($ctl in @($ui.GetButton, $ui.UploadButton, $ui.TesterButton, $ui.RecordButton, $ui.SendButton, $ui.ModeBox, $ui.SlotBox, $ui.NameBox)) { $ctl.Enabled = -not $On }
+    foreach ($ctl in @($ui.GetButton, $ui.UploadButton, $ui.TesterButton, $ui.RecordButton, $ui.SendButton, $ui.BuildBox, $ui.ModeBox, $ui.SlotBox, $ui.NameBox)) { $ctl.Enabled = -not $On }
     if ($script:Recording) { $ui.RecordButton.Enabled = $true }
     if (-not $On) {
         $ui.TesterButton.Enabled = Test-HaveTester
@@ -5485,17 +6087,57 @@ function Update-BuildInfo {
         if ($when) { $meta += "`n" + 'Built ' + $when }
         $ui.BuildMeta.Text = $meta
     }
+    Update-BuildPicker
     Update-Notice
 }
 
 function Update-Notice {
     $messages = New-Object System.Collections.Generic.List[string]
     if ($script:UploaderUpdateReady) { [void]$messages.Add('A newer uploader is ready. Click Get latest code to update.') }
-    if ($script:LatestTag -and ($script:LatestTag -ne $script:InstalledTag) -and $script:InstalledTag) { [void]$messages.Add('Newer code is available (' + $script:LatestTag + '). Click Get latest code to download it.') }
+    # A newer build that is already on this computer needs no nudge, even if an older one is picked.
+    if ($script:LatestTag -and ($script:StoredTags -notcontains $script:LatestTag) -and $script:InstalledTag) { [void]$messages.Add('Newer code is available (' + $script:LatestTag + '). Click Get latest code to download it.') }
     $show = $messages.Count -gt 0
     if ($show) { $script:Ui.Notice.Text = ($messages -join "`n") }
     $script:NoticeShown = $show
     Update-Layout
+}
+
+# Fills the build drop-down from the builds on this computer, with the picked one showing.
+# It appears only when there is a real choice (two or more builds). The caller lays out.
+function Update-BuildPicker {
+    $ui = $script:Ui
+    $stored = @(Get-StoredBuilds $InstallDir)
+    $script:StoredTags = @($stored | ForEach-Object { [string]$_.Tag })
+    $script:BuildFilling = $true
+    try {
+        $ui.BuildBox.BeginUpdate()
+        $ui.BuildBox.Items.Clear()
+        foreach ($b in $stored) { [void]$ui.BuildBox.Items.Add((Get-BuildChoiceText $b ([string]$b.Tag -ceq $script:LatestTag))) }
+        $at = [array]::IndexOf($script:StoredTags, $script:SelectedTag)
+        if ($at -ge 0) { $ui.BuildBox.SelectedIndex = $at }
+        $ui.BuildBox.EndUpdate()
+    } finally { $script:BuildFilling = $false }
+    $script:BuildPickerShown = ($stored.Count -ge 2) -and ($at -ge 0)
+}
+
+# The drop-down changed: use that build for the title, the upload, the tester, and the Route Map.
+function Select-Build {
+    if ($script:BuildFilling -or $script:Busy) { return }
+    $i = $script:Ui.BuildBox.SelectedIndex
+    if (($i -lt 0) -or ($i -ge $script:StoredTags.Count)) { return }
+    $tag = [string]$script:StoredTags[$i]
+    if ($tag -ceq $script:SelectedTag) { return }
+    Set-SelectedBuild $tag -Save
+    Update-BuildInfo
+    Switch-CloudBuild
+    $mode = $script:Modes[$script:Ui.ModeBox.SelectedIndex]
+    $label = Get-BuildTagLabel $tag
+    $label = $label.Substring(0, 1).ToUpperInvariant() + $label.Substring(1)
+    if (Test-HaveMode $mode) {
+        Set-Status ('Using ' + $label + '. Ready to upload.') 'info'
+    } else {
+        Set-Status ($label + ' has no ' + $mode.Label + ' version. Pick another build or another mode.') 'error'
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -5582,6 +6224,7 @@ function Start-ReleaseCheck {
         param($r)
         if ($r.Status -eq 'ok') {
             $script:LatestTag = [string]$r.Release.Tag
+            Update-BuildPicker
             Update-Notice
         }
     }
@@ -5638,20 +6281,32 @@ function Start-Download {
     }
     Set-Busy $true 'download' 'Downloading the latest robot code...'
     Add-LogText ('[' + (Get-Date).ToString('HH:mm:ss') + '] Checking GitHub for the latest robot code')
+    # What was on this computer before, so the done handler can tell whether the newest build was the one picked.
+    $script:BuildsBeforeDownload = @(Get-StoredBuilds $InstallDir | ForEach-Object { [string]$_.Tag })
     $jobArgs = @{
-        ReleasesUrl  = $script:ReleasesUrl
-        InstallDir   = $InstallDir
-        AssetNames   = $script:AssetNames
-        InstalledTag = $script:InstalledTag
+        ReleasesUrl = $script:ReleasesUrl
+        InstallDir  = $InstallDir
+        AssetNames  = $script:AssetNames
+        SelectedTag = $script:SelectedTag
+        Keep        = $script:BuildsToKeep
     }
     Start-BgJob $DownloadBody $jobArgs {
         param($r)
         Set-Busy $false
         if ($r.Release) { $script:LatestTag = [string]$r.Release.Tag; $script:TesterBuildTag = [string]$r.Release.Tag }
+        # Someone on the newest build moves up to the new newest; a build picked on purpose stays picked.
+        $after = @(Get-StoredBuilds $InstallDir | ForEach-Object { [string]$_.Tag })
+        $pick = Get-TagAfterDownload -Before $script:BuildsBeforeDownload -After $after -Selected $script:SelectedTag
+        $moved = ($pick -cne $script:SelectedTag)
+        if ($moved) { Set-SelectedBuild $pick -Save }
         Update-BuildInfo
+        Remove-StaleMapCaches
+        if ($moved) { Switch-CloudBuild }
         switch ([string]$r.Status) {
-            'downloaded' { Set-Status ('Downloaded build ' + $r.Release.Tag + '. Ready to upload.') 'success' }
-            'current'    { Set-Status 'You already have the latest code.' 'info' }
+            { @('downloaded', 'current') -contains $_ } {
+                $st = Get-DownloadStatusText -Status ([string]$r.Status) -Downloaded @($r.Downloaded) -After $after -Selected $script:SelectedTag
+                Set-Status $st.Text $st.Kind
+            }
             'none'       {
                 if ($script:InstalledTag) {
                     Set-Status 'Waiting for the next build to be published. The code you have is still ready to upload.' 'info'
@@ -5680,7 +6335,7 @@ function Start-Upload {
     }
     $mode = $script:Modes[$script:Ui.ModeBox.SelectedIndex]
     if (-not (Test-HaveMode $mode)) {
-        Set-Status ('The downloaded build has no ' + $mode.Label + ' version. Click Get latest code, or ask the programmer.') 'error'
+        Set-Status ('The selected build has no ' + $mode.Label + ' version. Click Get latest code, pick another build, or ask the programmer.') 'error'
         return
     }
     # Check the program name first and explain any problem next to the box.
@@ -5693,6 +6348,8 @@ function Start-Upload {
     }
     $script:UploadSlot = [int]$script:Ui.SlotBox.SelectedItem
     $script:UploadMode = $mode.Label
+    # Remembered now: the picker is locked during the upload, but the message is built after it.
+    $script:UploadTag = $script:InstalledTag
 
     # Competition uploads the downloaded folder as is. A test mode uploads a
     # staging copy with its own hot file swapped in.
@@ -5719,7 +6376,14 @@ function Start-Upload {
         param($r)
         Set-Busy $false
         $outcome = Get-UploadOutcome -Run $r -Slot $script:UploadSlot
-        $message = $outcome.Message -replace '^Uploaded to slot', ('Uploaded ' + $script:UploadMode + ' to slot')
+        # Name the build, so a swap to an older one shows in the message afterwards.
+        $buildName = ''
+        if ($script:UploadTag) {
+            $buildName = Get-BuildTagLabel $script:UploadTag
+            if ($buildName -notlike 'build *') { $buildName = 'build ' + $buildName }
+            $buildName = ' ' + $buildName
+        }
+        $message = $outcome.Message -replace '^Uploaded to slot', ('Uploaded ' + $script:UploadMode + $buildName + ' to slot')
         # PROS asked to clean up old libraries (we answered yes): say so plainly.
         if ([string]$r.Output -match 'There are too many files on the V5') {
             $evictNote = 'PROS removed old libraries (and programs that used them) to make room.'
@@ -6003,6 +6667,9 @@ function Repair-ProjectFolder {
     } catch { }
 }
 Repair-ProjectFolder
+# Then bring a single-build install forward and pick the build to show.
+# -SelfTest never touches the real builds folder; its checks make their own.
+if (-not $SelfTest) { Initialize-Builds; Remove-StaleMapCaches }
 
 if ($SelfTest) {
     # No window is shown here. Each check adds to $failures if it goes wrong.
@@ -6748,6 +7415,390 @@ if ($SelfTest) {
         Write-Host ('  Route Map plans: FAIL (' + ($planFails -join '; ') + ')')
     }
 
+    # 0d. Builds on this computer: the three newest published builds, picking one, and uploading
+    #     the picked one. Everything here runs on files in a temp folder and a listener on this
+    #     computer standing in for GitHub, so it needs no internet and no robot.
+    $buildFails = New-Object System.Collections.Generic.List[string]
+    $expectB = { param($ok, $what) if (-not $ok) { [void]$buildFails.Add($what) } }
+    $savedInstallDir = $InstallDir
+    $savedSelectedFile = $script:SelectedFile
+    $savedResultsFn = ${function:Get-ResultsFolder}
+    $savedCloudB = $script:Cloud
+    $savedInstalledTagB = $script:InstalledTag
+    $savedSelectedTagB = $script:SelectedTag
+    $buildRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('scourge-builds-' + [Guid]::NewGuid().ToString('N'))
+    $hostState = $null
+    $hostListener = $null
+    $hostPs = $null
+    try {
+        New-Item -ItemType Directory -Path $buildRoot -Force | Out-Null
+        $sha = { param([string]$p) (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLowerInvariant() }
+        # A stored build with its own bytes in every file, so a mix-up between builds shows as a hash mismatch.
+        $mkBuild = {
+            param([string]$Root, [string]$Tag, [string]$BuiltAt)
+            $dir = Join-Path (Join-Path $Root 'builds') $Tag
+            foreach ($n in ($script:AssetNames + $script:TesterAssetNames + @('auton-test-hot.package.bin', 'drive-test-hot.package.bin', 'autopath-hot.package.bin'))) {
+                $p = Get-ReleaseAssetPath -Root $dir -AssetName $n
+                New-Item -ItemType Directory -Path (Split-Path $p -Parent) -Force | Out-Null
+                [System.IO.File]::WriteAllText($p, ($Tag + '|' + $n), (New-Object System.Text.UTF8Encoding($false)))
+            }
+            $ver = @{ tag = $Tag; name = ('Build ' + $Tag); notes = 'Built from abc1234: test'; built_at = $BuiltAt; downloaded_at = '2026-11-09T00:00:00Z' }
+            [System.IO.File]::WriteAllText((Join-Path $dir 'version.json'), ($ver | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
+            return $dir
+        }
+
+        # The feed: five entries, one of them not a build and one repeated. Each tag appears in an id and a link, as GitHub writes it.
+        $atomEntry = { param([string]$Tag) '<entry><id>tag:github.com,2008:Repository/1430563935/' + $Tag + '</id><link rel="alternate" type="text/html" href="https://github.com/Whyater/40217S-Uploader/releases/tag/' + $Tag + '"/><title>x</title></entry>' }
+        $atomText = '<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><id>tag:github.com,2008:https://github.com/Whyater/40217S-Uploader/releases</id>' +
+            (& $atomEntry 'build-313-3c15a66') + (& $atomEntry 'mac-uploader-1.8.1') + (& $atomEntry 'build-308-2808722') + (& $atomEntry 'build-308-2808722') + (& $atomEntry 'build-304-497d4f7') + '</feed>'
+        $feedTags = @(Read-ReleasesAtom $atomText)
+        & $expectB (($feedTags.Count -eq 3) -and ($feedTags[0] -eq 'build-313-3c15a66') -and ($feedTags[1] -eq 'build-308-2808722') -and ($feedTags[2] -eq 'build-304-497d4f7')) ('atom: expected 313, 308, 304 once each, got ' + ($feedTags -join ','))
+        & $expectB (@(Read-ReleasesAtom '<html>not a feed</html>').Count -eq 0) 'atom: text that is not a feed should give no tags'
+        & $expectB ((Get-BuildNumber 'build-313-3c15a66') -eq 313 -and (Get-BuildNumber 'mac-uploader-1.8.1') -eq -1 -and (Get-BuildNumber 'build-9-zzz') -eq -1) 'build number: only build-N-hex tags have one'
+
+        # Order and eviction. The number decides, not the date: 308 is given the latest date on purpose.
+        $five = @(
+            @{ Tag = 'build-294-aaa1111'; BuiltAt = '2026-11-01T00:00:00Z' }, @{ Tag = 'build-313-3c15a66'; BuiltAt = '2026-11-02T00:00:00Z' },
+            @{ Tag = 'build-304-497d4f7'; BuiltAt = '2026-11-03T00:00:00Z' }, @{ Tag = 'build-308-2808722'; BuiltAt = '2026-11-09T00:00:00Z' },
+            @{ Tag = 'build-301-ac5e41e'; BuiltAt = '2026-11-04T00:00:00Z' })
+        $keepPlan = Select-BuildsToKeep -Builds $five -Keep 3
+        & $expectB ((@($keepPlan.Keep) -join ',') -eq 'build-313-3c15a66,build-308-2808722,build-304-497d4f7') ('eviction: kept ' + (@($keepPlan.Keep) -join ',') + ', expected 313, 308, 304 in that order')
+        & $expectB ((@($keepPlan.Evict) -join ',') -eq 'build-301-ac5e41e,build-294-aaa1111') ('eviction: dropped ' + (@($keepPlan.Evict) -join ','))
+        $keepPlan = Select-BuildsToKeep -Builds $five -Protect @('build-294-aaa1111') -Keep 3
+        & $expectB ((@($keepPlan.Keep) -contains 'build-294-aaa1111') -and (@($keepPlan.Keep).Count -eq 4) -and (@($keepPlan.Evict) -join ',') -eq 'build-301-ac5e41e') 'eviction: the picked build must stay even when it is the oldest'
+        $keepPlan = Select-BuildsToKeep -Builds $five -Keep 3 -Busy $true
+        & $expectB ((@($keepPlan.Evict).Count -eq 0) -and (@($keepPlan.Keep).Count -eq 5)) 'eviction: nothing may go while busy'
+        $keepPlan = Select-BuildsToKeep -Builds @($five + @(@{ Tag = 'old-style-tag'; BuiltAt = '2026-12-01T00:00:00Z' })) -Keep 3
+        & $expectB (@($keepPlan.Evict) -contains 'old-style-tag') 'eviction: a tag with no build number sorts after the numbered ones'
+        & $expectB ((Select-BuildsToKeep -Builds @() -Keep 3).Keep.Count -eq 0) 'eviction: no builds at all should not fail'
+
+        # On disk: five builds, the oldest one picked.
+        $inst = Join-Path $buildRoot 'evict'
+        $stamp = @{ 'build-313-3c15a66' = '2026-11-07T11:36:00Z'; 'build-308-2808722' = '2026-11-07T11:01:00Z'; 'build-304-497d4f7' = '2026-11-07T08:48:00Z'; 'build-301-ac5e41e' = '2026-11-07T07:19:00Z'; 'build-294-3321f7c' = '2026-11-07T05:41:00Z' }
+        foreach ($t in $stamp.Keys) { [void](& $mkBuild $inst $t $stamp[$t]) }
+        $stored = @(Get-StoredBuilds $inst)
+        & $expectB (($stored.Count -eq 5) -and ($stored[0].Tag -eq 'build-313-3c15a66') -and ($stored[4].Tag -eq 'build-294-3321f7c')) 'stored builds: five folders should list newest first'
+        New-Item -ItemType Directory -Path (Join-Path $inst 'builds\build-320-fff0000.download\bin') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $inst 'builds\build-299-eee0000\bin') -Force | Out-Null
+        & $expectB (@(Get-StoredBuilds $inst).Count -eq 5) 'stored builds: a .download folder and a folder with no files are not builds'
+        $gone = @(Remove-OldBuilds -InstallDir $inst -Protect @('build-294-3321f7c') -Keep 3 -Busy $true)
+        & $expectB (($gone.Count -eq 0) -and (@(Get-StoredBuilds $inst).Count -eq 5)) 'eviction on disk: busy must delete nothing'
+        $gone = @(Remove-OldBuilds -InstallDir $inst -Protect @('build-294-3321f7c') -Keep 3)
+        $left = @(Get-StoredBuilds $inst | ForEach-Object { $_.Tag })
+        & $expectB ((($left -join ',') -eq 'build-313-3c15a66,build-308-2808722,build-304-497d4f7,build-294-3321f7c') -and ($gone -join ',') -eq 'build-301-ac5e41e') ('eviction on disk: left ' + ($left -join ','))
+
+        # The pointer: written whole, and a damaged or hostile one falls back to the newest stored build.
+        $ptr = Join-Path $inst 'selected.json'
+        Write-SelectedTag -Path $ptr -Tag 'build-304-497d4f7'
+        & $expectB ((Read-SelectedTag $ptr) -eq 'build-304-497d4f7') 'pointer: a written tag should read back'
+        [System.IO.File]::WriteAllText($ptr, '{ "tag": "build-3', (New-Object System.Text.UTF8Encoding($false)))
+        & $expectB ((Read-SelectedTag $ptr) -eq '') 'pointer: a cut-off file should read as no pick'
+        [System.IO.File]::WriteAllText($ptr, '{ "tag": "..\\..\\Windows" }', (New-Object System.Text.UTF8Encoding($false)))
+        & $expectB ((Read-SelectedTag $ptr) -eq '') 'pointer: a tag that is a path should read as no pick'
+        [System.IO.File]::WriteAllText($ptr, '[1,2,3]', (New-Object System.Text.UTF8Encoding($false)))
+        & $expectB ((Read-SelectedTag $ptr) -eq '') 'pointer: the wrong shape should read as no pick'
+        & $expectB ((Resolve-SelectedTag -Wanted '' -Stored $left) -eq 'build-313-3c15a66') 'pointer: no pick should mean the newest build'
+        & $expectB ((Resolve-SelectedTag -Wanted 'build-999-bad0000' -Stored $left) -eq 'build-313-3c15a66') 'pointer: a pick that is not stored should mean the newest build'
+        & $expectB ((Resolve-SelectedTag -Wanted 'build-304-497d4f7' -Stored $left) -eq 'build-304-497d4f7') 'pointer: a stored pick should stay'
+        & $expectB ((Resolve-SelectedTag -Wanted 'x' -Stored @()) -eq '') 'pointer: no builds should mean no pick'
+
+        # After Get latest code: the newest-build user moves up, the one who picked an older build stays.
+        $before = @('build-308-2808722', 'build-304-497d4f7', 'build-301-ac5e41e')
+        $after = @('build-313-3c15a66', 'build-308-2808722', 'build-304-497d4f7')
+        & $expectB ((Get-TagAfterDownload -Before $before -After $after -Selected 'build-308-2808722') -eq 'build-313-3c15a66') 'after download: the user on the newest build should move to the new newest'
+        & $expectB ((Get-TagAfterDownload -Before $before -After $after -Selected 'build-304-497d4f7') -eq 'build-304-497d4f7') 'after download: a build picked on purpose should stay picked'
+        & $expectB ((Get-TagAfterDownload -Before @() -After $after -Selected '') -eq 'build-313-3c15a66') 'after download: a first download should pick the newest'
+        & $expectB ((Get-TagAfterDownload -Before $before -After $after -Selected 'build-301-ac5e41e') -eq 'build-313-3c15a66') 'after download: a pick that was removed should move to the newest'
+
+        # The status line after Get latest code: a build picked on purpose is not silently left in use.
+        $newer = @('build-320-9999999', 'build-313-3c15a66', 'build-308-2808722')
+        $msg = Get-DownloadStatusText -Status 'downloaded' -Downloaded @('build-320-9999999') -After $newer -Selected 'build-308-2808722'
+        & $expectB (($msg.Text -eq 'Downloaded build 320. Still using build 308 (you picked it). Pick build 320 in the drop-down to use it.') -and ($msg.Kind -eq 'info')) ('status: an older pick should be named, got: ' + $msg.Text)
+        $msg = Get-DownloadStatusText -Status 'current' -Downloaded @() -After $newer -Selected 'build-308-2808722'
+        & $expectB ($msg.Text -eq 'You already have the latest code. Still using build 308 (you picked it). Pick build 320 in the drop-down to use it.') ('status: an older pick should be named when nothing was fetched, got: ' + $msg.Text)
+        $msg = Get-DownloadStatusText -Status 'downloaded' -Downloaded @('build-320-9999999') -After $newer -Selected 'build-320-9999999'
+        & $expectB (($msg.Text -eq 'Downloaded build 320. Ready to upload.') -and ($msg.Kind -eq 'success')) ('status: the newest pick should say ready, got: ' + $msg.Text)
+        $msg = Get-DownloadStatusText -Status 'current' -Downloaded @() -After $newer -Selected 'build-320-9999999'
+        & $expectB ($msg.Text -eq 'You already have the latest code.') ('status: current on the newest should keep its old text, got: ' + $msg.Text)
+        $msg = Get-DownloadStatusText -Status 'downloaded' -Downloaded @('build-308-2808722', 'build-304-497d4f7') -After $newer -Selected 'build-320-9999999'
+        & $expectB (($msg.Text -eq 'Downloaded 2 builds (build 308, build 304). Using build 320.') -and ($msg.Kind -eq 'info')) ('status: older builds fetched while another is in use should name the one in use, got: ' + $msg.Text)
+
+        # Moving a single-build install forward: project\ and version.json become builds\<tag>.
+        $legacy = Join-Path $buildRoot 'legacy'
+        $old = & $mkBuild $legacy 'build-290-0a0a0a0' '2026-11-06T00:00:00Z'
+        Move-Item -LiteralPath $old -Destination (Join-Path $legacy 'project')
+        Move-Item -LiteralPath (Join-Path $legacy 'project\version.json') -Destination (Join-Path $legacy 'version.json')
+        Remove-Item -LiteralPath (Join-Path $legacy 'builds') -Recurse -Force
+        $heldHash = & $sha (Join-Path $legacy 'project\bin\hot.package.bin')
+        $InstallDir = $legacy
+        $script:SelectedFile = Join-Path $legacy 'selected.json'
+        try {
+            Initialize-Builds
+            & $expectB ((Test-BuildComplete (Join-Path $legacy 'builds\build-290-0a0a0a0')) -and (-not (Test-Path (Join-Path $legacy 'project'))) -and (-not (Test-Path (Join-Path $legacy 'version.json')))) 'legacy: project and version.json should have moved into builds\<tag>'
+            & $expectB (($script:SelectedTag -eq 'build-290-0a0a0a0') -and ((Read-SelectedTag $script:SelectedFile) -eq 'build-290-0a0a0a0')) 'legacy: the moved build should be the picked one, and the pick saved'
+            & $expectB (($script:ProjectDir -eq (Join-Path $legacy 'builds\build-290-0a0a0a0')) -and ((& $sha (Join-Path $script:BinDir 'hot.package.bin')) -eq $heldHash)) 'legacy: the moved build should be the one the paths point at, bytes unchanged'
+            Initialize-Builds
+            & $expectB (@(Get-StoredBuilds $legacy).Count -eq 1) 'legacy: running the move twice should change nothing'
+        } finally { $InstallDir = $savedInstallDir; $script:SelectedFile = $savedSelectedFile }
+        # A version.json that cannot be read leaves the old folder alone.
+        $bad = Join-Path $buildRoot 'badlegacy'
+        New-Item -ItemType Directory -Path (Join-Path $bad 'project\bin') -Force | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $bad 'version.json'), '{ not json', (New-Object System.Text.UTF8Encoding($false)))
+        & $expectB (((Move-LegacyProject -InstallDir $bad) -eq '') -and (Test-Path (Join-Path $bad 'project\bin')) -and (Test-Path (Join-Path $bad 'version.json'))) 'legacy: a damaged version.json should leave project\ where it is'
+
+        # A cut right after the rename (the new folder in place, nothing else done) still leaves a whole build.
+        $cut = Join-Path $buildRoot 'cutlegacy'
+        $cutOld = & $mkBuild $cut 'build-291-0b0b0b0' '2026-11-06T00:00:00Z'
+        Move-Item -LiteralPath $cutOld -Destination (Join-Path $cut 'project')
+        Move-Item -LiteralPath (Join-Path $cut 'project\version.json') -Destination (Join-Path $cut 'version.json')
+        Remove-Item -LiteralPath (Join-Path $cut 'builds') -Recurse -Force
+        $script:CutMoves = 0
+        function Move-Item { param([string]$LiteralPath, [string]$Destination) $script:CutMoves++; if ($script:CutMoves -eq 1) { Microsoft.PowerShell.Management\Move-Item -LiteralPath $LiteralPath -Destination $Destination; throw 'cut' } }
+        try { [void](Move-LegacyProject -InstallDir $cut) } finally { Remove-Item function:Move-Item -ErrorAction SilentlyContinue }
+        & $expectB (Test-BuildComplete (Join-Path $cut 'builds\build-291-0b0b0b0')) 'legacy: a cut right after the rename should leave a whole build'
+        # If the move cannot be done, the window keeps reading the old layout, and a folder that is no longer
+        # a whole build (a delete that hit a locked file) is cleared at the next start.
+        $InstallDir = $bad
+        $script:SelectedFile = Join-Path $bad 'selected.json'
+        try {
+            New-Item -ItemType Directory -Path (Join-Path $bad 'builds\build-111-aaaaaaa\bin') -Force | Out-Null
+            Initialize-Builds
+            & $expectB (($script:SelectedTag -eq '') -and ($script:VersionFile -eq (Join-Path $bad 'version.json')) -and ($script:ProjectDir -eq (Join-Path $bad 'project'))) 'legacy: when the move fails the paths should stay on the old layout'
+            & $expectB (-not (Test-Path (Join-Path $bad 'builds\build-111-aaaaaaa'))) 'leftovers: a folder that is not a whole build should be cleared at start'
+        } finally { $InstallDir = $savedInstallDir; $script:SelectedFile = $savedSelectedFile; Set-SelectedBuild '' }
+
+        # Picking a build changes the folder an upload uses. Two builds with different bytes, a stand-in for pros.exe
+        # that writes down the folder it ran in and the hash of the hot file it was given.
+        $pick = Join-Path $buildRoot 'pick'
+        $d313 = & $mkBuild $pick 'build-313-3c15a66' '2026-11-07T11:36:00Z'
+        $d308 = & $mkBuild $pick 'build-308-2808722' '2026-11-07T11:01:00Z'
+        $fakePros = Join-Path $buildRoot 'fakepros'
+        New-Item -ItemType Directory -Path $fakePros -Force | Out-Null
+        [System.IO.File]::WriteAllLines((Join-Path $fakePros 'pros.cmd'), @('@echo off', 'echo %CD%> "%~dp0cwd.txt"', 'certutil -hashfile "bin\hot.package.bin" SHA256 | findstr /v ":" > "%~dp0hash.txt"', 'echo Finished uploading', 'exit /b 0'))
+        $seenHash = { ((Get-Content -LiteralPath (Join-Path $fakePros 'hash.txt') -ErrorAction SilentlyContinue | Select-Object -First 1) -replace '\s', '').ToLowerInvariant() }
+        $InstallDir = $pick
+        $script:SelectedFile = Join-Path $pick 'selected.json'
+        try {
+            Set-SelectedBuild 'build-308-2808722' -Save
+            & $expectB (($script:ProjectDir -eq $d308) -and ($script:BinDir -eq (Join-Path $d308 'bin')) -and ((Read-SelectedTag $script:SelectedFile) -eq 'build-308-2808722')) 'pick: choosing 308 should point the project, bin, and version paths at 308 and save the pick'
+            & $expectB ((Test-HaveCode) -and ((Get-InstalledBuild).tag -eq 'build-308-2808722')) 'pick: the build information should be 308''s'
+            $run = Invoke-RobotUpload -ProsExe (Join-Path $fakePros 'pros.cmd') -ProjectDir $script:ProjectDir -Slot 1 -Name 'Scourge' -TimeoutSec 60
+            & $expectB (((& $seenHash) -eq (& $sha (Join-Path $d308 'bin\hot.package.bin'))) -and ((& $seenHash) -ne (& $sha (Join-Path $d313 'bin\hot.package.bin')))) 'pick: uploading with 308 picked should hand PROS 308''s hot file, not 313''s'
+            & $expectB ((Get-UploadOutcome -Run $run -Slot 1).Ok) 'pick: the stand-in upload should read as a success'
+            Set-SelectedBuild 'build-313-3c15a66' -Save
+            $run = Invoke-RobotUpload -ProsExe (Join-Path $fakePros 'pros.cmd') -ProjectDir $script:ProjectDir -Slot 1 -Name 'Scourge' -TimeoutSec 60
+            & $expectB (((& $seenHash) -eq (& $sha (Join-Path $d313 'bin\hot.package.bin'))) -and ((Get-Content -LiteralPath (Join-Path $fakePros 'cwd.txt') -Raw).Trim() -like ('*' + 'build-313-3c15a66'))) 'pick: picking 313 again should hand PROS 313''s hot file'
+            # A test mode builds its staging folder from the picked build's own mode file.
+            $mode = $script:Modes[1]
+            $stageDir = New-ModeProject -ProjectDir $script:ProjectDir -ModeAsset $mode.Asset -StageDir (Join-Path $pick 'project.mode')
+            [void](Invoke-RobotUpload -ProsExe (Join-Path $fakePros 'pros.cmd') -ProjectDir $stageDir -Slot 2 -Name 'Scourge Auton Test' -TimeoutSec 60)
+            & $expectB ((& $seenHash) -eq (& $sha (Join-Path $d313 'modes\auton-test-hot.package.bin'))) 'pick: the Auton Test staging folder should carry 313''s auton-test hot file as bin\hot.package.bin'
+            Set-SelectedBuild 'build-308-2808722'
+            $stageDir = New-ModeProject -ProjectDir $script:ProjectDir -ModeAsset $mode.Asset -StageDir (Join-Path $pick 'project.mode')
+            & $expectB ((& $sha (Join-Path $stageDir 'bin\hot.package.bin')) -eq (& $sha (Join-Path $d308 'modes\auton-test-hot.package.bin'))) 'pick: after picking 308 the staged hot file should be 308''s'
+            & $expectB ((Test-HaveTester) -and ((Get-ReleaseAssetPath -Root $script:ProjectDir -AssetName 'tester-hot.package.bin') -eq (Join-Path $d308 'tester\bin\hot.package.bin'))) 'pick: the tester files should come from the picked build'
+        } finally { $InstallDir = $savedInstallDir; $script:SelectedFile = $savedSelectedFile }
+
+        # A stand-in for GitHub on this computer, served from a background thread. It keeps a list of every address asked for.
+        $port = Get-Random -Minimum 49200 -Maximum 64900
+        $base = 'http://127.0.0.1:' + $port
+        try {
+            $hostListener = New-Object System.Net.HttpListener
+            $hostListener.Prefixes.Add($base + '/')
+            $hostListener.Start()
+        } catch { $hostListener = $null }
+        if ($null -eq $hostListener) {
+            Write-Host '  (builds download checks skipped: a listener could not start here)'
+        } else {
+            $hostState = [hashtable]::Synchronized(@{ Routes = [hashtable]::Synchronized(@{}); Hits = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList)); Stop = $false })
+            $hostPs = [powershell]::Create()
+            [void]$hostPs.AddScript({
+                param($L, $S)
+                while (-not $S.Stop) {
+                    $ar = $L.BeginGetContext($null, $null)
+                    while (-not $ar.AsyncWaitHandle.WaitOne(100)) { if ($S.Stop) { return } }
+                    $ctx = $L.EndGetContext($ar)
+                    [void]$S.Hits.Add($ctx.Request.Url.AbsolutePath + $ctx.Request.Url.Query)
+                    $bytes = $S.Routes[$ctx.Request.Url.AbsolutePath]
+                    if ($null -eq $bytes) {
+                        $ctx.Response.StatusCode = 404
+                    } else {
+                        $ctx.Response.StatusCode = 200
+                        $ctx.Response.ContentLength64 = $bytes.Length
+                        $ctx.Response.OutputStream.Write($bytes, 0, $bytes.Length)
+                    }
+                    $ctx.Response.Close()
+                }
+            }).AddArgument($hostListener).AddArgument($hostState)
+            $hostHandle = $hostPs.BeginInvoke()
+
+            $utf8 = New-Object System.Text.UTF8Encoding($false)
+            $relUrl = $base + '/releases'
+            $allFiles = @($script:AssetNames + $script:TesterAssetNames + @('auton-test-hot.package.bin', 'drive-test-hot.package.bin', 'autopath-hot.package.bin'))
+            $sha256Of = { param([byte[]]$b) $h = [System.Security.Cryptography.SHA256]::Create(); try { ([BitConverter]::ToString($h.ComputeHash($b))).Replace('-', '').ToLowerInvariant() } finally { $h.Dispose() } }
+            # Puts one build on the stand-in. Damage names a file whose served bytes differ from its fingerprint.
+            $publish = {
+                param([string]$Tag, [string]$BuiltAt, [string]$Damage = '')
+                $fp = @{}
+                foreach ($f in $allFiles) {
+                    $good = $utf8.GetBytes($Tag + '|' + $f)
+                    $fp[$f] = & $sha256Of $good
+                    $served = $good
+                    if ($f -eq $Damage) { $served = $utf8.GetBytes('damaged ' + $Tag + '|' + $f) }
+                    $hostState.Routes['/releases/download/' + $Tag + '/' + $f] = $served
+                }
+                $json = @{ tag = $Tag; title = ('Build ' + $Tag); notes = 'Built from abc1234: test'; built_at = $BuiltAt; sha256 = $fp } | ConvertTo-Json -Depth 4
+                $hostState.Routes['/releases/download/' + $Tag + '/release.json'] = $utf8.GetBytes($json)
+                return $json
+            }
+            $setLatest = { param([string]$Json) $hostState.Routes['/releases/latest/download/release.json'] = $utf8.GetBytes($Json) }
+            $setAtom = {
+                param([string[]]$Tags)
+                $text = '<feed>' + (($Tags | ForEach-Object { & $atomEntry $_ }) -join '') + '</feed>'
+                $hostState.Routes['/releases.atom'] = $utf8.GetBytes($text)
+            }
+            $fileHits = { @($hostState.Hits | Where-Object { $_ -match '/download/build-.*\.(bin|pros)$' }).Count }
+            $newSync = { @{ Log = (New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]') } }
+            $syncLines = { param($S) $o = New-Object System.Collections.Generic.List[string]; $l = $null; while ($S.Log.TryDequeue([ref]$l)) { $o.Add($l) }; ($o.ToArray() -join "`n") }
+
+            $inst1 = Join-Path $buildRoot 'dl1'
+            $t313 = 'build-313-3c15a66'; $t308 = 'build-308-2808722'; $t304 = 'build-304-497d4f7'; $t301 = 'build-301-ac5e41e'
+            [void](& $publish $t301 '2026-11-07T07:19:00Z')
+            [void](& $publish $t304 '2026-11-07T08:48:00Z')
+            [void](& $publish $t308 '2026-11-07T11:01:00Z')
+            & $setLatest (& $publish $t313 '2026-11-07T11:36:00Z')
+            & $setAtom @($t313, 'mac-uploader-1.8.1', $t308, $t304, $t301)
+            $s1 = & $newSync
+            $r1 = Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $inst1 -AssetNames $script:AssetNames -Sync $s1
+            $have1 = @(Get-StoredBuilds $inst1 | ForEach-Object { $_.Tag })
+            & $expectB (($r1.Status -eq 'downloaded') -and (@($r1.Downloaded).Count -eq 3) -and (($have1 -join ',') -eq ($t313 + ',' + $t308 + ',' + $t304))) ('download: first run should store 313, 308, 304, got ' + $r1.Status + ' ' + ($have1 -join ',') + ' ' + $r1.Error + ' ' + (& $syncLines $s1))
+            & $expectB ((Test-Path (Join-Path $inst1 ('builds\' + $t313 + '\tester\bin\hot.package.bin'))) -and (Test-Path (Get-ReleaseAssetPath -Root (Join-Path $inst1 ('builds\' + $t308)) -AssetName 'autopath-hot.package.bin')) -and (Test-Path (Get-ReleaseAssetPath -Root (Join-Path $inst1 ('builds\' + $t308)) -AssetName 'drive-test-hot.package.bin'))) 'download: tester and mode files should be stored per build'
+            & $expectB (-not (@(Get-ChildItem (Join-Path $inst1 'builds') -Directory | Where-Object { $_.Name -match '\.(download|old)$' }).Count)) 'download: no .download folder should be left behind'
+            & $expectB (((& $sha (Join-Path $inst1 ('builds\' + $t308 + '\bin\hot.package.bin'))) -eq (& $sha256Of ($utf8.GetBytes($t308 + '|hot.package.bin')))) -and ((Get-StoredBuilds $inst1)[1].BuiltAt -eq '2026-11-07T11:01:00Z')) 'download: a stored build should hold its own bytes and its own build time'
+            $hitsBefore = & $fileHits
+            $r2 = Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $inst1 -AssetNames $script:AssetNames -SelectedTag $t313
+            & $expectB (($r2.Status -eq 'current') -and (@($r2.Downloaded).Count -eq 0) -and ((& $fileHits) -eq $hitsBefore)) ('download: a second run should fetch no file, got ' + $r2.Status + ' with ' + ((& $fileHits) - $hitsBefore) + ' file requests')
+
+            # A new build comes out: only it downloads, and the oldest goes.
+            $t320 = 'build-320-9999999'
+            & $setLatest (& $publish $t320 '2026-11-08T09:00:00Z')
+            & $setAtom @($t320, $t313, $t308, $t304, $t301)
+            $hitsBefore = & $fileHits
+            $r3 = Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $inst1 -AssetNames $script:AssetNames -SelectedTag $t313
+            $have3 = @(Get-StoredBuilds $inst1 | ForEach-Object { $_.Tag })
+            & $expectB (($r3.Status -eq 'downloaded') -and (($r3.Downloaded -join ',') -eq $t320) -and (($have3 -join ',') -eq ($t320 + ',' + $t313 + ',' + $t308)) -and (($r3.Evicted -join ',') -eq $t304)) ('download: a new tag should evict the oldest, got ' + ($have3 -join ',') + ', evicted ' + ($r3.Evicted -join ','))
+            $newFiles = (& $fileHits) - $hitsBefore
+            & $expectB ($newFiles -eq $allFiles.Count) ('download: only the new build''s ' + $allFiles.Count + ' files should be fetched, got ' + $newFiles)
+            # The same run with an old build picked on purpose: it stays although it is now outside the newest three.
+            $t325 = 'build-325-8888888'
+            & $setLatest (& $publish $t325 '2026-11-08T12:00:00Z')
+            & $setAtom @($t325, $t320, $t313, $t308)
+            $r4 = Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $inst1 -AssetNames $script:AssetNames -SelectedTag $t308
+            $have4 = @(Get-StoredBuilds $inst1 | ForEach-Object { $_.Tag })
+            & $expectB (($have4 -join ',') -eq ($t325 + ',' + $t320 + ',' + $t313 + ',' + $t308)) ('download: the picked old build should be kept as a fourth, got ' + ($have4 -join ','))
+            $r5 = Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $inst1 -AssetNames $script:AssetNames -SelectedTag $t320
+            & $expectB ((@(Get-StoredBuilds $inst1).Count -eq 3) -and ($r5.Status -eq 'current') -and (-not (Test-Path (Join-Path $inst1 ('builds\' + $t308))))) 'download: once the old pick is let go it should be trimmed on the next run'
+
+            # One damaged file fails only its own build.
+            $inst2 = Join-Path $buildRoot 'dl2'
+            $t340 = 'build-340-aaaaaaa'; $t335 = 'build-335-bbbbbbb'; $t330 = 'build-330-ccccccc'
+            [void](& $publish $t330 '2026-11-09T01:00:00Z')
+            [void](& $publish $t335 '2026-11-09T02:00:00Z' 'cold.package.bin')
+            & $setLatest (& $publish $t340 '2026-11-09T03:00:00Z')
+            & $setAtom @($t340, $t335, $t330)
+            $s2 = & $newSync
+            $r6 = Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $inst2 -AssetNames $script:AssetNames -Sync $s2
+            $have6 = @(Get-StoredBuilds $inst2 | ForEach-Object { $_.Tag })
+            & $expectB (($r6.Status -eq 'downloaded') -and (($have6 -join ',') -eq ($t340 + ',' + $t330)) -and $r6.Failed.ContainsKey($t335) -and ($r6.Failed[$t335] -like '*SHA-256*')) ('download: a damaged older build should fail alone, got ' + ($have6 -join ',') + ' ' + ($r6.Failed.Keys -join ','))
+            & $expectB (-not (Test-Path (Join-Path $inst2 ('builds\' + $t335 + '*')))) 'download: the damaged build should leave no folder behind'
+            & $expectB ((& $syncLines $s2) -like ('*' + $t335 + '*')) 'download: the Details log should name the build that failed'
+            # The next run, with the file fixed, fetches just that build.
+            [void](& $publish $t335 '2026-11-09T02:00:00Z')
+            $hitsBefore = & $fileHits
+            $r7 = Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $inst2 -AssetNames $script:AssetNames
+            & $expectB (((@(Get-StoredBuilds $inst2).Count) -eq 3) -and (($r7.Downloaded -join ',') -eq $t335) -and (((& $fileHits) - $hitsBefore) -eq $allFiles.Count)) 'download: after the fix only the failed build should be fetched'
+            # A damaged newest build is an error, and the builds already stored are left alone.
+            $inst3 = Join-Path $buildRoot 'dl3'
+            [void](& $mkBuild $inst3 $t330 '2026-11-09T01:00:00Z')
+            [void](& $publish $t340 '2026-11-09T03:00:00Z' 'hot.package.bin')
+            & $setLatest (& $publish $t340 '2026-11-09T03:00:00Z' 'hot.package.bin')
+            & $setAtom @($t340, $t330)
+            $r8 = Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $inst3 -AssetNames $script:AssetNames
+            & $expectB (($r8.Status -eq 'error') -and ($r8.Error -like '*SHA-256*') -and (@(Get-StoredBuilds $inst3 | ForEach-Object { $_.Tag }) -join ',') -eq $t330) 'download: a damaged newest build should be an error that leaves stored builds alone'
+            # No feed: only the newest is fetched, the status stays calm, and Details says why.
+            $inst4 = Join-Path $buildRoot 'dl4'
+            & $setLatest (& $publish $t340 '2026-11-09T03:00:00Z')
+            $hostState.Routes.Remove('/releases.atom')
+            $s4 = & $newSync
+            $r9 = Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $inst4 -AssetNames $script:AssetNames -Sync $s4
+            & $expectB (($r9.Status -eq 'downloaded') -and (@(Get-StoredBuilds $inst4).Count -eq 1) -and ($r9.Failed.Count -eq 0) -and ((& $syncLines $s4) -like '*Earlier builds unavailable*')) 'download: without the feed only the newest build should be stored, quietly'
+            # An older build whose release.json is missing is skipped, not fatal.
+            $inst5 = Join-Path $buildRoot 'dl5'
+            $hostState.Routes.Remove('/releases/download/' + $t335 + '/release.json')
+            & $setAtom @($t340, $t335, $t330)
+            $r10 = Save-LatestRelease -ReleasesUrl $relUrl -InstallDir $inst5 -AssetNames $script:AssetNames
+            & $expectB (($r10.Status -eq 'downloaded') -and ((@(Get-StoredBuilds $inst5 | ForEach-Object { $_.Tag }) -join ',') -eq ($t340 + ',' + $t330)) -and $r10.Failed.ContainsKey($t335)) 'download: an older build with no release.json should be skipped'
+
+            # The Route Map asks for the picked build's prediction and keeps a copy per build.
+            $mapFolder = Join-Path $buildRoot 'docs'
+            ${function:Get-ResultsFolder} = { return $mapFolder }.GetNewClosure()
+            $mapBody = '{"ok":true,"sim":{"build":313,"tag":"build-313-3c15a66","routes":[]},"recorded":null,"recorded_updated":null,"sim_is_latest":false}'
+            $hostState.Routes['/map'] = $utf8.GetBytes($mapBody)
+            $hitsBefore = $hostState.Hits.Count
+            $m1 = Get-CloudMap -MapUrl ($base + '/map') -Build $t308 -Code 'sample' -CachePath (Get-CloudCachePath $t308)
+            $mapHit = @($hostState.Hits | Select-Object -Skip $hitsBefore)
+            & $expectB (($mapHit.Count -eq 1) -and ($mapHit[0] -eq ('/map?build=' + $t308))) ('map: the request should carry ?build=<picked tag>, got ' + ($mapHit -join ' '))
+            & $expectB (($m1.Status -eq 'ok') -and (Test-Path (Join-Path $mapFolder ('map-cloud-' + $t308 + '.json'))) -and (-not (Test-Path (Join-Path $mapFolder ('map-cloud-' + $t313 + '.json')))) -and (-not (Test-Path (Join-Path $mapFolder 'map-cloud.json')))) 'map: the answer should be saved under the picked build''s own name only'
+            $m2 = Get-CloudMap -MapUrl ($base + '/map') -Build $t313 -Code 'sample' -CachePath (Get-CloudCachePath $t313)
+            & $expectB ((Test-Path (Join-Path $mapFolder ('map-cloud-' + $t313 + '.json'))) -and ($hostState.Hits[$hostState.Hits.Count - 1] -eq ('/map?build=' + $t313))) 'map: picking 313 should ask for 313 and save its own copy'
+            # Offline reading: the picked build's copy, else the old single copy once, else nothing.
+            # The body reads its inputs from $A, so it runs inside a scriptblock that has its own.
+            $readCache = { param($Args2) $A = $Args2; & $CloudCacheBody }
+            $c1 = & $readCache @{ Path = (Get-CloudCachePath $t308); LegacyPath = (Get-CloudCachePath); Build = $t308 }
+            & $expectB (($c1.Status -eq 'ok') -and ($c1.Build -eq $t308)) 'map cache: the picked build''s own copy should load'
+            $c2 = & $readCache @{ Path = (Get-CloudCachePath 'build-999-0000000'); LegacyPath = (Get-CloudCachePath); Build = 'build-999-0000000' }
+            & $expectB ($c2.Status -eq 'none') 'map cache: a build with no copy and no old copy should load nothing'
+            Copy-Item -LiteralPath (Join-Path $mapFolder ('map-cloud-' + $t308 + '.json')) -Destination (Join-Path $mapFolder 'map-cloud.json')
+            $c3 = & $readCache @{ Path = (Get-CloudCachePath 'build-998-0000000'); LegacyPath = (Get-CloudCachePath); Build = $t313 }
+            & $expectB (($c3.Status -eq 'ok') -and ($c3.Build -eq $t313)) 'map cache: the old single copy should be the fallback for the build it predicts'
+            $c4 = & $readCache @{ Path = (Get-CloudCachePath 'build-999-0000000'); LegacyPath = (Get-CloudCachePath); Build = 'build-999-0000000' }
+            & $expectB ($c4.Status -eq 'none') 'map cache: the old single copy must not be shown for a different build'
+            # A removed build's saved prediction goes; stored builds keep theirs.
+            $InstallDir = $inst1
+            try { Remove-StaleMapCaches } finally { $InstallDir = $savedInstallDir }
+            & $expectB ((-not (Test-Path (Join-Path $mapFolder ('map-cloud-' + $t308 + '.json')))) -and (Test-Path (Join-Path $mapFolder ('map-cloud-' + $t313 + '.json')))) 'map cache: a removed build''s copy should be pruned and a stored build''s kept'
+            & $expectB ((Get-CloudCachePath 'build-308-2808722') -eq (Join-Path $mapFolder 'map-cloud-build-308-2808722.json') -and (Get-CloudCachePath '..\x') -eq (Join-Path $mapFolder 'map-cloud.json')) 'map cache: a tag that is a path must not become a file name'
+        }
+
+        # No prediction for the picked build: the note and the empty field name that build.
+        $script:Cloud = @{ Inited = $true; Code = 'x'; Fetching = $false; Again = $false; Pending = $false; CacheLoaded = $true; Fresh = $true; Offline = $false; Unauthorized = $false; Error = ''
+            Data = @{ Sim = $null; Recorded = $null; Note = ''; RecordedUpdated = '' }; Sessions = @(); Fetched = ''; Route = 'AWP'; Side = 'L'; Keys = '' }
+        $script:InstalledTag = 'build-308-2808722'
+        & $expectB ((Get-CloudNote) -like '*no prediction for build 308*') ('map: the note should name build 308, got: ' + (Get-CloudNote))
+        & $expectB ((Get-MapEmptyText) -like 'No prediction for build 308 yet.*') ('map: the empty field should name build 308, got: ' + (Get-MapEmptyText))
+        $script:InstalledTag = ''
+        & $expectB ((Get-MapEmptyText) -like 'No prediction for this build yet.*') 'map: with no build the empty field keeps its old wording'
+    } catch {
+        [void]$buildFails.Add('threw: ' + $_.Exception.Message + ' at line ' + $_.InvocationInfo.ScriptLineNumber)
+    } finally {
+        $InstallDir = $savedInstallDir
+        $script:SelectedFile = $savedSelectedFile
+        ${function:Get-ResultsFolder} = $savedResultsFn
+        $script:Cloud = $savedCloudB
+        $script:InstalledTag = $savedInstalledTagB
+        Set-SelectedBuild $savedSelectedTagB
+        if ($null -ne $hostState) { $hostState.Stop = $true }
+        if ($null -ne $hostPs) { try { [void]$hostPs.BeginStop($null, $null) } catch { }; try { $hostPs.Dispose() } catch { } }
+        if ($null -ne $hostListener) { try { $hostListener.Close() } catch { } }
+        Remove-Item -LiteralPath $buildRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if ($buildFails.Count -eq 0) {
+        Write-Host '  Builds on this computer: OK'
+    } else {
+        foreach ($bf in $buildFails) { $failures.Add('builds: ' + $bf) }
+        Write-Host ('  Builds on this computer: FAIL (' + ($buildFails -join '; ') + ')')
+    }
+
     # 1. Build the whole window (catches WinForms mistakes) and fill it in.
     try {
         $testForm = New-MainForm
@@ -6767,6 +7818,139 @@ if ($SelfTest) {
             $bmp.Dispose()
             Write-Host ('  Screenshot saved: ' + $env:SCOURGE_SCREENSHOT)
             $testForm.Hide()
+        }
+        # The build drop-down. It shows from two builds up, lists them with their build times, and a pick moves
+        # the title, the upload folder, and the saved pick to that build. The Route Map reload is replaced by a
+        # counter here; the real one is checked against a stand-in service above.
+        $pickUi = New-Object System.Collections.Generic.List[string]
+        $savedInstUi = $InstallDir; $savedSelUi = $script:SelectedFile; $savedLatestUi = $script:LatestTag
+        $savedTagUi = $script:SelectedTag; $savedInstalledUi = $script:InstalledTag; $savedSwitchUi = ${function:Switch-CloudBuild}
+        $uiRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('scourge-picker-' + [Guid]::NewGuid().ToString('N'))
+        try {
+            $ui = $script:Ui
+            # Control.Visible is false for every control while the window itself is hidden, so ask for the control's own flag.
+            $ownVisible = {
+                param($Ctl)
+                $m = [System.Windows.Forms.Control].GetMethod('GetState', [System.Reflection.BindingFlags]'Instance,NonPublic', $null, [type[]]@([int]), $null)
+                if ($null -eq $m) { return [bool]$Ctl.Visible }
+                return [bool]$m.Invoke($Ctl, @(2))
+            }
+            $uiMake = {
+                param([string]$Tag, [string]$BuiltAt)
+                $dir = Join-Path (Join-Path $uiRoot 'builds') $Tag
+                foreach ($n in ($script:AssetNames + $script:TesterAssetNames + @('auton-test-hot.package.bin'))) {
+                    $p = Get-ReleaseAssetPath -Root $dir -AssetName $n
+                    New-Item -ItemType Directory -Path (Split-Path $p -Parent) -Force | Out-Null
+                    [System.IO.File]::WriteAllText($p, ($Tag + '|' + $n), (New-Object System.Text.UTF8Encoding($false)))
+                }
+                $ver = @{ tag = $Tag; name = $Tag; notes = ('Built from ' + $Tag.Substring($Tag.Length - 7) + ': test'); built_at = $BuiltAt; downloaded_at = '2026-11-09T00:00:00Z' }
+                [System.IO.File]::WriteAllText((Join-Path $dir 'version.json'), ($ver | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
+            }
+            & $uiMake 'build-313-3c15a66' '2026-11-07T17:36:00Z'
+            & $uiMake 'build-308-2808722' '2026-11-07T17:01:00Z'
+            & $uiMake 'build-304-497d4f7' '2026-11-07T14:48:00Z'
+            $InstallDir = $uiRoot
+            $script:SelectedFile = Join-Path $uiRoot 'selected.json'
+            $script:SwitchCalls = 0
+            ${function:Switch-CloudBuild} = { $script:SwitchCalls++ }
+            Initialize-Builds
+            $script:LatestTag = 'build-313-3c15a66'
+            Update-BuildInfo
+            if ($script:SelectedTag -ne 'build-313-3c15a66') { $pickUi.Add('with no saved pick the newest build should be picked, got ' + $script:SelectedTag) }
+            if (($ui.BuildBox.Items.Count -ne 3) -or (-not (& $ownVisible $ui.BuildBox)) -or (& $ownVisible $ui.BuildTitle)) { $pickUi.Add('three builds should show the drop-down in the title''s place') }
+            if ($ui.BuildBox.Items.Count -eq 3) {
+                if (($ui.BuildBox.Items[0] -notlike 'Build 313 (latest)*') -or ($ui.BuildBox.Items[1] -notlike 'Build 308 *') -or ($ui.BuildBox.Items[2] -notlike 'Build 304 *') -or ($ui.BuildBox.Items[1] -like '*latest*')) { $pickUi.Add('drop-down items were: ' + (@($ui.BuildBox.Items) -join ' | ')) }
+                if (($ui.BuildBox.Items[1] -notmatch '[A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2} [AP]M$')) { $pickUi.Add('an item should end with the build time, got: ' + $ui.BuildBox.Items[1]) }
+            }
+            if ($ui.BuildBox.SelectedIndex -ne 0) { $pickUi.Add('the picked build should show selected') }
+            # Same left edge and height as the Mode box below, and clear of the Get latest code button.
+            if (($ui.BuildBox.Left -ne $ui.ModeBox.Left) -or ($ui.BuildBox.Height -ne $ui.ModeBox.Height) -or ($ui.BuildBox.Right -gt $ui.GetButton.Left)) { $pickUi.Add('drop-down box ' + $ui.BuildBox.Bounds + ' should line up with the Mode box ' + $ui.ModeBox.Bounds + ' and stop before the button ' + $ui.GetButton.Bounds) }
+            if ($ui.BuildBox.Font.Name -ne $ui.ModeBox.Font.Name -or $ui.BuildBox.Font.Size -ne $ui.ModeBox.Font.Size -or $ui.BuildBox.DropDownStyle -ne $ui.ModeBox.DropDownStyle) { $pickUi.Add('the drop-down should use the Mode box''s font and style') }
+            if ($script:NoticeShown) { $pickUi.Add('all three newest builds are here, so there should be no newer-code notice') }
+            $sizeWithPicker = $script:UploadLayoutSize
+            if ($env:SCOURGE_SCREENSHOT) {
+                $buildShot = Join-Path (Split-Path $env:SCOURGE_SCREENSHOT -Parent) 'uploader-window-builds.png'
+                $testForm.Show()
+                [System.Windows.Forms.Application]::DoEvents()
+                $testForm.Refresh()
+                $bmp = New-Object System.Drawing.Bitmap $testForm.Width, $testForm.Height
+                $testForm.DrawToBitmap($bmp, (New-Object System.Drawing.Rectangle 0, 0, $testForm.Width, $testForm.Height))
+                $bmp.Save($buildShot, [System.Drawing.Imaging.ImageFormat]::Png)
+                $bmp.Dispose()
+                Write-Host ('  Build drop-down screenshot saved: ' + $buildShot)
+                # The open list is a separate pop-up window that DrawToBitmap leaves out, so it is copied off the screen.
+                try {
+                    $testForm.Show()
+                    [System.Windows.Forms.Application]::DoEvents()
+                    $ui.BuildBox.DroppedDown = $true
+                    [System.Windows.Forms.Application]::DoEvents()
+                    Start-Sleep -Milliseconds 500
+                    [System.Windows.Forms.Application]::DoEvents()
+                    $openShot = Join-Path (Split-Path $env:SCOURGE_SCREENSHOT -Parent) 'uploader-window-builds-open.png'
+                    $bmp = New-Object System.Drawing.Bitmap $testForm.Width, ($testForm.Height + 40)
+                    $gr = [System.Drawing.Graphics]::FromImage($bmp)
+                    $gr.CopyFromScreen($testForm.Left, $testForm.Top, 0, 0, $bmp.Size)
+                    $gr.Dispose()
+                    $bmp.Save($openShot, [System.Drawing.Imaging.ImageFormat]::Png)
+                    $bmp.Dispose()
+                    Write-Host ('  Build drop-down (open) screenshot saved: ' + $openShot)
+                } catch {
+                    Write-Host ('  (open drop-down picture skipped: ' + $_.Exception.Message + ')')
+                } finally {
+                    $ui.BuildBox.DroppedDown = $false
+                }
+                $testForm.Hide()
+            }
+            # Pick 308.
+            $ui.BuildBox.SelectedIndex = 1
+            if ($script:InstalledTag -ne 'build-308-2808722') { $pickUi.Add('picking 308 left the picked build at ' + $script:InstalledTag) }
+            if (($script:ProjectDir -ne (Join-Path $uiRoot 'builds\build-308-2808722')) -or ((Read-SelectedTag $script:SelectedFile) -ne 'build-308-2808722')) { $pickUi.Add('picking 308 should move the project folder and save the pick') }
+            if (($script:SwitchCalls -ne 1) -or ($ui.Status.Text -ne 'Using Build 308. Ready to upload.')) { $pickUi.Add('picking 308 should reload the Route Map once and say so, got ' + $script:SwitchCalls + ' and: ' + $ui.Status.Text) }
+            if ($ui.BuildMeta.Text -notlike '*Commit 2808722*') { $pickUi.Add('the details under the drop-down should be 308''s, got: ' + $ui.BuildMeta.Text) }
+            if ($script:NoticeShown) { $pickUi.Add('picking an older build that sits next to the newest should not raise a newer-code notice') }
+            if ($script:TesterBuildTag -ne 'build-308-2808722') { $pickUi.Add('the tester build named in sent results should follow the picked build, got: ' + $script:TesterBuildTag) }
+            # Picking the same one again does nothing; a build with no Auton Test file says so.
+            $ui.BuildBox.SelectedIndex = 1
+            if ($script:SwitchCalls -ne 1) { $pickUi.Add('picking the build that is already picked should not reload anything') }
+            Remove-Item -LiteralPath (Join-Path $uiRoot 'builds\build-304-497d4f7\modes') -Recurse -Force
+            $ui.ModeBox.SelectedIndex = 1
+            $ui.BuildBox.SelectedIndex = 2
+            if ($ui.Status.Text -notlike 'Build 304 has no Auton Test version*') { $pickUi.Add('a build without the picked mode should say so, got: ' + $ui.Status.Text) }
+            $ui.ModeBox.SelectedIndex = 0
+            # Busy: the drop-down locks like the Mode box and comes back after.
+            Set-Busy $true 'download' 'x'
+            if ($ui.BuildBox.Enabled) { $pickUi.Add('the drop-down should be locked while busy') }
+            Set-Busy $false
+            if (-not $ui.BuildBox.Enabled) { $pickUi.Add('the drop-down should unlock after busy') }
+            $ui.BuildBox.SelectedIndex = 1
+            # A newer build on GitHub that is not here yet still gets its notice.
+            $script:LatestTag = 'build-320-9999999'
+            Update-BuildInfo
+            if ((-not $script:NoticeShown) -or ($ui.Notice.Text -notlike '*build-320-9999999*')) { $pickUi.Add('a newer build that is not downloaded should raise the notice') }
+            if ($ui.BuildBox.Items[0] -like '*latest*') { $pickUi.Add('no stored build is the latest when the latest is not downloaded') }
+            $script:LatestTag = ''
+            Update-BuildInfo
+            # One build is not a choice: the title comes back and the drop-down goes.
+            Remove-Item -LiteralPath (Join-Path $uiRoot 'builds\build-313-3c15a66') -Recurse -Force
+            Remove-Item -LiteralPath (Join-Path $uiRoot 'builds\build-304-497d4f7') -Recurse -Force
+            Update-BuildInfo
+            if ((& $ownVisible $ui.BuildBox) -or (-not (& $ownVisible $ui.BuildTitle)) -or ($ui.BuildTitle.Text -ne 'Build 308')) { $pickUi.Add('with one build the title should show and the drop-down should hide') }
+            $sizeWithoutPicker = $script:UploadLayoutSize
+            if ($sizeWithPicker.Height -gt ($sizeWithoutPicker.Height + (Px 2))) { $pickUi.Add('the drop-down made the Upload view taller: ' + $sizeWithPicker + ' against ' + $sizeWithoutPicker) }
+            Write-Host ('  Upload view height: ' + $sizeWithPicker.Height + ' with the drop-down, ' + $sizeWithoutPicker.Height + ' without (Details open, ' + $script:Scale + 'x scale)')
+        } catch {
+            $pickUi.Add('threw: ' + $_.Exception.Message + ' at line ' + $_.InvocationInfo.ScriptLineNumber)
+        } finally {
+            $InstallDir = $savedInstUi; $script:SelectedFile = $savedSelUi; $script:LatestTag = $savedLatestUi
+            ${function:Switch-CloudBuild} = $savedSwitchUi
+            Set-SelectedBuild $savedTagUi
+            $script:InstalledTag = $savedInstalledUi
+            Update-BuildInfo
+            Remove-Item -LiteralPath $uiRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if ($pickUi.Count -eq 0) { Write-Host '  Build drop-down: OK' } else {
+            foreach ($pu in $pickUi) { $failures.Add('build drop-down: ' + $pu) }
+            Write-Host ('  Build drop-down: FAIL (' + ($pickUi -join '; ') + ')')
         }
         # If starting the read throws, the tab must not stay on "Reading recordings...".
         $realFolderFn = ${function:Get-ResultsFolder}
@@ -6873,6 +8057,142 @@ if ($SelfTest) {
             Set-CloudRoute 'AWP'
             if ((-not $script:Ui.MapSideL.Enabled) -or (-not $script:Ui.MapSideR.Enabled)) { $failures.Add('Route Map cloud: side buttons should come back for AWP') }
             Set-CloudSide 'L'
+            Set-CloudData $simOnly '2026-10-30T23:05:00Z'
+
+            # The Override layout: every Cup, Pin and stack, against the list the robot repo's field.py gives (name, kind, x, y, tip, angle).
+            $fieldPyRows = @'
+OBJ_WALL_NEAR_RIGHT_1,cup,20.44,-68.7,,0.0
+OBJ_WALL_NEAR_RIGHT_2,stack,23.6,-68.7,,0.0
+OBJ_WALL_NEAR_RIGHT_3,cup,26.76,-68.7,,0.0
+OBJ_WALL_NEAR_LEFT_1,cup,-26.76,-68.7,,0.0
+OBJ_WALL_NEAR_LEFT_2,stack,-23.6,-68.7,,0.0
+OBJ_WALL_NEAR_LEFT_3,cup,-20.44,-68.7,,0.0
+OBJ_WALL_SIDE_1,cup,68.7,-26.76,,0.0
+OBJ_WALL_SIDE_2,stack,68.7,-23.6,,0.0
+OBJ_WALL_SIDE_3,cup,68.7,-20.44,,0.0
+OBJ_WALL_SIDE_UP_1,cup,68.7,20.44,,0.0
+OBJ_WALL_SIDE_UP_2,stack,68.7,23.6,,0.0
+OBJ_WALL_SIDE_UP_3,cup,68.7,26.76,,0.0
+OBJ_WALL_FAR_RIGHT_1,cup,20.44,68.7,,0.0
+OBJ_WALL_FAR_RIGHT_2,stack,23.6,68.7,,0.0
+OBJ_WALL_FAR_RIGHT_3,cup,26.76,68.7,,0.0
+OBJ_WALL_FAR_LEFT_1,cup,-26.76,68.7,,0.0
+OBJ_WALL_FAR_LEFT_2,stack,-23.6,68.7,,0.0
+OBJ_WALL_FAR_LEFT_3,cup,-20.44,68.7,,0.0
+OBJ_WALL_LEFT_UP_1,cup,-68.7,20.44,,0.0
+OBJ_WALL_LEFT_UP_2,stack,-68.7,23.6,,0.0
+OBJ_WALL_LEFT_UP_3,cup,-68.7,26.76,,0.0
+OBJ_WALL_LEFT_DOWN_1,cup,-68.7,-26.76,,0.0
+OBJ_WALL_LEFT_DOWN_2,stack,-68.7,-23.6,,0.0
+OBJ_WALL_LEFT_DOWN_3,cup,-68.7,-20.44,,0.0
+OBJ_CLUSTER_1_PIN_XP,pin_flat,-42.8,-47.2,red,0.0
+OBJ_CLUSTER_1_PIN_YN,pin_flat,-47.2,-51.6,red,270.0
+OBJ_CLUSTER_1_PIN_XN,pin_flat,-51.6,-47.2,blue,180.0
+OBJ_CLUSTER_1_PIN_YP,pin_flat,-47.2,-42.8,blue,90.0
+OBJ_CLUSTER_1,cup,-47.2,-47.2,,0.0
+OBJ_CLUSTER_2_PIN_XP,pin_flat,-19.2,-23.6,red,0.0
+OBJ_CLUSTER_2_PIN_YN,pin_flat,-23.6,-28.0,red,270.0
+OBJ_CLUSTER_2_PIN_XN,pin_flat,-28.0,-23.6,blue,180.0
+OBJ_CLUSTER_2_PIN_YP,pin_flat,-23.6,-19.2,blue,90.0
+OBJ_CLUSTER_2,cup,-23.6,-23.6,,0.0
+OBJ_CLUSTER_3_PIN_XP,pin_flat,28.0,23.6,red,0.0
+OBJ_CLUSTER_3_PIN_YN,pin_flat,23.6,19.2,red,270.0
+OBJ_CLUSTER_3_PIN_XN,pin_flat,19.2,23.6,blue,180.0
+OBJ_CLUSTER_3_PIN_YP,pin_flat,23.6,28.0,blue,90.0
+OBJ_CLUSTER_3,cup,23.6,23.6,,0.0
+OBJ_CLUSTER_4_PIN_XP,pin_flat,51.6,47.2,red,0.0
+OBJ_CLUSTER_4_PIN_YN,pin_flat,47.2,42.8,red,270.0
+OBJ_CLUSTER_4_PIN_XN,pin_flat,42.8,47.2,blue,180.0
+OBJ_CLUSTER_4_PIN_YP,pin_flat,47.2,51.6,blue,90.0
+OBJ_CLUSTER_4,cup,47.2,47.2,,0.0
+OBJ_DIAGONAL_SIDE,stack,47.2,-47.2,,0.0
+OBJ_DIAGONAL_INNER,stack,23.6,-23.6,,0.0
+OBJ_DIAGONAL_FAR_INNER,stack,-23.6,23.6,,0.0
+OBJ_DIAGONAL_FAR,stack,-47.2,47.2,,0.0
+OBJ_MID_NEAR,stack,0.0,-23.6,red,0.0
+OBJ_MID_SIDE,stack,23.6,0.0,red,0.0
+OBJ_MID_FAR,stack,0.0,23.6,blue,0.0
+OBJ_MID_LEFT,stack,-23.6,0.0,blue,0.0
+'@
+            $oRows = @($fieldPyRows -split "`r?`n" | Where-Object { $_ })
+            $mfo = Get-MapField
+            $kindCount = @{}
+            foreach ($mo in $mfo.Objects) { $kindCount[[string]$mo.Kind] = 1 + [int]$kindCount[[string]$mo.Kind] }
+            if (($mfo.Objects.Count -ne 52) -or ($kindCount['cup'] -ne 20) -or ($kindCount['stack'] -ne 16) -or ($kindCount['pin_flat'] -ne 16)) { $failures.Add('Route Map field: expected 20 cups, 16 stacks and 16 flat pins (52), got ' + $mfo.Objects.Count + ' ' + (($kindCount.Keys | Sort-Object | ForEach-Object { $_ + '=' + $kindCount[$_] }) -join ' ')) }
+            $oBad = 0
+            for ($oi = 0; $oi -lt $oRows.Count; $oi++) {
+                $cols = $oRows[$oi].Split(',')
+                $mo = $mfo.Objects[$oi]
+                if (($mo.Name -cne $cols[0]) -or ($mo.Kind -cne $cols[1]) -or (-not (& $near $mo.X ([double]::Parse($cols[2], [System.Globalization.CultureInfo]::InvariantCulture)))) -or (-not (& $near $mo.Y ([double]::Parse($cols[3], [System.Globalization.CultureInfo]::InvariantCulture)))) -or ($mo.Tip -cne $cols[4]) -or (($mo.Kind -ceq 'pin_flat') -and (-not (& $near $mo.Angle ([double]::Parse($cols[5], [System.Globalization.CultureInfo]::InvariantCulture)))))) { $oBad++ }
+            }
+            if (($oRows.Count -ne 52) -or ($oBad -ne 0)) { $failures.Add('Route Map field: ' + $oBad + ' of ' + $oRows.Count + ' objects differ from field.py') }
+            $mfr = Get-ViewField 'R'
+            $xp = @($mfr.Objects | Where-Object { $_.Name -ceq 'OBJ_CLUSTER_1_PIN_XP' })[0]
+            if (($mfr.Objects.Count -ne 52) -or (-not (& $near $xp.X 47.2)) -or (-not (& $near $xp.Y 42.8)) -or (-not (& $near $xp.Angle 270.0)) -or ($xp.Tip -cne 'red')) { $failures.Add('Route Map field: the Right side should reflect objects across y = -x and turn their Pins with them') }
+            # The Right side keeps the Loaders and Load Zones where they are; every Goal and object has an identical twin.
+            $ldL = $mfo.Loaders; $ldR = $mfr.Loaders; $ldSame = ($ldL.Count -eq $ldR.Count)
+            for ($li = 0; $ldSame -and ($li -lt $ldL.Count); $li++) {
+                if (($ldL[$li].X -ne $ldR[$li].X) -or ($ldL[$li].Y -ne $ldR[$li].Y) -or (($null -eq $ldL[$li].Zone) -ne ($null -eq $ldR[$li].Zone)) -or (($null -ne $ldL[$li].Zone) -and ((@($ldL[$li].Zone) -join ',') -ne (@($ldR[$li].Zone) -join ',')))) { $ldSame = $false }
+            }
+            if (-not $ldSame) { $failures.Add('Route Map field: the Right side should keep the Loaders and Load Zones where they are') }
+            # Skills is the match field with every Goal empty and no other alliance.
+            $sf = Get-SkillsField
+            $holdM = @($mfo.Goals | Where-Object { $_[3] }).Count
+            $holdS = @($sf.Goals | Where-Object { $_[3] }).Count
+            $allyS = @($sf.Goals | Where-Object { $_[0] -eq 'alliance' }).Count
+            $oppS = @($sf.Goals | Where-Object { $_[0] -eq 'opponent' }).Count
+            $sameGoals = $true
+            for ($gi = 0; $gi -lt 9; $gi++) { if (($sf.Goals[$gi][1] -ne $mfo.Goals[$gi][1]) -or ($sf.Goals[$gi][2] -ne $mfo.Goals[$gi][2])) { $sameGoals = $false } }
+            if (($sf.Goals.Count -ne 9) -or ($holdM -ne 5) -or ($holdS -ne 0) -or ($allyS -ne 4) -or ($oppS -ne 0) -or (-not $sameGoals)) { $failures.Add('Route Map field: Skills should be the match Goals with the five Pins out and the blue Goals ordinary (hold ' + $holdM + ' to ' + $holdS + ', alliance ' + $allyS + ', opponent ' + $oppS + ')') }
+            if ((-not [object]::ReferenceEquals($sf.Objects, $mfo.Objects)) -or (-not [object]::ReferenceEquals($sf.Toggles, $mfo.Toggles)) -or (-not [object]::ReferenceEquals($sf.Loaders, $mfo.Loaders)) -or ($sf.Id -ne 'skills') -or ($mfo.Id -ne 'override')) { $failures.Add('Route Map field: Skills should share the match field''s objects, toggles and loaders') }
+            if ((Get-ViewField 'R' 'skills').Id -ne 'skills') { $failures.Add('Route Map field: Skills is never mirrored') }
+            # Which field a prediction selects: a skills route by its tag, by its slot, or by both; AWP the match field.
+            $skTagOnly = ConvertFrom-CloudMap ($skillsJson.Replace('{"id":"skills","slot":"skills"', '{"id":"s1","field":"skills"'))
+            $skTagSlot = ConvertFrom-CloudMap ($skillsJson.Replace('"slot":"skills"', '"slot":"skills","field":"skills"'))
+            foreach ($skCase in @(@('tag only', $skTagOnly), @('slot only (older data)', $skillsOnly), @('tag and slot', $skTagSlot))) {
+                $skData = $skCase[1]
+                $skData.Recorded = $null
+                $skR = @($skData.Sim.Routes | Where-Object { $_.Key -eq 'skills' })
+                if (($skR.Count -ne 1) -or ($skR[0].Field -ne 'skills') -or ($skR[0].Side -ne 'L')) { $failures.Add('Route Map field: a Skills route (' + $skCase[0] + ') should parse onto the skills field, Left frame') }
+                Set-CloudData $skData '2026-10-30T23:06:00Z'
+                Set-CloudSide 'R'
+                Set-CloudRoute 'skills'
+                if (((Get-ViewFieldName) -ne 'skills') -or ((Get-ViewField (Get-CloudViewSide) (Get-ViewFieldName)).Id -ne 'skills')) { $failures.Add('Route Map field: the Skills route (' + $skCase[0] + ') should show the Skills field') }
+                Set-CloudRoute 'AWP'
+                if ((Get-ViewFieldName) -ne 'override') { $failures.Add('Route Map field: AWP should show the match field after Skills (' + $skCase[0] + ')') }
+                Set-CloudSide 'L'
+            }
+            if (($skTagOnly.Sim.Routes | Where-Object { $_.Field -eq 'pinnacle' }).Count -ne 0) { $failures.Add('Route Map field: a Skills route is not a Pinnacle route') }
+            # A plan drawn from the Skills pick is sent on the Override field but the Skills field stays on screen.
+            Set-CloudData $skTagOnly '2026-10-30T23:06:00Z'
+            Set-CloudRoute 'skills'
+            Enter-PlanMode
+            $pcs = $script:Ui.MapCanvas.ClientSize
+            $pcb = New-Object System.Drawing.Bitmap $pcs.Width, $pcs.Height
+            $pcg = [System.Drawing.Graphics]::FromImage($pcb)
+            try { Show-RouteMapCanvas $pcg $pcs } finally { $pcg.Dispose(); $pcb.Dispose() }
+            $pv = $script:PlanView
+            Start-PlanStroke ($pv.Ox - 30.0 * $pv.Sc) ($pv.Oy + 30.0 * $pv.Sc)
+            Add-PlanStrokePoint ($pv.Ox - 10.0 * $pv.Sc) ($pv.Oy + 10.0 * $pv.Sc)
+            Complete-PlanStroke ($pv.Ox + 10.0 * $pv.Sc) ($pv.Oy - 10.0 * $pv.Sc)
+            $planBodySk = Get-PlanBodyNow
+            if ((@($script:Plan.Lines).Count -ne 1) -or ((Get-ViewFieldName) -ne 'skills') -or ($planBodySk['field'] -ne $null -and $planBodySk['field'] -ne 'override') -or ($script:Plan.Field -ne 'override')) { $failures.Add('Route Map field: a plan drawn from the Skills pick should stay on the Skills field and be sent on Override, got view ' + (Get-ViewFieldName) + ', field ' + $script:Plan.Field + ', lines ' + @($script:Plan.Lines).Count) }
+            Exit-PlanMode
+            Clear-PlanLines
+            Set-CloudRoute 'AWP'
+            # Pictures: the whole field for Skills and for AWP (the RECF one is saved below).
+            $wasWhole0 = $script:Map.Whole
+            $script:Map.Whole = $true
+            Set-CloudData $skTagOnly '2026-10-30T23:06:00Z'
+            Set-CloudRoute 'skills'
+            & $paintCanvas 'uploader-route-map-skills.png'
+            Set-CloudRoute 'AWP'
+            & $paintCanvas 'uploader-route-map-awp.png'
+            Set-CloudSide 'R'
+            & $paintCanvas 'uploader-route-map-awp-right.png'
+            Set-CloudSide 'L'
+            $script:Map.Whole = $wasWhole0
+            if ($script:MapPaintError) { $failures.Add('Route Map drawing failed on the Skills or match field: ' + $script:Ui.Log.Text) }
             Set-CloudData $simOnly '2026-10-30T23:05:00Z'
 
             # RECF: a fixed-start route on the Pinnacle field, listed after Skills, never mirrored, and a plan drawn on it says so.
@@ -7184,7 +8504,7 @@ if ($SelfTest) {
         $testForm.Dispose()
         Write-Host '  Window build: OK'
     } catch {
-        $failures.Add('window build failed: ' + $_.Exception.Message)
+        $failures.Add('window build failed: ' + $_.Exception.Message + ' (line ' + $_.InvocationInfo.ScriptLineNumber + ')')
         Write-Host ('  Window build: FAIL (' + $_.Exception.Message + ')')
     }
 
@@ -7208,9 +8528,11 @@ if ($SelfTest) {
 
         # 3b. CI only: download the latest release the same way a first launch does.
         if ($env:SCOURGE_SELFTEST_DOWNLOAD -eq '1') {
-            $dl = Save-LatestRelease -ReleasesUrl $script:ReleasesUrl -InstallDir $InstallDir -AssetNames $script:AssetNames -InstalledTag $script:InstalledTag
+            $dl = Save-LatestRelease -ReleasesUrl $script:ReleasesUrl -InstallDir $InstallDir -AssetNames $script:AssetNames -SelectedTag $script:SelectedTag
             if (@('downloaded', 'current') -contains [string]$dl.Status) {
-                Write-Host ('  Download: OK (' + $dl.Release.Tag + ')')
+                # The window does this when a download finishes: the newest build becomes the picked one.
+                Set-SelectedBuild (Get-NewestTag @(Get-StoredBuilds $InstallDir | ForEach-Object { [string]$_.Tag })) -Save
+                Write-Host ('  Download: OK (' + $dl.Release.Tag + ', ' + $dl.Status + ', ' + @($dl.Downloaded).Count + ' fetched, ' + @(Get-StoredBuilds $InstallDir).Count + ' builds on disk)')
             } else {
                 $failures.Add('download status ' + $dl.Status + ': ' + $dl.Error)
                 Write-Host ('  Download: FAIL (' + $dl.Status + ': ' + $dl.Error + ')')
@@ -7231,7 +8553,7 @@ if ($SelfTest) {
                 foreach ($l in ($run.Output -split "`n")) { Write-Host ('    ' + $l) }
             }
         } else {
-            Write-Host '  Upload: skipped (no project\bin\hot.package.bin downloaded)'
+            Write-Host '  Upload: skipped (no build downloaded)'
         }
     }
 

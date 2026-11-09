@@ -1011,8 +1011,11 @@ $SharedCode = {
         return @{ Kept = $kept; Damaged = $false; Error = '' }
     }
 
-    # Written whole and then moved into place, so a crash never leaves half a file. A damaged
+    # Written whole and then swapped into place, so a crash never leaves half a file. A damaged
     # kept.json is copied to kept.json.bak before it is replaced, so nothing in it is lost.
+    # A missing kept.json means "nothing kept", so there must be no moment without one: another window
+    # reading then would let Get latest code remove kept builds. Move-Item -Force and File.Replace both
+    # leave such a moment (the old file goes first); MoveFileEx renames the new file over the old in one step.
     function Write-KeptBuilds {
         param([string]$Path, [hashtable]$Kept)
         if ((Test-Path -LiteralPath $Path) -and (Read-KeptBuilds $Path).Damaged) { Copy-Item -LiteralPath $Path -Destination ($Path + '.bak') -Force }
@@ -1021,7 +1024,11 @@ $SharedCode = {
         $json = [ordered]@{ version = 1; kept = $map } | ConvertTo-Json -Depth 4
         $tmp = $Path + '.tmp'
         [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
-        Move-Item -LiteralPath $tmp -Destination $Path -Force
+        if (-not ('Scourge.KeptFile' -as [type])) {
+            Add-Type -Namespace Scourge -Name KeptFile -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)] public static extern bool MoveFileEx(string from, string to, int flags);'
+        }
+        # 9 = replace an existing file (1) and return only once the move is on the disk (8).
+        if (-not [Scourge.KeptFile]::MoveFileEx($tmp, $Path, 9)) { throw (New-Object System.ComponentModel.Win32Exception([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())) }
     }
 
     # The tag becomes a folder name, so only the same safe characters the release check allows.
@@ -1404,9 +1411,11 @@ $SharedCode = {
     #     this; the newest build still comes down.
     #   * One build failing (a damaged file) fails only that build.
     #   * What stays: the newest, the full builds shown, every tag in $KeptTags, and $SelectedTag
-    #     (the build in use), however old. The rest goes, but only once the newest build is safely
-    #     stored, and only when a full-builds list was read and kept.json could be read ($KeptDamaged
-    #     false): without both, a build to keep cannot be told from the rest, so nothing is removed.
+    #     (the build in use), however old, plus whatever kept.json and selected.json in $InstallDir
+    #     say at that moment. The rest goes, but only once the newest build is safely stored, and only
+    #     when a full-builds list was read and kept.json could be read (both when the window started,
+    #     $KeptDamaged false, and again just before removing): without both, a build to keep cannot be
+    #     told from the rest, so nothing is removed.
     # Returns @{ Status = 'downloaded' | 'current' | 'none' | 'offline' | 'error'; Release (the newest);
     #            Downloaded (tags fetched this time); Failed (tag -> reason); Evicted (tags removed);
     #            FullBuilds; FullStatus; Error }.
@@ -1454,12 +1463,16 @@ $SharedCode = {
         # Only drop old builds once the newest one is safely stored.
         $evicted = @()
         if (($latestResult.Status -eq 'downloaded') -or ($latestResult.Status -eq 'current')) {
+            # $KeptTags and $SelectedTag are this window's copies. Another window may have kept or picked a
+            # build since, so kept.json and selected.json are read again now, and what they say stays too.
+            $keptNow = Read-KeptBuilds (Join-Path $InstallDir 'kept.json')
             if ($full.Status -eq 'none') {
                 Add-SharedLog $Sync 'No old builds were removed, because the full-builds list could not be read.'
-            } elseif ($KeptDamaged) {
+            } elseif ($KeptDamaged -or $keptNow.Damaged) {
                 Add-SharedLog $Sync 'No old builds were removed, because kept.json could not be read, so which builds are kept is not known.'
             } else {
-                $protect = @(@($latest.Tag, $SelectedTag) + $shownFull + @($KeptTags) | Where-Object { $_ })
+                $pickedNow = Read-SelectedTag (Join-Path $InstallDir 'selected.json')
+                $protect = @(@($latest.Tag, $SelectedTag, $pickedNow) + $shownFull + @($KeptTags) + @($keptNow.Kept.Keys) | Where-Object { $_ })
                 $evicted = @(Remove-OldBuilds -InstallDir $InstallDir -Protect $protect -Sync $Sync)
             }
         }
@@ -6732,6 +6745,8 @@ function Set-KeptName {
     if (-not $Tag) { return }
     $problem = Get-KeptNameError $Name
     if ($problem) { Set-Status $problem 'error'; return }
+    # Start from the file, not this window's copy: another window may have kept or let go of builds since.
+    Initialize-KeptBuilds
     $wasKept = $script:Kept.ContainsKey($Tag)
     $wasDamaged = [bool]$script:KeptDamaged
     $new = $script:Kept.Clone()
@@ -6747,6 +6762,10 @@ function Remove-KeptBuild {
     param([string]$Tag)
     if ($script:Busy -or (-not $Tag) -or (-not $script:Kept.ContainsKey($Tag))) { return }
     $name = Get-BuildDisplayName $Tag
+    # Start from the file, not this window's copy: another window may have kept or let go of builds since.
+    # If the file is damaged now, saving would keep every build (Save-KeptList), so change nothing.
+    Initialize-KeptBuilds
+    if ($script:KeptDamaged) { Update-BuildInfo; Set-Status $script:KeptNote 'error'; return }
     $new = $script:Kept.Clone()
     $new.Remove($Tag)
     if (-not (Save-KeptList $new)) { return }
@@ -8414,6 +8433,26 @@ if ($SelfTest) {
         & $expectB ((Test-Path ($kp + '.bak')) -and (([System.IO.File]::ReadAllText($kp + '.bak')) -ceq $damagedText) -and ((Read-KeptBuilds $kp).Kept['build-320-9999999'] -eq 'New')) 'kept: replacing a damaged file saves it as kept.json.bak first'
         Write-KeptBuilds -Path $kp -Kept @{ 'build-320-9999999' = 'Newer' }
         & $expectB (([System.IO.File]::ReadAllText($kp + '.bak')) -ceq $damagedText) 'kept: a later save of a good file must not overwrite the .bak of the damaged one'
+        # A save that cannot replace kept.json (another program has it open) must fail loudly and leave the old file whole.
+        $held = [System.IO.File]::Open($kp, 'Open', 'Read', 'Read')
+        $heldErr = ''
+        try { Write-KeptBuilds -Path $kp -Kept @{ 'build-1-a' = 'Lost' } } catch { $heldErr = $_.Exception.Message } finally { $held.Dispose() }
+        $kHeld = Read-KeptBuilds $kp
+        & $expectB ($heldErr -and (-not $kHeld.Damaged) -and ((@($kHeld.Kept.Keys) -join ',') -eq 'build-320-9999999') -and ($kHeld.Kept['build-320-9999999'] -ceq 'Newer')) ('kept: a save that cannot replace the file should report it and leave the old list, got error "' + $heldErr + '" and ' + (@($kHeld.Kept.Keys) -join ','))
+        # While kept.json is saved there is never a moment without it: a second window starting then would read "nothing kept".
+        $gapState = [hashtable]::Synchronized(@{ Stop = $false; Polls = 0; Missing = 0 })
+        $gapPs = [PowerShell]::Create().AddScript({
+            param($P, $S)
+            while (-not $S.Stop) { $S.Polls++; if (-not [System.IO.File]::Exists($P)) { $S.Missing++ } }
+        }).AddArgument($kp).AddArgument($gapState)
+        $gapHandle = $gapPs.BeginInvoke()
+        try {
+            # A save can be refused while the other thread is looking at the file (the old file stays); try that one again.
+            for ($gi = 0; $gi -lt 200; $gi++) {
+                for ($try = 0; $try -lt 20; $try++) { try { Write-KeptBuilds -Path $kp -Kept @{ 'build-320-9999999' = ('Save ' + $gi) }; break } catch { Start-Sleep -Milliseconds 5 } }
+            }
+        } finally { $gapState.Stop = $true; [void]$gapPs.EndInvoke($gapHandle); $gapPs.Dispose() }
+        & $expectB (($gapState.Missing -eq 0) -and ($gapState.Polls -gt 0) -and ((Read-KeptBuilds $kp).Kept['build-320-9999999'] -ceq 'Save 199')) ('kept: kept.json should never be missing while it is saved, missing in ' + $gapState.Missing + ' of ' + $gapState.Polls + ' looks')
         & $expectB (((Get-KeptNameError '') -ne '') -and ((Get-KeptNameError '   ') -ne '') -and ((Get-KeptNameError ('a' * 40)) -eq '') -and ((Get-KeptNameError ('a' * 41)) -ne '') -and ((Get-KeptNameError ("a`tb")) -ne '') -and ((Get-KeptNameError '  Practice auton (v2) #3  ') -eq '')) 'kept: names are 1 to 40 characters of one-line text after trimming'
 
         # The drop-down rows: NEWEST, FULL BUILDS, KEPT, ON THIS COMPUTER, then Older build..., each build once.
@@ -9179,6 +9218,64 @@ if ($SelfTest) {
             }
             $leftUi = @(Get-StoredBuilds $uiRoot | ForEach-Object { [string]$_.Tag }) -join ','
             & $expectP (($leftUi -eq 'build-320-2020202,build-313-3c15a66,build-308-2808722,build-304-497d4f7,build-294-3321f7c') -and (@($rKeep.Evicted).Count -eq 0)) ('keeping a build while kept.json is damaged must not let Get latest code remove the builds kept before, left: ' + $leftUi)
+            # Two windows open at once: another window keeps, renames, lets go of, or picks builds after this one
+            # read kept.json at start. A save here starts from the file, and Get latest code protects what the file
+            # says when it runs, not this window's older copy.
+            $kpUi = Join-Path $uiRoot 'kept.json'
+            $tagBeforeTwo = $script:SelectedTag; $keptBeforeTwo = [System.IO.File]::ReadAllText($kpUi)
+            Set-SelectedBuild 'build-320-2020202' -Save
+            Write-KeptBuilds -Path $kpUi -Kept @{ 'build-308-2808722' = 'Mine' }
+            Initialize-KeptBuilds
+            Write-KeptBuilds -Path $kpUi -Kept @{ 'build-308-2808722' = 'Mine'; 'build-304-497d4f7' = 'Theirs' }
+            Set-KeptName 'build-313-3c15a66' 'Three'
+            $kTwo = (Read-KeptBuilds $kpUi).Kept
+            & $expectP (((@($kTwo.Keys | Sort-Object) -join ',') -eq 'build-304-497d4f7,build-308-2808722,build-313-3c15a66') -and ($kTwo['build-304-497d4f7'] -ceq 'Theirs') -and ($script:Kept.Count -eq 3) -and ($script:PickerEntries[(Get-PickerIndex 'build-304-497d4f7')].Group -eq 'kept')) ('keeping a build should not drop one another window kept since, file has: ' + (@($kTwo.Keys | Sort-Object) -join ','))
+            Write-KeptBuilds -Path $kpUi -Kept @{ 'build-308-2808722' = 'Mine'; 'build-304-497d4f7' = 'Theirs'; 'build-294-3321f7c' = 'Also theirs' }
+            Remove-KeptBuild 'build-308-2808722'
+            $kTwo = (Read-KeptBuilds $kpUi).Kept
+            & $expectP (((@($kTwo.Keys | Sort-Object) -join ',') -eq 'build-294-3321f7c,build-304-497d4f7') -and ($script:Kept.Count -eq 2) -and ($ui.Status.Text -like 'Mine (Build 308) is no longer kept.*')) ('stop keeping should start from the file: keep what another window kept, not bring back what it let go, file has: ' + (@($kTwo.Keys | Sort-Object) -join ',') + ' / ' + $ui.Status.Text)
+            # This window starts with nothing kept; another window then keeps 304. Get latest code must keep 304.
+            Write-KeptBuilds -Path $kpUi -Kept @{}
+            Initialize-KeptBuilds
+            Write-KeptBuilds -Path $kpUi -Kept @{ 'build-304-497d4f7' = 'Theirs' }
+            $runStubbed = {
+                $script:BgArgs = $null
+                ${function:Start-BgJob} = { param([scriptblock]$Body, [hashtable]$JobArgs, [scriptblock]$OnDone) $script:BgArgs = $JobArgs }
+                ${function:Get-LatestRelease} = { param([string]$ReleasesUrl, [string]$Tag = '') $t = 'build-320-2020202'; if ($Tag) { $t = $Tag }; @{ Status = 'ok'; Release = @{ Tag = $t } } }
+                ${function:Get-FullBuilds} = { param([string]$Url, [string]$CachePath) $c = Read-FullBuildsCache $CachePath; @{ Status = 'cache'; Builds = $c.Builds; Skipped = @(); Error = 'offline' } }
+                ${function:Save-ReleaseBuild} = { param($Release, [string]$ReleasesUrl, [string]$InstallDir, [string[]]$AssetNames, $Sync = $null) @{ Status = 'current' } }
+                try {
+                    Start-Download -SkipUploaderUpdate | Out-Null
+                    & { param($JobArgs) $A = $JobArgs; $Sync = $null; & $DownloadBody } $script:BgArgs
+                } finally {
+                    ${function:Start-BgJob} = $savedBgJob; Set-Busy $false
+                    ${function:Get-LatestRelease} = $savedRelFn; ${function:Get-FullBuilds} = $savedFullFn; ${function:Save-ReleaseBuild} = $savedSaveFn
+                }
+            }
+            $rTwo = . $runStubbed
+            $leftTwo = @(Get-StoredBuilds $uiRoot | ForEach-Object { [string]$_.Tag }) -join ','
+            & $expectP (($leftTwo -eq 'build-320-2020202,build-313-3c15a66,build-304-497d4f7,build-294-3321f7c') -and ((@($rTwo.Evicted) -join ',') -eq 'build-308-2808722')) ('Get latest code should keep a build another window kept after this one started, left: ' + $leftTwo)
+            # Another window picks 308 (this one still has 320 picked). Get latest code must not remove it.
+            if (-not (Test-Path (Join-Path $uiRoot 'builds\build-308-2808722'))) { & $uiMake 'build-308-2808722' '2026-11-07T17:01:00Z' }
+            if (-not (Test-Path (Join-Path $uiRoot 'builds\build-304-497d4f7'))) { & $uiMake 'build-304-497d4f7' '2026-11-07T14:48:00Z' }
+            Write-SelectedTag -Path $script:SelectedFile -Tag 'build-308-2808722'
+            $rTwo = . $runStubbed
+            $leftTwo = @(Get-StoredBuilds $uiRoot | ForEach-Object { [string]$_.Tag }) -join ','
+            & $expectP (($leftTwo -eq 'build-320-2020202,build-313-3c15a66,build-308-2808722,build-304-497d4f7,build-294-3321f7c') -and (@($rTwo.Evicted).Count -eq 0) -and ($script:SelectedTag -eq 'build-320-2020202')) ('Get latest code should keep the build another window has picked, left: ' + $leftTwo)
+            # kept.json damaged by the time Get latest code runs (this window read it as keeping 304): nothing is removed.
+            Initialize-KeptBuilds
+            [System.IO.File]::WriteAllText($kpUi, $badKept, $utf8Ui)
+            Write-SelectedTag -Path $script:SelectedFile -Tag 'build-320-2020202'
+            $rTwo = . $runStubbed
+            $leftTwo = @(Get-StoredBuilds $uiRoot | ForEach-Object { [string]$_.Tag }) -join ','
+            & $expectP (($leftTwo -eq 'build-320-2020202,build-313-3c15a66,build-308-2808722,build-304-497d4f7,build-294-3321f7c') -and (@($rTwo.Evicted).Count -eq 0)) ('Get latest code should remove nothing when kept.json is damaged by the time it runs, left: ' + $leftTwo)
+            # This window still shows 304 as kept, but the file is damaged now: Stop keeping changes nothing and says why.
+            Remove-KeptBuild 'build-304-497d4f7'
+            & $expectP ((([System.IO.File]::ReadAllText($kpUi)) -ceq $badKept) -and $script:KeptDamaged -and ($ui.Status.Text -like 'kept.json could not be read*')) ('Stop keeping should change nothing once kept.json is damaged, got: ' + $ui.Status.Text)
+            foreach ($mk in @(@('build-308-2808722', '2026-11-07T17:01:00Z'), @('build-304-497d4f7', '2026-11-07T14:48:00Z'))) { if (-not (Test-Path (Join-Path $uiRoot ('builds\' + $mk[0])))) { & $uiMake $mk[0] $mk[1] } }
+            [System.IO.File]::WriteAllText($kpUi, $keptBeforeTwo, $utf8Ui)
+            Initialize-KeptBuilds
+            Set-SelectedBuild $tagBeforeTwo -Save
             # A newer build on GitHub that is not here yet: the notice, and it leads the list as not downloaded.
             $script:LatestTag = 'build-330-3303303'
             Update-BuildInfo

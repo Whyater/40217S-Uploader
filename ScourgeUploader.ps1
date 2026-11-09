@@ -2905,7 +2905,7 @@ $script:MapField = $null
 # Pick is the spot the action menu is open at; PickHit is what a menu click adds to.
 # Hot is the action picked in the list, drawn with a ring. The name and note live in their boxes.
 $script:Plan = @{
-    On = $false; Lines = @(); Actions = @(); Side = ''; Field = ''; Undo = (New-Object System.Collections.ArrayList)
+    On = $false; Lines = @(); Actions = @(); Side = ''; Field = ''; ViewField = ''; Undo = (New-Object System.Collections.ArrayList)
     Stroke = $null; StrokeLost = $false; Sending = $false; Msg = ''; MsgKind = ''; Pick = $null; PickHit = $null; Hot = -1; Filling = $false; SentCode = ''
 }
 # Where the last paint put the field: screen x = Ox + x * Sc, screen y = Oy - y * Sc.
@@ -4044,7 +4044,8 @@ function Get-CloudRouteField {
 # The field on screen: while a plan has lines it stays on the plan's field, otherwise it follows the picked route.
 function Get-ViewFieldName {
     $p = $script:Plan
-    if ($p.On -and (@($p.Lines).Count -gt 0) -and $p.Field) { return [string]$p.Field }
+    # A plan is sent on the Override field even from a Skills view, but the Skills field stays on screen.
+    if ($p.On -and (@($p.Lines).Count -gt 0) -and $p.Field) { if ($p.ViewField) { return [string]$p.ViewField }; return [string]$p.Field }
     return (Get-CloudRouteField)
 }
 
@@ -4515,10 +4516,10 @@ function Exit-PlanMode {
 function Set-PlanState {
     param($Lines, [string]$Side, $Actions)
     $p = $script:Plan
-    [void]$p.Undo.Add(@{ Lines = $p.Lines; Side = $p.Side; Actions = $p.Actions; Field = $p.Field })
+    [void]$p.Undo.Add(@{ Lines = $p.Lines; Side = $p.Side; Actions = $p.Actions; Field = $p.Field; ViewField = $p.ViewField })
     if ($p.Undo.Count -gt 100) { $p.Undo.RemoveAt(0) }
     $p.Lines = @($Lines)
-    if ($p.Lines.Count -gt 0) { $p.Side = $Side } else { $p.Side = ''; $p.Field = '' }
+    if ($p.Lines.Count -gt 0) { $p.Side = $Side } else { $p.Side = ''; $p.Field = ''; $p.ViewField = '' }
     $p.Actions = @($Actions)
     $p.Msg = ''
     $p.Pick = $null
@@ -4531,7 +4532,7 @@ function Undo-PlanStep {
     if ($p.Sending -or ($p.Undo.Count -eq 0)) { return }
     $u = $p.Undo[$p.Undo.Count - 1]
     $p.Undo.RemoveAt($p.Undo.Count - 1)
-    $p.Lines = @($u.Lines); $p.Side = [string]$u.Side; $p.Actions = @($u.Actions); $p.Field = [string]$u.Field
+    $p.Lines = @($u.Lines); $p.Side = [string]$u.Side; $p.Actions = @($u.Actions); $p.Field = [string]$u.Field; $p.ViewField = [string]$u.ViewField
     $p.Msg = ''; $p.Pick = $null; $p.Hot = -1
     if ($p.On -and ($p.Lines.Count -gt 0) -and $p.Side) { $script:Cloud.Side = $p.Side }
     Update-PlanPanel
@@ -4641,7 +4642,7 @@ function Complete-PlanStroke {
     if ($fieldNow -ceq 'skills') { $fieldNow = 'override' }
     Set-PlanState $r.Lines $side $p.Actions
     # The first line fixes the plan's field, the way it fixes the side.
-    if ($first) { $p.Field = $fieldNow }
+    if ($first) { $p.Field = $fieldNow; $p.ViewField = Get-CloudRouteField }
 }
 
 # A click near a line opens the action menu beside it; a click near nothing says
@@ -4986,7 +4987,7 @@ function Complete-PlanSend {
     }
     $p.SentCode = ''
     if ($m.Ok) {
-        $p.Lines = @(); $p.Actions = @(); $p.Side = ''; $p.Field = ''; $p.Undo.Clear(); $p.Hot = -1
+        $p.Lines = @(); $p.Actions = @(); $p.Side = ''; $p.Field = ''; $p.ViewField = ''; $p.Undo.Clear(); $p.Hot = -1
         $p.Filling = $true
         try { $ui.PlanNameBox.Text = ''; $ui.PlanNoteBox.Text = '' } finally { $p.Filling = $false }
     }
@@ -5018,19 +5019,12 @@ function Get-ViewField {
         $m.Angle = ([math]::Atan2((0.0 - [math]::Cos($a)), (0.0 - [math]::Sin($a))) * 180.0 / [math]::PI + 360.0) % 360.0
         [void]$objects.Add($m)
     }
-    $loaders = New-Object System.Collections.ArrayList
-    foreach ($l in $f.Loaders) {
-        $zone = $null
-        if ($null -ne $l.Zone) {
-            $zx = @((0.0 - $l.Zone[3]), (0.0 - $l.Zone[1])); $zy = @((0.0 - $l.Zone[2]), (0.0 - $l.Zone[0]))
-            $zone = @($zx[0], $zy[0], $zx[1], $zy[1])
-        }
-        [void]$loaders.Add(@{ X = (0.0 - $l.Y); Y = (0.0 - $l.X); Zone = $zone })
-    }
+    # Loaders and the Load Zones stay where they are: the field is the same, and only the route is
+    # drawn reflected, so the reflection must map the other objects onto their twins and leave these.
     $script:MapFieldR = @{
         Id = 'override'
         Wall = $f.Wall; RobotLength = $f.RobotLength; RobotWidth = $f.RobotWidth; RobotFront = $f.RobotFront; RobotBack = $f.RobotBack
-        Goals = @($goals.ToArray()); Toggles = @($toggles.ToArray()); Objects = @($objects.ToArray()); Loaders = @($loaders.ToArray())
+        Goals = @($goals.ToArray()); Toggles = @($toggles.ToArray()); Objects = @($objects.ToArray()); Loaders = $f.Loaders
     }
     return $script:MapFieldR
 }
@@ -5094,12 +5088,13 @@ function Get-MapField {
     }
     # A Cup with four Pins lying around it, on the Autonomous Line. The colored tips point away from the Cup: red at +x and -y, blue at -x and +y.
     foreach ($cl in @(@('OBJ_CLUSTER_1', -47.2, -47.2), @('OBJ_CLUSTER_2', -23.6, -23.6), @('OBJ_CLUSTER_3', 23.6, 23.6), @('OBJ_CLUSTER_4', 47.2, 47.2))) {
-        [void]$objects.Add((& $newObj $cl[0] 'cup' $cl[1] $cl[2]))
         foreach ($pn in @(@('XP', 1, 0, 0.0, 'red'), @('YN', 0, -1, 270.0, 'red'), @('XN', -1, 0, 180.0, 'blue'), @('YP', 0, 1, 90.0, 'blue'))) {
             $o = & $newObj ($cl[0] + '_PIN_' + $pn[0]) 'pin_flat' ([math]::Round($cl[1] + $pn[1] * $off, 3)) ([math]::Round($cl[2] + $pn[2] * $off, 3))
             $o.Len = $pinLen; $o.W = $pinW; $o.Angle = [double]$pn[3]; $o.Tip = $pn[4]
             [void]$objects.Add($o)
         }
+        # The Cup comes after its Pins (as in field.py), so it is drawn on top of them.
+        [void]$objects.Add((& $newObj $cl[0] 'cup' $cl[1] $cl[2]))
     }
     # A Cup with a standing Pin; the Midfield ones show a red or blue half up.
     foreach ($st in @(
@@ -5690,7 +5685,7 @@ function Show-RouteMapCanvas {
         if (-not $drawing) { [void]$rows.Add(@(@('drop', 'Drop'), @('pin', 'Pin'), @('stack', 'Stack'), @('toggle', 'Toggle'), @('push', 'Push'))) }
         $goalRow = @(@('alliance', 'Alliance goal'), @('neutral', 'Neutral goal'), @('opponent', 'Opponent goal'))
         # Skills has no other alliance.
-        if ($skills) { $goalRow = @(@('alliance', 'Goal'), @('neutral', 'Neutral goal')) }
+        if ($skills) { $goalRow = @(@('alliance', 'Alliance goal'), @('neutral', 'Neutral goal')) }
         # The Autonomous Line is Override's; the Pinnacle field has none.
         if (-not $pin) { $goalRow += ,@('line', 'Autonomous Line') }
         [void]$rows.Add($goalRow)
@@ -8090,26 +8085,26 @@ OBJ_WALL_LEFT_UP_3,cup,-68.7,26.76,,0.0
 OBJ_WALL_LEFT_DOWN_1,cup,-68.7,-26.76,,0.0
 OBJ_WALL_LEFT_DOWN_2,stack,-68.7,-23.6,,0.0
 OBJ_WALL_LEFT_DOWN_3,cup,-68.7,-20.44,,0.0
-OBJ_CLUSTER_1,cup,-47.2,-47.2,,0.0
 OBJ_CLUSTER_1_PIN_XP,pin_flat,-42.8,-47.2,red,0.0
 OBJ_CLUSTER_1_PIN_YN,pin_flat,-47.2,-51.6,red,270.0
 OBJ_CLUSTER_1_PIN_XN,pin_flat,-51.6,-47.2,blue,180.0
 OBJ_CLUSTER_1_PIN_YP,pin_flat,-47.2,-42.8,blue,90.0
-OBJ_CLUSTER_2,cup,-23.6,-23.6,,0.0
+OBJ_CLUSTER_1,cup,-47.2,-47.2,,0.0
 OBJ_CLUSTER_2_PIN_XP,pin_flat,-19.2,-23.6,red,0.0
 OBJ_CLUSTER_2_PIN_YN,pin_flat,-23.6,-28.0,red,270.0
 OBJ_CLUSTER_2_PIN_XN,pin_flat,-28.0,-23.6,blue,180.0
 OBJ_CLUSTER_2_PIN_YP,pin_flat,-23.6,-19.2,blue,90.0
-OBJ_CLUSTER_3,cup,23.6,23.6,,0.0
+OBJ_CLUSTER_2,cup,-23.6,-23.6,,0.0
 OBJ_CLUSTER_3_PIN_XP,pin_flat,28.0,23.6,red,0.0
 OBJ_CLUSTER_3_PIN_YN,pin_flat,23.6,19.2,red,270.0
 OBJ_CLUSTER_3_PIN_XN,pin_flat,19.2,23.6,blue,180.0
 OBJ_CLUSTER_3_PIN_YP,pin_flat,23.6,28.0,blue,90.0
-OBJ_CLUSTER_4,cup,47.2,47.2,,0.0
+OBJ_CLUSTER_3,cup,23.6,23.6,,0.0
 OBJ_CLUSTER_4_PIN_XP,pin_flat,51.6,47.2,red,0.0
 OBJ_CLUSTER_4_PIN_YN,pin_flat,47.2,42.8,red,270.0
 OBJ_CLUSTER_4_PIN_XN,pin_flat,42.8,47.2,blue,180.0
 OBJ_CLUSTER_4_PIN_YP,pin_flat,47.2,51.6,blue,90.0
+OBJ_CLUSTER_4,cup,47.2,47.2,,0.0
 OBJ_DIAGONAL_SIDE,stack,47.2,-47.2,,0.0
 OBJ_DIAGONAL_INNER,stack,23.6,-23.6,,0.0
 OBJ_DIAGONAL_FAR_INNER,stack,-23.6,23.6,,0.0
@@ -8134,6 +8129,12 @@ OBJ_MID_LEFT,stack,-23.6,0.0,blue,0.0
             $mfr = Get-ViewField 'R'
             $xp = @($mfr.Objects | Where-Object { $_.Name -ceq 'OBJ_CLUSTER_1_PIN_XP' })[0]
             if (($mfr.Objects.Count -ne 52) -or (-not (& $near $xp.X 47.2)) -or (-not (& $near $xp.Y 42.8)) -or (-not (& $near $xp.Angle 270.0)) -or ($xp.Tip -cne 'red')) { $failures.Add('Route Map field: the Right side should reflect objects across y = -x and turn their Pins with them') }
+            # The Right side keeps the Loaders and Load Zones where they are; every Goal and object has an identical twin.
+            $ldL = $mfo.Loaders; $ldR = $mfr.Loaders; $ldSame = ($ldL.Count -eq $ldR.Count)
+            for ($li = 0; $ldSame -and ($li -lt $ldL.Count); $li++) {
+                if (($ldL[$li].X -ne $ldR[$li].X) -or ($ldL[$li].Y -ne $ldR[$li].Y) -or (($null -eq $ldL[$li].Zone) -ne ($null -eq $ldR[$li].Zone)) -or (($null -ne $ldL[$li].Zone) -and ((@($ldL[$li].Zone) -join ',') -ne (@($ldR[$li].Zone) -join ',')))) { $ldSame = $false }
+            }
+            if (-not $ldSame) { $failures.Add('Route Map field: the Right side should keep the Loaders and Load Zones where they are') }
             # Skills is the match field with every Goal empty and no other alliance.
             $sf = Get-SkillsField
             $holdM = @($mfo.Goals | Where-Object { $_[3] }).Count
@@ -8162,6 +8163,23 @@ OBJ_MID_LEFT,stack,-23.6,0.0,blue,0.0
                 Set-CloudSide 'L'
             }
             if (($skTagOnly.Sim.Routes | Where-Object { $_.Field -eq 'pinnacle' }).Count -ne 0) { $failures.Add('Route Map field: a Skills route is not a Pinnacle route') }
+            # A plan drawn from the Skills pick is sent on the Override field but the Skills field stays on screen.
+            Set-CloudData $skTagOnly '2026-10-30T23:06:00Z'
+            Set-CloudRoute 'skills'
+            Enter-PlanMode
+            $pcs = $script:Ui.MapCanvas.ClientSize
+            $pcb = New-Object System.Drawing.Bitmap $pcs.Width, $pcs.Height
+            $pcg = [System.Drawing.Graphics]::FromImage($pcb)
+            try { Show-RouteMapCanvas $pcg $pcs } finally { $pcg.Dispose(); $pcb.Dispose() }
+            $pv = $script:PlanView
+            Start-PlanStroke ($pv.Ox - 30.0 * $pv.Sc) ($pv.Oy + 30.0 * $pv.Sc)
+            Add-PlanStrokePoint ($pv.Ox - 10.0 * $pv.Sc) ($pv.Oy + 10.0 * $pv.Sc)
+            Complete-PlanStroke ($pv.Ox + 10.0 * $pv.Sc) ($pv.Oy - 10.0 * $pv.Sc)
+            $planBodySk = Get-PlanBodyNow
+            if ((@($script:Plan.Lines).Count -ne 1) -or ((Get-ViewFieldName) -ne 'skills') -or ($planBodySk['field'] -ne $null -and $planBodySk['field'] -ne 'override') -or ($script:Plan.Field -ne 'override')) { $failures.Add('Route Map field: a plan drawn from the Skills pick should stay on the Skills field and be sent on Override, got view ' + (Get-ViewFieldName) + ', field ' + $script:Plan.Field + ', lines ' + @($script:Plan.Lines).Count) }
+            Exit-PlanMode
+            Clear-PlanLines
+            Set-CloudRoute 'AWP'
             # Pictures: the whole field for Skills and for AWP (the RECF one is saved below).
             $wasWhole0 = $script:Map.Whole
             $script:Map.Whole = $true
@@ -8170,6 +8188,9 @@ OBJ_MID_LEFT,stack,-23.6,0.0,blue,0.0
             & $paintCanvas 'uploader-route-map-skills.png'
             Set-CloudRoute 'AWP'
             & $paintCanvas 'uploader-route-map-awp.png'
+            Set-CloudSide 'R'
+            & $paintCanvas 'uploader-route-map-awp-right.png'
+            Set-CloudSide 'L'
             $script:Map.Whole = $wasWhole0
             if ($script:MapPaintError) { $failures.Add('Route Map drawing failed on the Skills or match field: ' + $script:Ui.Log.Text) }
             Set-CloudData $simOnly '2026-10-30T23:05:00Z'

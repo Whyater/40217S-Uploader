@@ -2845,8 +2845,9 @@ function playInfoText(sel, t) {
   const s = sel.scrub;
   if (!s) return sel.frame === 'local' ? 'This push test has no samples, so there is nothing to play.' : sel.sim ? 'The predicted route is turned off in Layers.' : 'Pick a run or taught session to play it back.';
   const e = activeEvent(s, t);
-  // A partner has no use for our step numbers ("step -1 (Opening)").
-  if (s.kind === 'sim' && document.documentElement.classList.contains('partner')) return 'Predicted route.';
+  // A partner has no use for our step numbers ("step -1 (Opening)"), and the legend above already says what the line is.
+  const root = document.documentElement.classList;
+  if (s.kind === 'sim' && root.contains('embed') && root.contains('partner')) return '';
   if (s.kind === 'sim') return e ? 'Predicted: ' + (e.step !== null ? 'step ' + e.step : 'a step') + ' (' + (KIND_LABEL[e.type] || e.type || 'step') + ') done at ' + fmt(e.t, 2) + ' s.' : 'Predicted route. No step done yet at this time.';
   const rows = s === sel.runSession ? sel.rows : null;
   if (rows && e) {

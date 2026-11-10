@@ -53,6 +53,16 @@ jobs:
           if ([string]$manifest.sha256 -ne $actualHash) { Write-Error ('uploader.json SHA-256 does not match script: expected ' + $manifest.sha256 + ' got ' + $actualHash); exit 1 }
           Write-Host ('Uploader manifest OK: ' + $manifest.version)
 
+      - name: Check full-builds.json
+        run: |
+          $list = Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'full-builds.json') | ConvertFrom-Json
+          if ((($list.version -isnot [int]) -and ($list.version -isnot [long])) -or ($list.version -ne 1)) { Write-Error 'full-builds.json: version must be the number 1'; exit 1 }
+          # The app treats a list with no builds as damaged and falls back to its saved copy, so never publish one.
+          if (($list.builds -isnot [array]) -or (@($list.builds).Count -eq 0)) { Write-Error 'full-builds.json: builds must be a list with at least one build'; exit 1 }
+          $bad = @(@($list.builds) | Where-Object { ([string]$_.tag) -cnotmatch '^build-\d+-[0-9a-f]{7}$' })
+          if ($bad.Count -gt 0) { Write-Error ('full-builds.json: tags that are not build-N-<7 lowercase hex>: ' + (($bad | ForEach-Object { [string]$_.tag }) -join ', ')); exit 1 }
+          Write-Host ('full-builds.json OK: ' + @($list.builds).Count + ' full builds')
+
       - name: Set up environment
         env:
           GH_TOKEN: ${{ github.token }}
@@ -139,6 +149,10 @@ jobs:
           name: uploader-window
           path: |
             ${{ runner.temp }}\uploader-window.png
+            ${{ runner.temp }}\uploader-window-builds.png
+            ${{ runner.temp }}\uploader-picker.png
+            ${{ runner.temp }}\uploader-keep-dialog.png
+            ${{ runner.temp }}\uploader-older-dialog.png
             ${{ runner.temp }}\uploader-route-map.png
             ${{ runner.temp }}\uploader-route-map-predicted.png
             ${{ runner.temp }}\uploader-route-map-cloud.png

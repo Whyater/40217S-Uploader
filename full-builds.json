@@ -1,6 +1,7 @@
 {
   "version": 1,
   "builds": [
+    { "tag": "build-334-55aef9c", "note": "Adds a wall-distance position filter, switched off until the sensors are mounted. Robot behavior unchanged." },
     { "tag": "build-331-94003dc", "note": "AWP: stack drops exactly square, clamp wait back to 250 ms. Skills rebuilt in straight lines. Route Map prediction corrected" },
     { "tag": "build-313-3c15a66", "note": "RECF: right Goal + roller, preload aimed 0.6 in left" },
     { "tag": "build-294-3321f7c", "note": "AWP: 2nd cup and pin lowered onto the 1st, LEDs on" },

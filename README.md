@@ -188,7 +188,7 @@ The tab reads the files when you open it, when you click **Refresh**, and when *
 
 The tests:
 
-- **Lift directions:** the lift must start fully down. A short, gentle push up that checks all three lift motors turn the same way. If it says a port is the wrong way, stop and tell the programmer: that motor is fighting the other two. The full test stops here if it fails.
+- **Lift directions:** the lift must start fully down. A short, gentle push up that checks all three lift motors turn the same way, and that the spool sensor (port 9) goes up with them. If it says a port is the wrong way, stop and tell the programmer: that motor is fighting the other two. If it says the spool reads backward or is missing, the lift still works but falls back to the motor encoders. The full test stops here if it fails.
 - **Lift travel and speed:** the lift must start fully down.
 - **Lift height map:** you measure the bottom of the claw with a tape and enter the inches.
 - **Lift presets:** drive the lift to each goal height with D-pad Up and Down and press **A**. **X** skips one.

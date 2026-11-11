@@ -120,8 +120,7 @@ Holding **D-pad Down** only starts a test when the robot is not plugged into a f
 | --- | --- |
 | Left stick | Drives forward and back. Pushing it forward drives the robot backwards, on purpose |
 | Right stick | Turns. With it centered the robot holds straight on its own |
-| R1 (hold) | Intake in |
-| R2 (hold) | Intake out |
+| R1, R2 | Nothing while driving (the intake was taken off). L1 + R1 held together opens the match setup, see below |
 | L1 (hold) | Roller |
 | L2 (hold) | Lift down, only while held. It slows down and stops at the bottom, so holding it longer does nothing. Turn the robot on with the lift all the way down |
 | B (hold) | Lift up, only while held, all the way to the top |
@@ -135,7 +134,7 @@ Holding **D-pad Down** only starts a test when the robot is not plugged into a f
 
 If the claw is tilted down when you press a lift up button, the robot closes the claw and lifts it off the floor. Then it tilts the claw up and goes to position 1.
 
-The claw starts tilted down and open. With the claw tilted up, it closes on its own when a Pin or Cup comes within about 10 cm, and opens on its own if the Pin or Cup it was holding is gone. With the claw tilted down it never closes or opens on its own. Press **X** to open or close it yourself. D-pad Up won't tilt the claw down while there's a Pin in it, so it can't drop one by accident.
+The claw starts tilted down and open. With the claw tilted up, it closes on its own when a Pin or Cup comes within about 6.5 cm (65 mm), and opens on its own if the Pin or Cup it was holding is gone. With the claw tilted down it never closes or opens on its own. Press **X** to open or close it yourself. D-pad Up won't tilt the claw down while there's a Pin in it, so it can't drop one by accident.
 
 The robot also handles Toggles for you. When one of its side toggle sensors is right next to a wall Toggle and a color is picked, the roller turns the Toggle until it sees our color, then stops. Holding **L1** still spins the roller by hand and overrides it. Line 1 of the brain screen shows a short toggle status. It can read `OURS`, `SPIN`, `THEIRS`, `OTHER`, `UNSURE`, `NO TGL`, `NO COLOR`, `SENS ERR`, `STALL`, `RETRIES`, or `MISSED` (it spun for three seconds without finding our color, so it gave up until the robot leaves that Toggle).
 
@@ -151,7 +150,7 @@ When the program starts, the controller shows three rows (**Color**, **Side**, a
 
 Left and right are as seen by the drive team, standing at your own alliance station and looking at the field.
 
-To change it later, hold **L1 + R1** for one second. The setup opens again and the robot stops until you press **A**. The roller and intake run for that second.
+To change it later, hold **L1 + R1** for one second. The setup opens again and the robot stops until you press **A**. The roller runs for that second.
 
 The brain buttons still work as a backup. The left button picks RED, then LEFT, and the right button picks BLUE, then RIGHT. After that, the two buttons step through the routines, and the middle one starts over. Picking the side on the brain also finishes the setup.
 
@@ -165,7 +164,7 @@ The uploader has a **Robot tests** section. It puts a separate program on the br
 
 1. Click **Put tester on robot**. This puts a program called "Scourge Tester" on slot 8. It does not replace the match program.
 2. Plug the USB cable into the brain (or the controller) and click **Record results**. The button becomes **Stop recording**, and the app shows how many values it recorded. You can't upload while it is recording.
-3. Turn on the controller and run "Scourge Tester" from the brain. It opens on **Start full test**. Put the lift all the way down, empty the intake, and give the robot room (8 ft in front, 3 ft all around). Then press **A** (or the brain's middle button) once. The 10 tests run one after another. The run pauses whenever a step needs your hands (a Pin or Cup in the claw, a Toggle face to show, a measurement to type, or aiming the robot before it drives). Press **A** to go on. **B stops the whole run at once.**
+3. Turn on the controller and run "Scourge Tester" from the brain. It opens on **Start full test**. Put the lift all the way down, empty the claw, and give the robot room (8 ft in front, 3 ft all around). Then press **A** (or the brain's middle button) once. The 10 tests run one after another. The run pauses whenever a step needs your hands (a Pin or Cup in the claw, a Toggle face to show, a measurement to type, or aiming the robot before it drives). Press **A** to go on. **B stops the whole run at once.**
 4. When a test needs a number, D-pad Up and Down change it by 0.25, D-pad Left and Right change it by 1.0, and **A** saves it.
 5. When it finishes, click **Stop recording**, then **Send results**. The results go straight to the programmer as an issue in the team's private data repository. You don't need a GitHub account, and the status line shows the issue number. If that can't reach the server, your browser opens a new issue with the results filled in instead (or copied, if they are too long: paste them with Ctrl+V). Then you need to be signed in to GitHub with an account the programmer added to that repository.
 
@@ -189,6 +188,7 @@ The tab reads the files when you open it, when you click **Refresh**, and when *
 
 The tests:
 
+- **Lift directions:** the lift must start fully down. A short, gentle push up that checks all three lift motors turn the same way, and that the spool sensor (port 9) goes up with them. If it says a port is the wrong way, stop and tell the programmer: that motor is fighting the other two. If it says the spool reads backward or is missing, the lift still works but falls back to the motor encoders. The full test stops here if it fails.
 - **Lift travel and speed:** the lift must start fully down.
 - **Lift height map:** you measure the bottom of the claw with a tape and enter the inches.
 - **Lift presets:** drive the lift to each goal height with D-pad Up and Down and press **A**. **X** skips one.
@@ -198,7 +198,6 @@ The tests:
 - **Roller per face.**
 - **Claw distance:** empty, Pin, Cup, wall, and a dropped Pin.
 - **IMU drift:** keep the robot still for 30 seconds.
-- **Intake speed:** nothing in the intake.
 
 ---
 

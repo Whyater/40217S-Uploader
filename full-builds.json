@@ -1,6 +1,7 @@
 {
   "version": 1,
   "builds": [
+    { "tag": "build-347-4f84dde", "note": "Claw auto-grab at 75 mm (was 65). Lift heights are not updated for the new smaller spool yet, so presets stop low. Not run on a robot yet." },
     { "tag": "build-344-48914fc", "note": "Claw never tilts down: D-pad Up does nothing, push the preload into the open claw at the bottom, auton start no longer lifts and tilts. Solo AWP and Skills Loader grabs use the tilted-up claw. Not run on a robot yet." },
     { "tag": "build-341-0a320bd", "note": "Hardware update: intake removed (R1/R2 do nothing), cascade on 3 green motors (twice as fast), lift height from the new spool sensor, new sideways odometry wheel, claw auto-grab at 65 mm. Run the tester's Lift directions first." },
     { "tag": "build-334-55aef9c", "note": "Adds a wall-distance position filter, switched off until the sensors are mounted. Robot behavior unchanged." },

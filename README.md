@@ -120,19 +120,20 @@ Holding **D-pad Down** only starts a test when the robot is not plugged into a f
 | --- | --- |
 | Left stick | Drives forward and back. Pushing it forward drives the robot backwards, on purpose |
 | Right stick | Turns. With it centered the robot holds straight on its own |
-| R1, R2 | Nothing while driving (the intake was taken off). L1 + R1 held together opens the match setup, see below |
+| R1 | Nothing while driving (the intake was taken off). L1 + R1 held together opens the match setup, see below |
 | L1 (hold) | Roller |
 | L2 (hold) | Lift down, only while held. It slows down and stops at the bottom, so holding it longer does nothing. Turn the robot on with the lift all the way down |
 | B (hold) | Lift up, only while held, all the way to the top |
-| Y | Up to the next alliance goal height. From the bottom, the first press clears an empty alliance goal, and each press after that goes one Pin higher, up to a goal holding 5 |
+| Y | Up to the next alliance goal height. The first press from the bottom goes to a goal with one Pin on it, since one Pin by itself on an empty goal can't score. Each press after that goes one Pin higher, up to a goal with 5 |
 | D-pad Right | Up to the next neutral goal height. Neutral goals start with a Pin in them, so the first press from the bottom clears that Pin, and each press after that goes one Pin higher, up to 3 of ours on top of it |
 | A | Down to the next goal height, and from the lowest one to the bottom |
-| D-pad Left | Reset: open the claw and lower the lift to the bottom. The claw can't close until the lift gets there. Hold it for one second and the lift goes limp; let go once it has settled to the very bottom, and that becomes the new bottom |
+| R2 | Reset: open the claw and lower the lift to the bottom. The claw can't close until the lift gets there. Hold it for one second and the lift goes limp; let go once it has settled to the very bottom, and that becomes the new bottom |
+| D-pad Left | Nothing while driving (reset moved to R2) |
 | D-pad Up | Nothing while driving (the claw no longer tilts down) |
 | D-pad Down | In a match: lift up to the "one Cup and one Pin" height. Off the field: a short press does the same, and holding it for 1 second starts the selected auton as a test (press it again to stop) |
 | X | Open or close the claw (switches each press) |
 
-The claw stays tilted up and starts open. With the lift at the bottom, it closes on its own when a Pin or Cup comes within about 6.5 cm (65 mm), and opens on its own if the Pin or Cup it was holding is gone. Press **X** to open or close it yourself. For the auton preload, push the Pin into the open claw by hand before the match: it closes on the Pin by itself.
+The claw stays tilted up and starts open. With the lift at the bottom, it closes on its own when a Pin or Cup comes within about 7.5 cm (75 mm), then lifts it about half an inch off the floor, and opens on its own if the Pin or Cup it was holding is gone. Press **X** to open or close it yourself. For the auton preload, push the Pin into the open claw by hand before the match: it closes on the Pin by itself.
 
 The robot also handles Toggles for you. When one of its side toggle sensors is right next to a wall Toggle and a color is picked, the roller turns the Toggle until it sees our color, then stops. Holding **L1** still spins the roller by hand and overrides it. Line 1 of the brain screen shows a short toggle status. It can read `OURS`, `SPIN`, `THEIRS`, `OTHER`, `UNSURE`, `NO TGL`, `NO COLOR`, `SENS ERR`, `STALL`, `RETRIES`, or `MISSED` (it spun for three seconds without finding our color, so it gave up until the robot leaves that Toggle).
 

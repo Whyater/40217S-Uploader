@@ -1,6 +1,7 @@
 {
   "version": 1,
   "builds": [
+    { "tag": "build-368-97c994b", "note": "Lift fix for autons: the lift no longer risks stopping a few degrees off its height (and the route giving up after a 3 s wait) when it gets a new height while still moving, like the lower to the floor before a stack grab. Routes, speeds and heights unchanged from 365. Not run on a robot yet; if the lift acts up, go back to 365." },
     { "tag": "build-365-38066e8", "note": "Wall distance sensors (ports 1, 12, 4, 14) on as checks only: while an auton runs, brain line 7 shows LocS with how far the wall estimate is from odometry. Driving unchanged. Not run on a robot yet." },
     { "tag": "build-359-5525e0c", "note": "Reset moved to R2 (D-pad Left does nothing now). After the claw auto-grabs a Pin or Cup + Pin, the lift rises about half an inch by itself. Lift heights unchanged. Not run on a robot yet." },
     { "tag": "build-356-b19cb39", "note": "Neutral Goal heights 275, 565, 780, 1010, 1190 (teammate measured). Also has the slower radio send and the 7/16 in spool alliance heights. Not run on a robot yet." },

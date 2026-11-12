@@ -125,7 +125,7 @@ Holding **D-pad Down** only starts a test when the robot is not plugged into a f
 | L2 (hold) | Lift down, only while held. It slows down and stops at the bottom, so holding it longer does nothing. Turn the robot on with the lift all the way down |
 | B (hold) | Lift up, only while held, all the way to the top |
 | Y | Up to the next alliance goal height. The first press from the bottom goes to a goal with one Pin on it, since one Pin by itself on an empty goal can't score. Each press after that goes one Pin higher, up to a goal with 5 |
-| D-pad Right | Up to the next neutral goal height. Neutral goals start with a Pin in them, so the first press from the bottom clears that Pin, and each press after that goes one Pin higher, up to 3 of ours on top of it |
+| D-pad Right | Up to the next neutral goal height. Neutral goals start with a Pin in them, so the first press from the bottom clears that Pin, and each press after that goes one Pin higher, up to 4 of ours on top of it |
 | A | Down to the next goal height, and from the lowest one to the bottom |
 | R2 | Reset: open the claw and lower the lift to the bottom. The claw can't close until the lift gets there. Hold it for one second and the lift goes limp; let go once it has settled to the very bottom, and that becomes the new bottom |
 | D-pad Left | Nothing while driving (reset moved to R2) |

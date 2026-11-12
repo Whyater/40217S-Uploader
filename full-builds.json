@@ -1,6 +1,7 @@
 {
   "version": 1,
   "builds": [
+    { "tag": "build-353-24cbc38", "note": "Sending a session to the laptop over the controller radio no longer drops rows: rows go out 60 ms apart (a 15 s run takes about 17 s to send, Skills about 70 s; wait for SENT before stopping the recording). Includes the 7/16 in spool lift heights. Not run on a robot yet." },
     { "tag": "build-350-66359e7", "note": "Lift heights for the new 7/16 in spool: alliance 185 to 1140 as measured, neutral 300, 385 measured and 600, 815 estimated; auton lift numbers scaled to match. Auto-grab 75 mm. Not run on a robot yet." },
     { "tag": "build-347-4f84dde", "note": "Claw auto-grab at 75 mm (was 65). Lift heights are not updated for the new smaller spool yet, so presets stop low. Not run on a robot yet." },
     { "tag": "build-344-48914fc", "note": "Claw never tilts down: D-pad Up does nothing, push the preload into the open claw at the bottom, auton start no longer lifts and tilts. Solo AWP and Skills Loader grabs use the tilted-up claw. Not run on a robot yet." },

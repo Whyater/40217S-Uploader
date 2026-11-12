@@ -1,6 +1,7 @@
 {
   "version": 1,
   "builds": [
+    { "tag": "build-365-38066e8", "note": "Wall distance sensors (ports 1, 12, 4, 14) on as checks only: while an auton runs, brain line 7 shows LocS with how far the wall estimate is from odometry. Driving unchanged. Not run on a robot yet." },
     { "tag": "build-359-5525e0c", "note": "Reset moved to R2 (D-pad Left does nothing now). After the claw auto-grabs a Pin or Cup + Pin, the lift rises about half an inch by itself. Lift heights unchanged. Not run on a robot yet." },
     { "tag": "build-356-b19cb39", "note": "Neutral Goal heights 275, 565, 780, 1010, 1190 (teammate measured). Also has the slower radio send and the 7/16 in spool alliance heights. Not run on a robot yet." },
     { "tag": "build-353-24cbc38", "note": "Sending a session to the laptop over the controller radio no longer drops rows: rows go out 60 ms apart (a 15 s run takes about 17 s to send, Skills about 70 s; wait for SENT before stopping the recording). Includes the 7/16 in spool lift heights. Not run on a robot yet." },

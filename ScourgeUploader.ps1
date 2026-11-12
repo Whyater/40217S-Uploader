@@ -91,7 +91,7 @@ $script:Modes = @(
     @{ Label = 'Drive Test';   Asset = 'drive-test-hot.package.bin'; Slot = 3; Name = 'Scourge Drive Test' },
     @{ Label = 'Auto Pathing'; Asset = 'autopath-hot.package.bin';   Slot = 4; Name = 'Scourge Auto Pathing' }
 )
-$script:UploaderVersion = '2.8.0'
+$script:UploaderVersion = '2.8.1'
 $script:UploaderScriptPath = $PSCommandPath
 $script:UploaderManifestUrl = 'https://raw.githubusercontent.com/Whyater/40217S-Uploader/main/uploader.json'
 # Builds stay on this computer, each in builds\<tag>: the newest, the last three full builds, and

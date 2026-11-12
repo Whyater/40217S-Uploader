@@ -91,7 +91,7 @@ $script:Modes = @(
     @{ Label = 'Drive Test';   Asset = 'drive-test-hot.package.bin'; Slot = 3; Name = 'Scourge Drive Test' },
     @{ Label = 'Auto Pathing'; Asset = 'autopath-hot.package.bin';   Slot = 4; Name = 'Scourge Auto Pathing' }
 )
-$script:UploaderVersion = '2.8.0'
+$script:UploaderVersion = '2.8.1'
 $script:UploaderScriptPath = $PSCommandPath
 $script:UploaderManifestUrl = 'https://raw.githubusercontent.com/Whyater/40217S-Uploader/main/uploader.json'
 # Builds stay on this computer, each in builds\<tag>: the newest, the last three full builds, and
@@ -2327,17 +2327,12 @@ $SharedCode = {
             @{ Type = 'roller_on'; Label = 'Roller on'; Group = 'Toggle and roller'; Glyph = 'R' },
             @{ Type = 'roller_reverse'; Label = 'Roller reverse'; Group = 'Toggle and roller'; Glyph = 'R' },
             @{ Type = 'roller_off'; Label = 'Roller off'; Group = 'Toggle and roller'; Glyph = 'R' },
-            @{ Type = 'intake_in'; Label = 'Intake in'; Group = 'Intake'; Glyph = 'I' },
-            @{ Type = 'intake_out'; Label = 'Intake out'; Group = 'Intake'; Glyph = 'I' },
-            @{ Type = 'intake_off'; Label = 'Intake off'; Group = 'Intake'; Glyph = 'I' },
             @{ Type = 'lift_floor'; Label = 'Lift to floor'; Group = 'Lift'; Glyph = 'L' },
             @{ Type = 'lift_alliance'; Label = 'Lift to Alliance Goal'; Group = 'Lift'; Glyph = 'L' },
             @{ Type = 'lift_neutral'; Label = 'Lift to Neutral Goal'; Group = 'Lift'; Glyph = 'L' },
             @{ Type = 'lift_cup_pin'; Label = 'Lift to Cup and Pin'; Group = 'Lift'; Glyph = 'L' },
             @{ Type = 'claw_open'; Label = 'Open claw'; Group = 'Claw'; Glyph = 'C' },
             @{ Type = 'claw_close'; Label = 'Close claw'; Group = 'Claw'; Glyph = 'C' },
-            @{ Type = 'tilt_up'; Label = 'Tilt claw up'; Group = 'Claw'; Glyph = 'C' },
-            @{ Type = 'tilt_down'; Label = 'Tilt claw down'; Group = 'Claw'; Glyph = 'C' },
             @{ Type = 'drive_backward'; Label = 'Back up along this line'; Group = 'Drive'; Glyph = 'D' },
             @{ Type = 'wait'; Label = 'Pause'; Group = 'Drive'; Glyph = 'P' }
         )

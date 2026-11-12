@@ -128,13 +128,11 @@ Holding **D-pad Down** only starts a test when the robot is not plugged into a f
 | D-pad Right | Up to the next neutral goal height. Neutral goals start with a Pin in them, so the first press from the bottom clears that Pin, and each press after that goes one Pin higher, up to 3 of ours on top of it |
 | A | Down to the next goal height, and from the lowest one to the bottom |
 | D-pad Left | Reset: open the claw and lower the lift to the bottom. The claw can't close until the lift gets there. Hold it for one second and the lift goes limp; let go once it has settled to the very bottom, and that becomes the new bottom |
-| D-pad Up | Tilt the claw down (only with the lift at the bottom) or back up. Tilting down: if the claw is closed and empty, it opens first. Tilting up with the claw closed: the lift rises a little first |
+| D-pad Up | Nothing while driving (the claw no longer tilts down) |
 | D-pad Down | In a match: lift up to the "one Cup and one Pin" height. Off the field: a short press does the same, and holding it for 1 second starts the selected auton as a test (press it again to stop) |
 | X | Open or close the claw (switches each press) |
 
-If the claw is tilted down when you press a lift up button, the robot closes the claw and lifts it off the floor. Then it tilts the claw up and goes to position 1.
-
-The claw starts tilted down and open. With the claw tilted up, it closes on its own when a Pin or Cup comes within about 6.5 cm (65 mm), and opens on its own if the Pin or Cup it was holding is gone. With the claw tilted down it never closes or opens on its own. Press **X** to open or close it yourself. D-pad Up won't tilt the claw down while there's a Pin in it, so it can't drop one by accident.
+The claw stays tilted up and starts open. With the lift at the bottom, it closes on its own when a Pin or Cup comes within about 6.5 cm (65 mm), and opens on its own if the Pin or Cup it was holding is gone. Press **X** to open or close it yourself. For the auton preload, push the Pin into the open claw by hand before the match: it closes on the Pin by itself.
 
 The robot also handles Toggles for you. When one of its side toggle sensors is right next to a wall Toggle and a color is picked, the roller turns the Toggle until it sees our color, then stops. Holding **L1** still spins the roller by hand and overrides it. Line 1 of the brain screen shows a short toggle status. It can read `OURS`, `SPIN`, `THEIRS`, `OTHER`, `UNSURE`, `NO TGL`, `NO COLOR`, `SENS ERR`, `STALL`, `RETRIES`, or `MISSED` (it spun for three seconds without finding our color, so it gave up until the robot leaves that Toggle).
 

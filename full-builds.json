@@ -1,6 +1,7 @@
 {
   "version": 1,
   "builds": [
+    { "tag": "build-408-4ed2f93", "note": "Skills round 2: at the second Toggle it keeps a light push on the wall and keeps trying for 3 s (it left after 1 s with the Toggle still yellow); drives onto the Loader faster and farther, waits for the load, then closes the claw even if the sensor never sees it; the legs to and from the Toggle skip their turn trims and stop-and-creep. Match AWP unchanged. Not run on a robot yet." },
     { "tag": "build-405-93aaa7a", "note": "Skills fixes from the 402 recording: goes wider round the side alliance Goal on the way to Toggle 2 (it was hitting it), legs slow down more gently so they stop on their spots without creeping back (about 0.75 s saved per leg), and squares up after the Loader Pin drop so the route no longer ends at 45 s. Loader grab not changed. Match AWP unchanged. Not run on a robot yet." },
     { "tag": "build-402-394f202", "note": "Skills now opens with the pre-match auton's three scores (the same route, on the 60 s clock), then carries on to Toggle 2 and the Loader trips as before. Match AWP unchanged from 399. Not run on a robot yet; the legs after the opening have never completed on the robot." },
     { "tag": "build-399-4543d8c", "note": "Three-score match AWP test: the third drop is one Pin lower (carries at 655, lets go at 495; 396 let go at 730, far too high). Everything else as 396, which reached the Goal with the third stack in time. Safety build is still 390. Not run on a robot yet." },

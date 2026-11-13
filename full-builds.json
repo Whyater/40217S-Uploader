@@ -1,6 +1,7 @@
 {
   "version": 1,
   "builds": [
+    { "tag": "build-399-4543d8c", "note": "Three-score match AWP test: the third drop is one Pin lower (carries at 655, lets go at 495; 396 let go at 730, far too high). Everything else as 396, which reached the Goal with the third stack in time. Safety build is still 390. Not run on a robot yet." },
     { "tag": "build-396-55e3aeb", "note": "TEST 2, not the safety build (that is 390). Match AWP speed test: square turns hand over a little earlier still (18 deg) so the first Pin and step 3 turns should not need a trim, and no stop wait before the square turns. About 1.2 s more cut on paper; the third score lands at about 15 s. Not run on a robot yet." },
     { "tag": "build-393-976dbf7", "note": "TEST, not the safety build (that is 390). Match AWP speed test for the third score: first Pin drive out no longer stops and creeps back, square turns hand over earlier so they should not need a trim, shorter wait on the seated first Pin, no stop wait before the short stage drives. About 3 s cut on paper. Watch the first Pin. Not run on a robot yet." },
     { "tag": "build-390-9cbcb55", "note": "Safety build: the match AWP creeps a little slower onto the second Cup and Pin (inner stack), power 26 instead of 30 for the last few inches. Everything else as 387: Toggle holds our color 0.10 s, sideways odometry wheel not used, first Pin from the Skills opening. Not run on a robot yet." },

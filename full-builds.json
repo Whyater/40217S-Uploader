@@ -1,6 +1,7 @@
 {
   "version": 1,
   "builds": [
+    { "tag": "build-393-976dbf7", "note": "TEST, not the safety build (that is 390). Match AWP speed test for the third score: first Pin drive out no longer stops and creeps back, square turns hand over earlier so they should not need a trim, shorter wait on the seated first Pin, no stop wait before the short stage drives. About 3 s cut on paper. Watch the first Pin. Not run on a robot yet." },
     { "tag": "build-390-9cbcb55", "note": "Safety build: the match AWP creeps a little slower onto the second Cup and Pin (inner stack), power 26 instead of 30 for the last few inches. Everything else as 387: Toggle holds our color 0.10 s, sideways odometry wheel not used, first Pin from the Skills opening. Not run on a robot yet." },
     { "tag": "build-387-05412ba", "note": "Start Toggle made safe again: our color has to hold 0.10 s before the auton drives off (384 had no wait and left the Toggle on the wrong color twice). Everything else as 384: sideways odometry wheel not used, first Pin from the Skills opening. Not run on a robot yet." },
     { "tag": "build-384-85e9195", "note": "Fixes the position going wrong on every turn: the new sideways odometry wheel read backwards (the 11-12 recording shows the position jumping about 10 in during the first turn), so it is no longer used and the robot is back on the forward wheel and the IMU. Start Toggle no longer waits 0.15 s before driving off. First Pin as in 379. Not run on a robot yet." },

@@ -1,6 +1,7 @@
 {
   "version": 1,
   "builds": [
+    { "tag": "build-384-85e9195", "note": "Fixes the position going wrong on every turn: the new sideways odometry wheel read backwards (the 11-12 recording shows the position jumping about 10 in during the first turn), so it is no longer used and the robot is back on the forward wheel and the IMU. Start Toggle no longer waits 0.15 s before driving off. First Pin as in 379. Not run on a robot yet." },
     { "tag": "build-379-1a2bbe5", "note": "Match AWP first Pin now uses the exact Skills first-Pin moves (straight out, braked square turn, straight push), on both sides. After a stack grab the lift rises about half an inch before the robot drives off, in the match AWP and Skills. First Pin is a little slower, so the third score may not fit in 15 s. Not run on a robot yet; run the right side once before a match. Fall back to 374 for the old opening." },
     { "tag": "build-374-e39e749", "note": "Wall distance sensors set from the wall readings: port 4 is the right sensor and 14 the left (they were swapped), offsets from 240 / 145 / 20 / 20 mm. Still checks only: brain line 7 shows LocS during an auton and driving is unchanged. Includes the 371 sideways wheel offset and the 368 lift fix. Not run on a robot yet." },
     { "tag": "build-371-f11e234", "note": "Sideways odometry wheel offset set to the taped 4 7/8 in behind the turning center (was a 4.5 in guess), so turns fake less sideways slide. Everything else as 368, including the lift fix. Not run on a robot yet; still check that pushing the robot left makes H go up." },

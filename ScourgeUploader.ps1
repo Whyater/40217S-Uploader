@@ -91,7 +91,7 @@ $script:Modes = @(
     @{ Label = 'Drive Test';   Asset = 'drive-test-hot.package.bin'; Slot = 3; Name = 'Scourge Drive Test' },
     @{ Label = 'Auto Pathing'; Asset = 'autopath-hot.package.bin';   Slot = 4; Name = 'Scourge Auto Pathing' }
 )
-$script:UploaderVersion = '2.8.1'
+$script:UploaderVersion = '2.8.2'
 $script:UploaderScriptPath = $PSCommandPath
 $script:UploaderManifestUrl = 'https://raw.githubusercontent.com/Whyater/40217S-Uploader/main/uploader.json'
 # Builds stay on this computer, each in builds\<tag>: the newest, the last three full builds, and
@@ -3265,6 +3265,9 @@ $script:Cloud = @{
     Data = $null; Sessions = @(); Fetched = ''; Route = 'AWP'; Side = 'L'; Keys = ''
 }
 $script:CloudFilling = $false
+# A match autonomous period is cut at 15 s and a Skills run goes up to 60 s, so a recorded run
+# longer than this is a Skills run whatever label the robot gave it.
+$script:SkillsRunMinSeconds = 20.0
 $script:MirrorCache = @{}
 $script:MapFieldR = $null
 $script:PinnacleField = $null
@@ -4204,6 +4207,9 @@ function Update-MapSessions {
         for ($i = 0; $i -lt $m.Sessions.Count; $i++) { if ($m.Sessions[$i].Fingerprint -eq $m.SelectedFp) { $sel = $i } }
     }
     if ($sel -lt 0) {
+        for ($i = $m.Sessions.Count - 1; $i -ge 0; $i--) { if (($m.Sessions[$i].Kind -eq 'run') -and (Test-MapSessionShown $m.Sessions[$i])) { $sel = $i; break } }
+    }
+    if ($sel -lt 0) {
         for ($i = $m.Sessions.Count - 1; $i -ge 0; $i--) { if ($m.Sessions[$i].Kind -eq 'run') { $sel = $i; break } }
     }
     if (($sel -lt 0) -and ($m.Sessions.Count -gt 0)) { $sel = $m.Sessions.Count - 1 }
@@ -4215,6 +4221,42 @@ function Update-MapSessions {
         if (($s.Source -eq 'cloud') -and $s.ForSlot -and (Test-CloudRouteKnown ([string]$s.ForSlot))) { $script:Cloud.Route = [string]$s.ForSlot }
     }
     Update-MapPanel
+}
+
+# Which routine a recorded run belongs to: the taught slot letter (A, B, C), 'Skills', 'RECF' or 'AWP'.
+# A taught route wins, then length (a run past SkillsRunMinSeconds cannot be a match auton), then the
+# label the robot recorded. Nothing is stored: this is worked out each time the list is drawn.
+function Get-RunRoutine {
+    param($S)
+    $slot = ''
+    if ($null -ne $S.ForSlot) { $slot = ([string]$S.ForSlot).Trim() }
+    if ($slot) { return $slot }
+    $label = ([string]$S.Build).Trim()
+    if ($label -match '^(?i)taught\s+([abc])$') { return $Matches[1].ToUpper() }
+    $n = @($S.T).Count
+    if (($n -ge 2) -and (([double]$S.T[$n - 1] - [double]$S.T[0]) -gt $script:SkillsRunMinSeconds)) { return 'Skills' }
+    if ($label -ieq 'skills') { return 'Skills' }
+    if ($label -like 'RECF*') { return 'RECF' }
+    return 'AWP'
+}
+
+# Whether the session list shows this recording for the picked route. Only runs under AWP, Skills
+# and RECF are sorted; every other pick (a taught route, another fixed-start route) and every
+# recording that is not a run is shown as before, so nothing becomes unreachable.
+function Test-MapSessionShown {
+    param($S)
+    if ([string]$S.Kind -ne 'run') { return $true }
+    $route = [string]$script:Cloud.Route
+    $want = ''
+    if ($route -ieq 'AWP') { $want = 'AWP' }
+    elseif ($route -ieq 'skills') { $want = 'Skills' }
+    elseif ($route -like 'recf*') { $want = 'RECF' }
+    if (-not $want) { return $true }
+    $got = Get-RunRoutine $S
+    if ($got -ieq $want) { return $true }
+    # A taught run shows under its own route; if that route is not in the picker, AWP keeps it.
+    if (($want -eq 'AWP') -and ($got -ine 'Skills') -and ($got -ine 'RECF') -and ($got -ine 'AWP') -and (-not (Test-CloudRouteKnown $got))) { return $true }
+    return $false
 }
 
 # Two recordings are the same one when kind, side, sample count, and first and last
@@ -4264,6 +4306,7 @@ function Update-MapPanel {
         # Newest first. The item remembers its place in the session list.
         for ($i = $m.Sessions.Count - 1; $i -ge 0; $i--) {
             $s = $m.Sessions[$i]
+            if (-not (Test-MapSessionShown $s)) { continue }
             $item = New-Object System.Windows.Forms.ListViewItem((Get-KindLabel ([string]$s.Kind) ([string]$s.WasSide)))
             [void]$item.SubItems.Add((Format-MapWhen ([string]$s.When)))
             [void]$item.SubItems.Add([string]$s.Rows)
@@ -4765,6 +4808,8 @@ function Set-CloudRoute {
         $cur = $m.Sessions[$m.Selected]
         if (($cur.Source -eq 'cloud') -and $cur.ForSlot -and ([string]$cur.ForSlot -ine $Key)) { $m.Selected = -1; $m.SelectedFp = '' }
     }
+    # A run the new pick does not list (a Skills run after switching to AWP) is let go too.
+    if (($m.Selected -ge 0) -and ($m.Selected -lt $m.Sessions.Count) -and (-not (Test-MapSessionShown $m.Sessions[$m.Selected]))) { $m.Selected = -1; $m.SelectedFp = '' }
     Update-MapPanel
 }
 
@@ -9388,6 +9433,14 @@ if ($SelfTest) {
             $predBack = Get-CloudPredicted
             if (($null -eq $predBack) -or (-not (& $near $predBack.X[0] 8.0)) -or (-not (& $near $predBack.Y[0] -61.6))) { $failures.Add('Route Map cloud: the Left prediction changed after viewing the Right') }
 
+            # Which routine a recorded run belongs to: taught first, then length, then label.
+            $mkRun = { param($b, $len, $slot) @{ Kind = 'run'; Build = $b; ForSlot = $slot; T = [double[]]@(0.6, (0.6 + $len)) } }
+            $runCases = @(@('AWP mirror', 14.5, '', 'AWP'), @('Skills', 44.4, '', 'Skills'), @('AWP mirror', 45.0, '', 'Skills'), @('Skills', 6.0, '', 'Skills'), @('RECF right', 12.0, '', 'RECF'), @('Taught A', 30.0, '', 'A'), @('Solo AWP', 14.0, 'B', 'B'))
+            foreach ($rc in $runCases) {
+                $gotRt = Get-RunRoutine (& $mkRun $rc[0] $rc[1] $rc[2])
+                if ($gotRt -cne $rc[3]) { $failures.Add('Route Map runs: ' + $rc[0] + ' at ' + $rc[1] + ' s should be ' + $rc[3] + ', got ' + $gotRt) }
+            }
+
             # Skills: one fixed start, listed after AWP, never mirrored, and the side buttons stand down.
             $skillsJson = $cloudJson.Replace('{"id":"taught-A-L"', '{"id":"skills","slot":"skills","name":"Skills","side":"R","total_ms":60000,"samples":[{"t":0,"x":-60,"y":-30,"h":90},{"t":30000,"x":-20,"y":-10,"h":0},{"t":60000,"x":-40,"y":20,"h":180}],"events":[]},{"id":"taught-A-L"')
             $skillsOnly = ConvertFrom-CloudMap $skillsJson
@@ -9609,7 +9662,11 @@ OBJ_MID_LEFT,stack,-23.6,0.0,blue,0.0
             Set-CloudData $full '2026-10-30T23:05:00Z'
             Update-MapSessions
             if ($script:Map.Sessions.Count -ne 5) { $failures.Add('Route Map cloud: expected 3 local and 2 cloud sessions, got ' + $script:Map.Sessions.Count) }
-            if ($script:Ui.MapList.Items.Count -ne 5) { $failures.Add('Route Map cloud: session list has ' + $script:Ui.MapList.Items.Count + ' rows, expected 5') }
+            # AWP is picked here: the Taught A recording lists under route A, not under AWP.
+            if ($script:Ui.MapList.Items.Count -ne 4) { $failures.Add('Route Map cloud: session list has ' + $script:Ui.MapList.Items.Count + ' rows under AWP, expected 4') }
+            Set-CloudRoute 'A'
+            if ($script:Ui.MapList.Items.Count -ne 5) { $failures.Add('Route Map cloud: session list has ' + $script:Ui.MapList.Items.Count + ' rows under Taught A, expected 5') }
+            Set-CloudRoute 'AWP'
             Set-CloudRoute 'A'
             $pickedIdx = $script:Map.Selected
             if (($pickedIdx -lt 0) -or ($script:Map.Sessions[$pickedIdx].Source -ne 'cloud') -or ($script:Map.Sessions[$pickedIdx].ForSlot -ne 'A') -or ($script:Map.Sessions[$pickedIdx].Kind -ne 'teach_open')) { $failures.Add('Route Map cloud: picking Taught A should select its raw recording') }

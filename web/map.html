@@ -883,9 +883,21 @@ function routeEntries(model) {
 }
 const hasSim = (e) => !!(e && (e.sim.L || e.sim.R));
 const simFor = (e, side) => (e ? e.sim[side] || e.sim.L || e.sim.R || null : null);
-// Which entry a recording sits under: its own taught slot when the picker has one, otherwise AWP (push tests and unplaced files go there).
+// A match autonomous is cut at 15 s and a Skills run goes up to 60 s, so a run longer than this many seconds is a Skills run.
+const SKILLS_MIN_S = 20;
+// The slot a recording is filed under. A taught slot, in the data or the label, always wins. Otherwise a long run is Skills,
+// then the label decides ("Skills" even when stopped early, "RECF ..."); everything else is AWP (null).
+function runSlot(s) {
+  if (s.for_slot != null || s.kind !== 'run') return s.for_slot;
+  const b = (s.build || '').trim().toLowerCase();
+  if (s.duration > SKILLS_MIN_S || b === 'skills') return 'skills';
+  return b.indexOf('recf') === 0 ? 'recf' : null;
+}
+// Which entry a recording sits under: its own slot when the picker has one, otherwise AWP (push tests and unplaced files go there,
+// and so does a Skills or RECF run when the prediction has no such entry, so it stays reachable).
 function belongs(entries, entry, s) {
-  const own = s.for_slot != null && entries.some((x) => x.slot === s.for_slot) ? s.for_slot : null;
+  const slot = runSlot(s);
+  const own = slot != null && entries.some((x) => x.slot === slot) ? slot : null;
   return entry.slot === own;
 }
 const listedSessions = (model, entry) => (entry ? model.sessions.filter((s) => belongs(routeEntries(model), entry, s)) : model.sessions);
@@ -2585,8 +2597,9 @@ function renderLists(model, state, sel) {
       if (s.kind === 'run') {
         const route = model.routes.find((r) => runMatchesRoute(r, s)) || null;
         const sim = title.endsWith(' (simulated)') ? ' (simulated)' : '';
-        title = s.for_slot ? 'Route ' + s.for_slot + sim : title;
-        if (s.for_slot && !route) note = 'route has changed';
+        const fixed = routeEntries(model).find((x) => x.fixed && x.slot === runSlot(s));
+        title = fixed ? fixed.label : s.for_slot ? 'Route ' + s.for_slot + sim : title;
+        if (s.for_slot && !route && !fixed) note = 'route has changed';
         const sum = runSummary(missRows(route, s), s);
         extra = sum.worstIn !== null ? '<span class="row-x pill ' + rateIn(sum.worstIn) + '"><i class="' + rateIn(sum.worstIn) + '"></i>' + fmt(sum.worstIn, 2) + ' in</span>' : '<span class="row-x txt">no scored steps</span>';
       } else if (s.kind === 'push') {

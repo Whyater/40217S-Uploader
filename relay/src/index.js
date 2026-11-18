@@ -407,7 +407,7 @@ function assetError(payload, status, cache = "no-store") {
   });
 }
 
-async function handleAsset(request, url) {
+async function handleAsset(request, url, env) {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: { ...ASSET_CORS_HEADERS, "Access-Control-Max-Age": "86400" } });
   }
@@ -434,6 +434,11 @@ async function handleAsset(request, url) {
       await new Promise((r) => setTimeout(r, ASSET_RETRY_MS));
       upstream = await fetchAssetOnce(source);
     }
+    // Still refused: anonymous downloads from Cloudflare's shared addresses are rate-limited, so ask
+    // through the API with the relay's own token, which has its own, much higher limit.
+    if ((upstream.status === 429 || upstream.status >= 500) && env?.GITHUB_TOKEN) {
+      upstream = await fetchAssetWithToken(tag, name, env.GITHUB_TOKEN);
+    }
   } catch {
     return assetError({ ok: false, error: "GitHub did not answer" }, 502);
   }
@@ -455,6 +460,28 @@ async function handleAsset(request, url) {
 
 function fetchAssetOnce(source) {
   return fetch(source, { headers: { "User-Agent": "scourge-results-relay" }, redirect: "follow" });
+}
+
+// The release's asset list, then that asset's bytes, both through api.github.com with the token.
+async function fetchAssetWithToken(tag, name, token) {
+  const headers = { "User-Agent": "scourge-results-relay", Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28" };
+  const release = await fetch(`https://api.github.com/repos/${ASSET_REPOSITORY}/releases/tags/${tag}`, {
+    headers: { ...headers, Accept: "application/vnd.github+json" },
+  });
+  if (!release.ok) return release;
+  const asset = ((await release.json()).assets ?? []).find((a) => a && a.name === name);
+  if (!asset) return new Response(null, { status: 404 });
+  // The API answers with a redirect to a signed download address. Follow it by hand, without the
+  // token, so the token only ever goes to api.github.com.
+  const pointer = await fetch(`https://api.github.com/repos/${ASSET_REPOSITORY}/releases/assets/${asset.id}`, {
+    headers: { ...headers, Accept: "application/octet-stream" },
+    redirect: "manual",
+  });
+  const location = pointer.headers.get("Location");
+  if (pointer.status >= 300 && pointer.status < 400 && location) {
+    return fetch(location, { headers: { "User-Agent": "scourge-results-relay" }, redirect: "follow" });
+  }
+  return pointer;
 }
 
 /* ---------- alliance partners ---------- */
@@ -803,7 +830,7 @@ export default {
     }
     if (url.pathname === "/plans") return handlePlans(request, env);
     if (url.pathname === "/results") return handleResults(request, env);
-    if (url.pathname === "/asset") return handleAsset(request, url);
+    if (url.pathname === "/asset") return handleAsset(request, url, env);
     return jsonResponse({ ok: false, error: "not found" }, 404);
   },
 };

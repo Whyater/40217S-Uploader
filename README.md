@@ -42,9 +42,9 @@ You need a USB-C OTG adapter (or a USB-C to micro-USB data cable) between the ph
 1. While you have internet, open [whyater.github.io/40217S-Uploader](https://whyater.github.io/40217S-Uploader/) in Chrome. It downloads the latest code and checks every file's SHA-256 hash.
 2. Open Chrome's menu and tap **Add to Home screen** (or **Install app**). The uploader then opens like an app and works offline.
 3. At the robot, plug the phone into the brain (not the controller) and turn the brain on.
-4. Open the uploader, pick a mode, and tap **Upload to robot**. The first time, Chrome and Android ask you to allow the brain. Keep the cable in until it says it's done.
+4. Open the uploader, check the build in the drop-down, and tap **Upload to Robot**. It puts all four programs on slots 1 to 4 (see [Modes](#modes)). The first time, Chrome and Android ask you to allow the brain. Keep the cable in until it says it's done.
 
-The web version uploads the same files the same way PROS does, including the same compressed library, so switching between the phone and a laptop doesn't make the brain erase the other modes. It doesn't do Robot tests yet.
+The web version uploads the same files the same way PROS does, including the same compressed library, so switching between the phone and a laptop doesn't make the brain erase the other modes. It has the same build drop-down as the laptop apps (see [Pick a build](#pick-a-build)), with builds kept in the browser's storage on that phone, and the same **Robot Tests** section: **Record Results** reads the robot over the same USB cable, and **Send Results** sends them like the laptop. Recording and sending on the phone have not been tried on a robot yet.
 
 The web version also has a **Route Map** tab beside **Upload**. It shows the robot's field map, its taught and recorded runs, and where a run missed. Pick results `.csv` files and `map-data.json` files with **Add Files**. The laptop app records results to the `Scourge Robot Data` folder in Documents, and you can move them to the phone with AirDrop, a cloud drive, or a cable. The files are kept on that device only (in the browser's own storage, up to 20 MB) and are never uploaded. The tab works offline once the uploader has been opened online. Unlike uploading, it works on iPhones and iPads too.
 
@@ -67,15 +67,14 @@ A password like a team name is easy to guess, and the panel says so, but it is a
 1. Plug a USB data cable into the **brain** (not the controller) and turn the brain on.
 2. Open **Scourge Uploader**.
 3. If it says newer code is available, click **Get latest code**. On the very first launch it downloads the code for you.
-4. Pick a **Mode** (see [Modes](#modes)). Most of the time that is **Competition**. The slot and program name change to match the mode, and you can still change them.
-5. Check the **Program name** box. This is the name the brain shows for the program. In Competition it starts as `Scourge`. Names can use letters, numbers, spaces, `_`, `.`, and `-`, up to 20 characters, and must start with a letter or number.
-6. Click **Upload to robot** and keep the cable plugged in until it finishes.
+4. Check the build in the drop-down (see [Pick a build](#pick-a-build)).
+5. Click **Upload to robot** and keep the cable plugged in until it finishes. It uploads all four programs one after another, to slots 1 to 4 (see [Modes](#modes)). If one fails, it stops and says which slots finished; click **Upload to robot** again to finish.
 
-When it is done, the program shows on the brain. Run it from the brain screen. The message names the build that went on, for example "Uploaded Competition build 308 to slot 1".
+When it is done, the programs show on the brain. Run one from the brain screen. The message names the build that went on, for example "Uploaded Build 308 to slots 1, 2, 3, and 4."
 
-### Pick a build (Windows)
+### Pick a build
 
-Every push to the robot code publishes a build, so one work session can make several in a row. The last build of a session is a **full build**. The Windows app keeps these builds on the laptop:
+Every push to the robot code publishes a build, so one work session can make several in a row. The last build of a session is a **full build**. The Windows, Mac and web apps keep these builds on the device:
 
 - **Newest**: the newest published build. If it is not a full build, the drop-down calls it a test build.
 - **Full builds**: the last three full builds, each with a note on what it changed. They are listed in [`full-builds.json`](full-builds.json). A full build that cannot be downloaded still counts as one of the three.
@@ -83,22 +82,22 @@ Every push to the robot code publishes a build, so one work session can make sev
 
 **Get latest code** downloads any of these it does not have yet and removes the other builds, so after one online click you can upload any of them with no internet. The build you are using is never removed. The **Robot code** section shows a drop-down in place of the build title, grouped as above, with each build's number, build time, and note, for example "Build 313   Nov 7, 10:36 AM   RECF: right Goal + roller". Pick one and the title, **Upload to robot**, **Put tester on robot** and the Route Map prediction all switch to that build. The app remembers your pick. If you pick an older build on purpose, **Get latest code** leaves it picked; if you were on the newest, it moves up to the new newest. Going back to an older build puts older code on the brain, so check the build number in the drop-down before you click **Upload to robot**.
 
-**Keep a build.** Pick it, click **Keep this build...** under its details, and give it a name of up to 40 characters, for example "Practice auton". The name shows in the drop-down, the status line, and the upload message, always with the number: "Practice auton (Build 308)". **Rename...** changes the name, and **Stop keeping** lets **Get latest code** remove the build again. Kept builds belong to that laptop.
+**Keep a build.** Pick it, click **Keep this build...** under its details, and give it a name of up to 40 characters, for example "Practice auton". The name shows in the drop-down, the status line, and the upload message, always with the number: "Practice auton (Build 308)". **Rename...** changes the name, and **Stop keeping** lets **Get latest code** remove the build again. Kept builds belong to that laptop or phone.
 
 **Older build...** at the bottom of the drop-down lists every published build. Pick one and the app downloads it, checks it against that build's own SHA-256 hashes, and uses it. It stays until the next **Get latest code** unless you keep it. The list comes from the GitHub API, which answers 60 requests an hour from one internet address without a login (a school network shares one). When that runs out, the app falls back to the releases feed, which lists only the newest few builds.
 
 ## Modes
 
-The same robot code is built four ways. The **Mode** box picks which one goes on the brain. Each mode has its own slot, so all four can be on the brain at once.
+The same robot code is built four ways, and **Upload to robot** puts all four on the brain, each in its own slot.
 
 | Mode | Slot | What it does |
 | --- | --- | --- |
 | Competition | 1 | The full match program. This is the one to use at events |
 | Auton Test | 2 | Pick the color, side, and routine on the controller (see [Before every match](#before-every-match-set-up-the-robot-on-the-controller)), then press **A** to run the auton and **B** to stop it. No driving |
 | Drive Test | 3 | Driving only. Autonomous does nothing |
-| Auto Pathing | 4 | The auto pathing program, for working on autonomous paths |
+| Cascade Only | 4 | Only the lift (cascade), for troubleshooting it. The brain screen shows each lift motor's position, speed, current and temperature. Builds before the rename have Auto Pathing here instead; teaching routes is now in Auton Test |
 
-If a mode says the build does not have it, that build is older than the mode. Click **Get latest code**, pick a newer build in the drop-down (Windows), or ask the programmer.
+If a slot says **Not in this build**, that build is older than the mode, and the upload skips that slot (it keeps its old program). Click **Get latest code**, pick a newer build in the drop-down, or ask the programmer.
 
 ## Check the drive (first time, and after any rewiring)
 
@@ -213,11 +212,11 @@ The tests:
 
 ## How it works
 
-The robot source code is private. Each time the programmer pushes to the main branch of the private repository, GitHub Actions builds it and publishes the compiled program to this repository's [Releases](https://github.com/Whyater/40217S-Uploader/releases). A release has the robot program (`hot.package.bin`, `cold.package.bin`, `project.pros`, plus `auton-test-hot.package.bin`, `drive-test-hot.package.bin`, and `autopath-hot.package.bin` for the other modes in newer builds), the Scourge Tester (`tester-hot.package.bin`, `tester-cold.package.bin`, `tester-project.pros`, in newer builds), and `release.json` (the build's tag, title, notes, and time, plus SHA-256 hashes of the other files).
+The robot source code is private. Each time the programmer pushes to the main branch of the private repository, GitHub Actions builds it and publishes the compiled program to this repository's [Releases](https://github.com/Whyater/40217S-Uploader/releases). A release has the robot program (`hot.package.bin`, `cold.package.bin`, `project.pros`, plus `auton-test-hot.package.bin`, `drive-test-hot.package.bin`, and `cascade-hot.package.bin` for the other modes in newer builds; builds before the slot 4 rename have `autopath-hot.package.bin` instead), the Scourge Tester (`tester-hot.package.bin`, `tester-cold.package.bin`, `tester-project.pros`, in newer builds), and `release.json` (the build's tag, title, notes, and time, plus SHA-256 hashes of the other files).
 
-**Get latest code** first checks for a newer uploader (see [Update the uploader](#update-the-uploader)). Then it downloads the newest release, plus on Windows the last three full builds, and, when a release lists SHA-256 hashes, checks each file before using it. The full builds come from `full-builds.json` on this repository's main branch. If it cannot be read, the app uses the copy it saved last time; if there is none, it fetches only the newest build and removes nothing. To mark a full build, add its tag and a short note to `full-builds.json` on main; the order of the entries does not matter. Nothing is built on your laptop. **Upload to robot** hands those files to the official PROS command line tool, pros-cli 3.5.6.
+**Get latest code** first checks for a newer uploader (see [Update the uploader](#update-the-uploader)). Then it downloads the newest release, plus the last three full builds, and, when a release lists SHA-256 hashes, checks each file before using it. The full builds come from `full-builds.json` on this repository's main branch. If it cannot be read, the app uses the copy it saved last time; if there is none, it fetches only the newest build and removes nothing. To mark a full build, add its tag and a short note to `full-builds.json` on main; the order of the entries does not matter. Nothing is built on your laptop. **Upload to robot** hands those files to the official PROS command line tool, pros-cli 3.5.6.
 
-The web version is in `web/` and is published with GitHub Pages. Browsers can't download release files from GitHub directly, so `scripts/publish-web.sh` copies the latest release's files onto the site (the `gh-pages` branch) and checks their hashes. It runs on the programmer's computer after each new build. Until it runs, the web version keeps the previous build. The web app sends them to the brain with its own port of the pros-cli 3.5.6 upload code. Its tests replay real pros-cli uploads and check every byte matches. The Route Map tab is the same page the laptop apps use (`web/map.html`), shown in a frame, with the file handling in `web/mapdata.js`, `web/mapstore.js`, and `web/maptab.js`. The partner page is `web/partner.html` and `web/partner.js`. It loads the same map in a partner mode that shows only the match auton and has no drawing tools, and it never loads the uploader's code. The share panel is `web/mapshare.js`, and both use `web/partnerdata.js`.
+The web version is in `web/` and is published with GitHub Pages. `scripts/publish-web.sh` copies the latest release's files onto the site (the `gh-pages` branch) and checks their hashes, so the newest build loads from the site itself. A GitHub workflow runs it after each new release and after each change to `web/` on main. Other builds (full builds and **Older Build...**) come from the GitHub API, which lets a browser download release files, and are checked against their own `release.json`. The web app sends them to the brain with its own port of the pros-cli 3.5.6 upload code. Its tests replay real pros-cli uploads and check every byte matches. The Route Map tab is the same page the laptop apps use (`web/map.html`), shown in a frame, with the file handling in `web/mapdata.js`, `web/mapstore.js`, and `web/maptab.js`. The partner page is `web/partner.html` and `web/partner.js`. It loads the same map in a partner mode that shows only the match auton and has no drawing tools, and it never loads the uploader's code. The share panel is `web/mapshare.js`, and both use `web/partnerdata.js`.
 
 The installer downloads pros-cli from [github.com/purduesigbots/pros-cli](https://github.com/purduesigbots/pros-cli) and checks its SHA-256 hash before using it. The app and its files go into `%LOCALAPPDATA%\ScourgeUploader` (the builds sit in its `builds` folder, one folder per build; `selected.json` remembers the pick, `kept.json` the kept builds and their names, and `full-builds.json` the last full-builds list it read). pros-cli also writes a small settings folder at `%APPDATA%\PROS`. Apart from those two folders and the two shortcuts, nothing else on your system changes.
 

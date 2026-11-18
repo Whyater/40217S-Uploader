@@ -20,8 +20,8 @@ This Cloudflare Worker does five jobs for the uploaders:
   label and answers `on_map: true`. A wrong or missing code still files, with no
   label and `on_map: false`. Senders can't set labels themselves.
 - `OPTIONS /results`: CORS preflight. The browser may only send results from
-  `https://whyater.github.io`; every `/results` answer carries the CORS headers so
-  the page can read the error.
+  `https://whyater.github.io`; every `/results` answer carries the CORS headers
+  so the page can read the error.
 - `GET /map?build=<tag>`, with an `X-Team-Code` header: returns the stored data
   for that build, and the recorded data.
 - `GET /map`, with an `X-Team-Code` header: same, for the newest published build.
@@ -36,10 +36,12 @@ This Cloudflare Worker does five jobs for the uploaders:
   `https://github.com/Whyater/40217S-Uploader/releases/download/<tag>/<file>` and
   returns it to `https://whyater.github.io`. No code is needed, since releases are
   public, and the web uploader checks every file against that build's
-  `release.json`. `tag` must look like `build-432-53fdd69` and `name` must be one of
-  the release files (`release.json`, the hot, cold and project files for each
+  `release.json`. `tag` must look like `build-432-53fdd69` and `name` must be one
+  of the release files (`release.json`, the hot, cold and project files for each
   mode, and the tester's three). Anything else is a 400, a missing file a 404, a
-  GitHub failure or a file over 8 MB a 502. Files are cached for an hour.
+  GitHub failure or a file over 8 MB a 502. A 429 or 5xx from GitHub is retried
+  once. A good file is kept in Cloudflare's cache, so repeat downloads don't ask
+  GitHub again (it rate-limits downloads from shared Cloudflare addresses).
 - `OPTIONS /asset`: CORS preflight.
 
 `GET /map` answers `{ok, sim, recorded, recorded_updated, sim_is_latest}`. `sim`

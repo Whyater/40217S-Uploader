@@ -10,7 +10,8 @@
 #     files in its tester folder when they are present. A drop-down picks which build the
 #     rest of the app uses.
 #   * When you click "Upload to robot", the app runs the official PROS tool
-#     (pros.exe upload ...) in the picked build's folder. PROS sends the files over USB.
+#     (pros.exe upload ...) once per program the picked build has (slots 1 to 4, in
+#     order). PROS sends the files over USB.
 #
 # Why the code looks the way it does:
 #   * WinForms windows only like to be touched from the thread that made them
@@ -83,15 +84,22 @@ $script:ReleasesUrl = 'https://github.com/Whyater/40217S-Uploader/releases'
 $script:AssetNames = @('hot.package.bin', 'cold.package.bin', 'project.pros')
 $script:TesterAssetNames = @('tester-hot.package.bin', 'tester-cold.package.bin', 'tester-project.pros')
 # One robot source builds four programs that differ only in the hot file;
-# cold.package.bin and project.pros are shared. Each mode has its own default
-# slot and program name so the four can sit on the brain side by side.
+# cold.package.bin and project.pros are shared. Each mode has its own fixed
+# slot and program name so the four sit on the brain side by side, and one
+# click uploads every program the picked build has, in slot order.
+# Slot 4 is the Cascade Only (lift-only troubleshooting) program in newer builds,
+# published as cascade-hot.package.bin. Build 437 onward that program is already
+# slot 4 even when the release still ships it as autopath-hot.package.bin. Builds
+# before 437 shipped the real Auto Pathing program under that file name. Resolve-SlotFour
+# (shared code) decides which one a release has; this entry is the default "not in this build" row.
+$script:SlotFourNew = @{ Label = 'Cascade Only'; Asset = 'cascade-hot.package.bin'; Slot = 4; Name = 'Scourge Cascade' }
 $script:Modes = @(
-    @{ Label = 'Competition';  Asset = 'hot.package.bin';            Slot = 1; Name = 'Scourge' },
-    @{ Label = 'Auton Test';   Asset = 'auton-test-hot.package.bin'; Slot = 2; Name = 'Scourge Auton Test' },
-    @{ Label = 'Drive Test';   Asset = 'drive-test-hot.package.bin'; Slot = 3; Name = 'Scourge Drive Test' },
-    @{ Label = 'Auto Pathing'; Asset = 'autopath-hot.package.bin';   Slot = 4; Name = 'Scourge Auto Pathing' }
+    @{ Label = 'Competition'; Asset = 'hot.package.bin';            Slot = 1; Name = 'Scourge' },
+    @{ Label = 'Auton Test';  Asset = 'auton-test-hot.package.bin'; Slot = 2; Name = 'Scourge Auton Test' },
+    @{ Label = 'Drive Test';  Asset = 'drive-test-hot.package.bin'; Slot = 3; Name = 'Scourge Drive Test' },
+    $script:SlotFourNew
 )
-$script:UploaderVersion = '2.8.2'
+$script:UploaderVersion = '2.9.0'
 $script:UploaderScriptPath = $PSCommandPath
 $script:UploaderManifestUrl = 'https://raw.githubusercontent.com/Whyater/40217S-Uploader/main/uploader.json'
 # Builds stay on this computer, each in builds\<tag>: the newest, the last three full builds, and
@@ -112,6 +120,7 @@ $script:VersionFile = Join-Path $InstallDir 'version.json'
 $script:ProsDir    = Join-Path $InstallDir 'pros-cli'
 $script:PollSeconds = 5        # how often to check for a plugged-in brain while idle
 $script:UploadTimeoutSec = 600 # wireless uploads through a controller can take minutes
+$script:LinkWaitSec = 30       # how long to wait for the controller's radio link between slots
 $script:ResultsUrl = ''
 
 # ---------------------------------------------------------------------------
@@ -139,9 +148,28 @@ $SharedCode = {
         }
         # Test-mode hot files live outside bin so PROS never sees them when it
         # uploads the Competition project folder.
-        if ($AssetName -like '*-test-hot.package.bin') { return Join-Path $Root ('modes\' + $AssetName) }
+        if (($AssetName -like '*-test-hot.package.bin') -or ($AssetName -eq 'cascade-hot.package.bin')) { return Join-Path $Root ('modes\' + $AssetName) }
         if ($fileName -eq 'project.pros') { return Join-Path $assetRoot $fileName }
         return Join-Path $assetRoot ('bin\' + $fileName)
+    }
+
+    # Which slot 4 program a release has, from the asset names it lists (or the files a build folder holds)
+    # and its tag. Returns a mode entry (its Asset is the file to use) or $null when slot 4 is not in this build.
+    # Cascade Only file present: Cascade Only. Else autopath-hot.package.bin from build 437 on: still the
+    # Cascade Only program (those releases kept the old file name). Else the same file before 437: the real Auto Pathing.
+    function Resolve-SlotFour {
+        param([string[]]$Names = @(), [string]$Tag = '')
+        $names = @($Names)
+        if ($names -contains 'cascade-hot.package.bin') {
+            return @{ Label = 'Cascade Only'; Asset = 'cascade-hot.package.bin'; Slot = 4; Name = 'Scourge Cascade' }
+        }
+        if ($names -contains 'autopath-hot.package.bin') {
+            if ((Get-BuildNumber $Tag) -ge 437) {
+                return @{ Label = 'Cascade Only'; Asset = 'autopath-hot.package.bin'; Slot = 4; Name = 'Scourge Cascade' }
+            }
+            return @{ Label = 'Auto Pathing'; Asset = 'autopath-hot.package.bin'; Slot = 4; Name = 'Scourge Auto Pathing' }
+        }
+        return $null
     }
 
     # Build a small project folder for a test mode: the shared files plus the
@@ -590,6 +618,10 @@ $SharedCode = {
         }
         if ($out -match "doesn't appear to be connected to a V5 Brain") {
             return @{ Ok = $false; Kind = 'NoLink'; Message = 'The controller is plugged in but is not linked to the brain. Plug the cable into the brain instead.'; Detail = '' }
+        }
+        # The brain stopped answering partway: through a controller, the radio link dropped (PROS serial messages).
+        if (($out -match "Couldn't find the response header") -or ($out -match 'Could not transfer V5 Controller to download channel') -or ($out -match "Device didn't ACK") -or ($out -match 'No response')) {
+            return @{ Ok = $false; Kind = 'LinkLost'; Message = "Upload failed. The robot's radio didn't answer (link dropped). Wait for the controller to reconnect, then try again."; Detail = '' }
         }
         if (($out -match 'could not open port') -or ($out -match 'Access is denied') -or ($out -match 'PermissionError')) {
             return @{ Ok = $false; Kind = 'PortBusy'; Message = 'Another program is using the brain. Close VEXcode or any other VEX app, then try again.'; Detail = '' }
@@ -1222,9 +1254,14 @@ $SharedCode = {
 
         # Test-mode hot files are optional the same way: older releases do not
         # list them, and a bad one only turns that mode off.
-        $modeNames = @('auton-test-hot.package.bin', 'drive-test-hot.package.bin', 'autopath-hot.package.bin')
+        $modeNames = @('auton-test-hot.package.bin', 'drive-test-hot.package.bin')
         $listedModes = @()
-        if ($null -ne $rel.Sha256) { $listedModes = @($modeNames | Where-Object { $rel.Sha256.ContainsKey($_) }) }
+        if ($null -ne $rel.Sha256) {
+            $listedModes = @($modeNames | Where-Object { $rel.Sha256.ContainsKey($_) })
+            # Slot 4 is one program, so only the file Resolve-SlotFour picks is fetched.
+            $slotFourPick = Resolve-SlotFour -Names @($rel.Sha256.Keys | ForEach-Object { [string]$_ }) -Tag ([string]$rel.Tag)
+            if ($null -ne $slotFourPick) { $listedModes += $slotFourPick.Asset }
+        }
 
         $projectDir = Get-BuildFolder -InstallDir $InstallDir -Tag $rel.Tag
         $haveAll = $true
@@ -2751,6 +2788,9 @@ $SharedCode = {
 # body outputs is its result.
 $UploadBody   = { Invoke-RobotUpload -ProsExe $A.ProsExe -ProjectDir $A.ProjectDir -Slot $A.Slot -Name $A.Name -TimeoutSec $A.Timeout -Sync $Sync }
 $RecordBody  = { Invoke-ProsRecording -ProsExe $A.ProsExe -WorkDir $A.WorkDir -FilePath $A.FilePath -Sync $Sync -Retry $A.Retry -ScriptPath $A.ScriptPath }
+# Waits a second (the link may not have dropped yet), then asks the brain for its system version. Through a
+# controller that goes over the radio, so it fails while the link is down; lsusb cannot tell.
+$LinkProbeBody = { Start-Sleep -Seconds 1; Invoke-Pros -ProsExe $A.ProsExe -Arguments 'v5 status --no-analytics --no-sentry' -WorkDir $A.WorkDir -TimeoutSec $A.Timeout -Sync $Sync -Quiet }
 $LsusbBody    = { Invoke-Pros -ProsExe $A.ProsExe -Arguments 'lsusb --target v5 --no-analytics --no-sentry' -WorkDir $A.WorkDir -TimeoutSec 20 -Sync $Sync -Quiet }
 # The startup check also reads the full-builds list, so the drop-down can label the builds before any download.
 $CheckBody    = {
@@ -2842,22 +2882,78 @@ function Test-HaveCode {
            (Test-Path (Join-Path $script:BinDir 'cold.package.bin'))
 }
 
-# True when the downloaded build can be uploaded in this mode. Older releases
-# have no test-mode hot files, so those modes are simply unavailable.
-function Test-HaveMode {
-    param($Mode)
-    if (-not (Test-HaveCode)) { return $false }
-    return (Test-Path (Get-ReleaseAssetPath -Root $script:ProjectDir -AssetName $Mode.Asset))
+# The four slots for a downloaded build, in slot order: @{ Mode; Present }. A mode the build lacks stays in
+# the list with Present false (shown as "Not in this build"). Slot 4 comes from Resolve-SlotFour, fed the
+# files the build folder holds (the folder is named for the tag).
+function Get-BuildSlots {
+    param([string]$Root = $script:ProjectDir)
+    $held = @('cascade-hot.package.bin', 'autopath-hot.package.bin' | Where-Object { Test-Path (Get-ReleaseAssetPath -Root $Root -AssetName $_) })
+    $slotFour = Resolve-SlotFour -Names $held -Tag (Split-Path $Root -Leaf)
+    $rows = New-Object System.Collections.Generic.List[object]
+    for ($i = 0; $i -lt 3; $i++) {
+        $m = $script:Modes[$i]
+        $rows.Add(@{ Mode = $m; Present = [bool](Test-Path (Get-ReleaseAssetPath -Root $Root -AssetName $m.Asset)) })
+    }
+    if ($null -ne $slotFour) { $rows.Add(@{ Mode = $slotFour; Present = $true }) } else { $rows.Add(@{ Mode = $script:SlotFourNew; Present = $false }) }
+    return $rows.ToArray()
 }
 
-# The name to show after a mode change: a default name follows the mode, a
-# name someone typed themselves is left alone.
-function Get-NameForMode {
-    param([string]$CurrentName, $Mode)
-    $isDefault = (-not $CurrentName.Trim())
-    foreach ($m in $script:Modes) { if ($CurrentName.Trim() -ceq $m.Name) { $isDefault = $true } }
-    if ($isDefault) { return $Mode.Name }
-    return $CurrentName
+# "slot 1", "slots 1 and 2", "slots 1, 2, and 3", "slots 1, 2, 3, and 4".
+function Format-SlotList {
+    param([int[]]$Slots)
+    $n = @($Slots | ForEach-Object { [string]$_ })
+    if ($n.Count -eq 0) { return 'no slots' }
+    if ($n.Count -eq 1) { return ('slot ' + $n[0]) }
+    if ($n.Count -eq 2) { return ('slots ' + $n[0] + ' and ' + $n[1]) }
+    return ('slots ' + (($n[0..($n.Count - 2)]) -join ', ') + ', and ' + $n[$n.Count - 1])
+}
+
+function Format-FirstUpper {
+    param([string]$Text)
+    if (-not $Text) { return $Text }
+    return ($Text.Substring(0, 1).ToUpperInvariant() + $Text.Substring(1))
+}
+
+# A slot the build has no program for keeps whatever was on it before, so the messages say so.
+function Get-SkippedSlotText {
+    param($Mode)
+    return ('Slot ' + $Mode.Slot + ' skipped: this build has no ' + $Mode.Label + ' version, so slot ' + $Mode.Slot + ' still has its old program.')
+}
+
+function Get-UploadProgressText {
+    param([string]$Build, [int]$Index, [int]$Count, $Mode)
+    return ('Uploading ' + $Build + ', ' + $Index + ' of ' + $Count + ': ' + $Mode.Name + ' (slot ' + $Mode.Slot + ')... Keep the cable plugged in.')
+}
+
+function Get-IdleUploadText {
+    param([string]$Build, $Rows)
+    $slots = @($Rows | Where-Object { $_.Present } | ForEach-Object { [int]$_.Mode.Slot })
+    return ('Ready to upload ' + $Build + ' to ' + (Format-SlotList $slots) + '.')
+}
+
+# Stops at the first failure: which slots finished, which failed, which were not uploaded.
+function Get-UploadFailureText {
+    param([int[]]$Done, [int]$Failed, [string]$Reason, [int[]]$NotUploaded, [string[]]$Skipped)
+    $r = $Reason
+    if ($r.StartsWith('Upload failed. ')) { $r = $r.Substring('Upload failed. '.Length) }
+    # "PROS said: <last line>" may not end in a period, and more sentences follow.
+    if (-not $r.EndsWith('.')) { $r += '.' }
+    $parts = New-Object System.Collections.Generic.List[string]
+    if (@($Done).Count -gt 0) { $parts.Add((Format-FirstUpper (Format-SlotList $Done)) + ' done.') }
+    $parts.Add('Slot ' + $Failed + ' failed: ' + $r)
+    if (@($NotUploaded).Count -gt 0) { $parts.Add((Format-FirstUpper (Format-SlotList $NotUploaded)) + ' not uploaded.') }
+    foreach ($t in @($Skipped)) { if ($t) { $parts.Add($t) } }
+    $parts.Add('Upload again to finish.')
+    return ($parts -join ' ')
+}
+
+function Get-UploadSuccessText {
+    param([string]$Build, [int[]]$Done, [string[]]$Skipped, [bool]$RemovedLibraries = $false)
+    $t = 'Uploaded ' + $Build + ' to ' + (Format-SlotList $Done) + '. Run them from the brain screen.'
+    $sk = @($Skipped | Where-Object { $_ })
+    if ($sk.Count -gt 0) { $t += ' ' + ($sk -join ' ') }
+    if ($RemovedLibraries) { $t += ' PROS removed old libraries (and programs that used them) to make room.' }
+    return $t
 }
 
 function Test-HaveTester {
@@ -3224,7 +3320,8 @@ function New-AppIcon {
 $script:Ui = @{}
 $script:Scale = 1.0
 $script:NoticeShown = $false
-$script:NameErrorShown = $false
+$script:SlotHintShown = $false
+$script:UploadRun = $null
 $script:DetailsShown = $false
 $script:UploaderUpdateReady = $false
 $script:LatestUploaderVersion = ''
@@ -3396,28 +3493,27 @@ function New-MainForm {
 
     # Upload section
     $ui.UploadLabel = New-Label 'UPLOAD' 0 0 10 10 $f.Section $c.Muted
-    $ui.ModeLabel = New-Label 'Mode' 0 0 10 10 $f.Base $c.Muted
-    $ui.SlotLabel = New-Label 'Slot' 0 0 10 10 $f.Base $c.Muted
-    $ui.NameLabel = New-Label 'Program name' 0 0 10 10 $f.Base $c.Muted
-    $ui.ModeBox = New-Object System.Windows.Forms.ComboBox
-    $ui.ModeBox.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
-    foreach ($m in $script:Modes) { [void]$ui.ModeBox.Items.Add($m.Label) }
-    $ui.ModeBox.SelectedIndex = 0
-    $ui.SlotBox = New-Object System.Windows.Forms.ComboBox
-    $ui.SlotBox.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
-    foreach ($n in 1..8) { [void]$ui.SlotBox.Items.Add([string]$n) }
-    $ui.SlotBox.SelectedIndex = 0
-    $ui.NameBox = New-Object System.Windows.Forms.TextBox
-    # AutoSize off so the text box can be made exactly as tall as the slot box.
-    $ui.NameBox.AutoSize = $false
-    $ui.NameBox.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
-    $ui.NameBox.MaxLength = 20
-    $ui.NameBox.Text = 'Scourge'
-    $ui.NameError = New-Label '' 0 0 10 10 $f.Small $c.Bad
-    $ui.NameError.AutoEllipsis = $false
-    $ui.NameError.Visible = $false
+    # A read-only list of the four slots the picked build uploads: slot, mode, program name.
+    # Update-SlotList fills it in and greys out a mode the build lacks.
+    $ui.SlotRows = New-Object System.Collections.Generic.List[object]
+    $ui.SlotCtls = New-Object System.Collections.Generic.List[object]
+    foreach ($m in $script:Modes) {
+        $row = @{
+            Slot = (New-Label ('Slot ' + $m.Slot) 0 0 10 10 $f.Base $c.Muted)
+            Mode = (New-Label $m.Label 0 0 10 10 $f.Base $c.Text)
+            Name = (New-Label $m.Name 0 0 10 10 $f.Base $c.Text)
+        }
+        $ui.SlotRows.Add($row)
+        foreach ($k in 'Slot', 'Mode', 'Name') { $ui.SlotCtls.Add($row[$k]) }
+    }
+    # The idle line: which slots the button will fill. Hidden while an upload runs.
+    $ui.SlotHint = New-Label '' 0 0 10 10 $f.Small $c.Muted
+    $ui.SlotHint.AutoEllipsis = $false
+    $ui.SlotHint.Visible = $false
+    $ui.SlotCtls.Add($ui.SlotHint)
     $ui.UploadButton = New-FlatButton 'Upload to robot' 0 0 10 10 $true
-    $form.Controls.AddRange(@($ui.UploadLabel, $ui.ModeLabel, $ui.SlotLabel, $ui.NameLabel, $ui.ModeBox, $ui.SlotBox, $ui.NameBox, $ui.NameError, $ui.UploadButton))
+    $form.Controls.AddRange(@($ui.UploadLabel, $ui.UploadButton))
+    $form.Controls.AddRange($ui.SlotCtls.ToArray())
 
     # Robot tests section
     $ui.TestsLine = New-Line 0 0 10
@@ -3478,9 +3574,10 @@ function New-MainForm {
     # Everything above except the header belongs to the Upload view. The Route Map
     # view has its own controls and hides these.
     $ui.UploadControls = @($ui.CodeLabel, $ui.BuildTitle, $ui.BuildBox, $ui.BuildMeta, $ui.KeepLink, $ui.RenameLink, $ui.UnkeepLink, $ui.GetButton, $ui.Notice, $ui.MidLine,
-        $ui.UploadLabel, $ui.ModeLabel, $ui.SlotLabel, $ui.NameLabel, $ui.ModeBox, $ui.SlotBox, $ui.NameBox, $ui.NameError, $ui.UploadButton,
+        $ui.UploadLabel, $ui.UploadButton,
         $ui.TestsLine, $ui.TestsLabel, $ui.TestsHelper, $ui.TesterButton, $ui.RecordButton, $ui.ResultsStatus, $ui.SendButton, $ui.OpenFolderLink,
         $ui.Dot, $ui.ConnLabel, $ui.Status, $ui.DetailsLink, $ui.Log)
+    $ui.UploadControls = @($ui.UploadControls) + $ui.SlotCtls.ToArray()
     New-RouteMapControls $form
     Update-ViewButtons
 
@@ -3502,8 +3599,6 @@ function New-MainForm {
     $ui.RecordButton.Add_Click({ Invoke-Safe { if ($script:Recording) { Stop-Recording } else { Start-Recording } } })
     $ui.SendButton.Add_Click({ Invoke-Safe { Send-Results } })
     $ui.OpenFolderLink.Add_LinkClicked({ Invoke-Safe { Open-ResultsFolder } })
-    $ui.NameBox.Add_TextChanged({ Invoke-Safe { Update-NameError } })
-    $ui.ModeBox.Add_SelectedIndexChanged({ Invoke-Safe { Set-ModeDefaults } })
     $ui.BuildBox.Add_SelectedIndexChanged({ Invoke-Safe { Select-Build } })
     $ui.BuildBox.Add_MeasureItem({ param($s, $e) try { Measure-BuildPickerItem $e } catch { } })
     $ui.BuildBox.Add_DrawItem({ param($s, $e) try { Show-BuildPickerItem $s $e } catch { } })
@@ -3624,10 +3719,6 @@ function Update-Layout {
     $ui.BuildBox.Visible = $script:BuildPickerShown
     $ui.BuildTitle.Visible = -not $script:BuildPickerShown
     $ui.BuildTitle.SetBounds($M, $y, $textW, (Px 22))
-    # A drawn drop-down is ItemHeight plus a fixed border tall, and the Mode box's own height settles only once
-    # Windows has made it, so the closed box is matched to it here, at every layout.
-    $fit = $ui.BuildBox.ItemHeight + ($ui.ModeBox.Height - $ui.BuildBox.Height)
-    if (($fit -ne $ui.BuildBox.ItemHeight) -and ($fit -ge 10)) { $ui.BuildBox.ItemHeight = $fit }
     $ui.BuildBox.SetBounds($M, $y, $textW, $ui.BuildBox.Height)
     # The open list runs the full width, under the button, so notes and names have room.
     $ui.BuildBox.DropDownWidth = $inner
@@ -3664,28 +3755,24 @@ function Update-Layout {
     # Upload section
     $ui.UploadLabel.SetBounds($M, $y, $inner, (Px 16))
     $y += Px 24
-    $modeW = Px 132
-    $slotW = Px 72
-    $slotX = $M + $modeW + (Px 16)
-    $nameX = $slotX + $slotW + (Px 16)
+    $slotW = Px 56
+    $modeX = $M + $slotW + (Px 8)
+    $modeW = Px 120
+    $nameX = $modeX + $modeW + (Px 8)
     $nameW = $M + $inner - $nameX
-    $ui.ModeLabel.SetBounds($M, $y, $modeW, (Px 18))
-    $ui.SlotLabel.SetBounds($slotX, $y, $slotW, (Px 18))
-    $ui.NameLabel.SetBounds($nameX, $y, $nameW, (Px 18))
-    $y += Px 22
-    # A drop-down list sets its own height from the font; match the text box to it.
-    $ui.ModeBox.SetBounds($M, $y, $modeW, $ui.ModeBox.Height)
-    $ui.SlotBox.SetBounds($slotX, $y, $slotW, $ui.SlotBox.Height)
-    $inputH = $ui.SlotBox.Height
-    $ui.NameBox.SetBounds($nameX, $y, $nameW, $inputH)
-    $y += $inputH
-    $ui.NameError.Visible = $script:NameErrorShown
-    if ($script:NameErrorShown) {
-        $y += Px 4
-        Set-WrappedLabel $ui.NameError $nameX $y $nameW
-        $y += $ui.NameError.Height
+    foreach ($row in $ui.SlotRows) {
+        $row.Slot.SetBounds($M, $y, $slotW, (Px 20))
+        $row.Mode.SetBounds($modeX, $y, $modeW, (Px 20))
+        $row.Name.SetBounds($nameX, $y, $nameW, (Px 20))
+        $y += Px 24
     }
-    $y += Px 16
+    $ui.SlotHint.Visible = $script:SlotHintShown
+    if ($script:SlotHintShown) {
+        $y += Px 2
+        Set-WrappedLabel $ui.SlotHint $M $y $inner
+        $y += $ui.SlotHint.Height
+    }
+    $y += Px 14
     $ui.UploadButton.SetBounds($M, $y, $inner, (Px 48))
     $y += Px 48
 
@@ -6319,10 +6406,7 @@ $script:InstalledTag = ''
 $script:StoredTags = @()
 $script:BuildPickerShown = $false
 $script:BuildFilling = $false
-$script:UploadTag = ''
 $script:LatestTag = ''
-$script:UploadSlot = 1
-$script:UploadMode = 'Competition'
 $script:ProsExe = $null
 $script:Jobs = New-Object System.Collections.ArrayList
 $script:Pool = $null
@@ -6411,44 +6495,38 @@ function Update-RecordingStatus {
     }
 }
 
-# Program names: start with a letter or number, then letters, numbers, spaces,
-# underscores, periods, or hyphens, 20 characters max. PROS itself allows a bit
-# more, but these are always safe on the brain screen and on the command line
-# (a name starting with "-" would look like an option to PROS).
-function Test-ProgramName {
-    param([string]$Name)
-    return ($Name -cmatch '^[A-Za-z0-9][A-Za-z0-9 _.\-]{0,19}\z')
-}
-
-# Shows or hides the small red message under the program name box.
-function Update-NameError {
-    $name = $script:Ui.NameBox.Text.Trim()
-    $bad = -not (Test-ProgramName $name)
-    if ($bad) {
-        if (-not $name) {
-            $script:Ui.NameError.Text = 'Enter a program name.'
-        } else {
-            $script:Ui.NameError.Text = 'Use letters, numbers, spaces, - _ or . (20 max), starting with a letter or number.'
-        }
-    }
-    $script:NameErrorShown = $bad
-    Update-Layout
-}
-
-# Picking a mode sets that mode's slot and name, and says so if this build
-# does not have the mode.
-function Set-ModeDefaults {
+# Fills the slot list for the picked build: a mode the build lacks reads "Not in this build". Also sets
+# the idle line under it. Safe to call before the window exists.
+function Update-SlotList {
     $ui = $script:Ui
-    $mode = $script:Modes[$ui.ModeBox.SelectedIndex]
-    $ui.SlotBox.SelectedIndex = $mode.Slot - 1
-    $ui.NameBox.Text = Get-NameForMode $ui.NameBox.Text $mode
-    if (-not (Test-HaveMode $mode)) {
-        if (Test-HaveCode) {
-            Set-Status ('The selected build has no ' + $mode.Label + ' version. Click Get latest code, pick another build, or ask the programmer.') 'error'
+    if ($null -eq $ui.SlotRows) { return }
+    $c = $script:Colors
+    $haveCode = Test-HaveCode
+    $rows = @(Get-BuildSlots)
+    for ($i = 0; $i -lt $ui.SlotRows.Count; $i++) {
+        $r = $ui.SlotRows[$i]
+        $m = $rows[$i].Mode
+        $present = [bool]$rows[$i].Present
+        $r.Slot.Text = 'Slot ' + $m.Slot
+        $r.Mode.Text = $m.Label
+        if ($present) {
+            $r.Name.Text = $m.Name
+            $r.Mode.ForeColor = $c.Text
+            $r.Name.ForeColor = $c.Text
         } else {
-            Set-Status 'No robot code downloaded yet. Click Get latest code first.' 'error'
+            $r.Name.Text = 'Not in this build'
+            $r.Mode.ForeColor = $c.Muted
+            $r.Name.ForeColor = $c.Muted
         }
     }
+    $showHint = $haveCode -and (-not ($script:Busy -and ($script:BusyKind -eq 'upload')))
+    $changed = ($showHint -ne $script:SlotHintShown)
+    if ($showHint) {
+        $text = Get-IdleUploadText (Get-BuildDisplayName $script:InstalledTag) $rows
+        if ($ui.SlotHint.Text -cne $text) { $ui.SlotHint.Text = $text; $changed = $true }
+    }
+    $script:SlotHintShown = $showHint
+    if ($changed) { Update-Layout }
 }
 
 # Closing time: kill every pros.exe we started, stop background jobs, and close
@@ -6492,7 +6570,7 @@ function Set-Busy {
     $script:BusyMessage = $Message
     $script:BusyStarted = Get-Date
     $script:LastElapsed = -1
-    foreach ($ctl in @($ui.GetButton, $ui.UploadButton, $ui.TesterButton, $ui.RecordButton, $ui.SendButton, $ui.BuildBox, $ui.ModeBox, $ui.SlotBox, $ui.NameBox, $ui.KeepLink, $ui.RenameLink, $ui.UnkeepLink)) { $ctl.Enabled = -not $On }
+    foreach ($ctl in @($ui.GetButton, $ui.UploadButton, $ui.TesterButton, $ui.RecordButton, $ui.SendButton, $ui.BuildBox, $ui.KeepLink, $ui.RenameLink, $ui.UnkeepLink)) { $ctl.Enabled = -not $On }
     if ($script:Recording) { $ui.RecordButton.Enabled = $true }
     if (-not $On) {
         $ui.TesterButton.Enabled = Test-HaveTester
@@ -6500,6 +6578,7 @@ function Set-Busy {
     }
     if ($On -and ($Kind -eq 'upload')) { $ui.UploadButton.Text = 'Uploading...' } else { $ui.UploadButton.Text = 'Upload to robot' }
     if ($On -and ($Kind -eq 'download')) { $ui.GetButton.Text = 'Downloading...' } else { $ui.GetButton.Text = 'Get latest code' }
+    Update-SlotList
     if ($On) { Set-Status $Message 'working' }
 }
 
@@ -6562,6 +6641,7 @@ function Update-BuildInfo {
         $ui.BuildMeta.Text = $meta
     }
     Update-BuildPicker
+    Update-SlotList
     Update-Notice
 }
 
@@ -6741,12 +6821,11 @@ function Use-Build {
     Set-SelectedBuild $Tag -Save
     Update-BuildInfo
     Switch-CloudBuild
-    $mode = $script:Modes[$script:Ui.ModeBox.SelectedIndex]
     $label = Get-BuildDisplayName $Tag
-    if (Test-HaveMode $mode) {
+    if (Test-HaveCode) {
         Set-Status ('Using ' + $label + '. Ready to upload.') 'info'
     } else {
-        Set-Status ($label + ' has no ' + $mode.Label + ' version. Pick another build or another mode.') 'error'
+        Set-Status ($label + ' is missing robot code files. Click Get latest code.') 'error'
     }
 }
 
@@ -7258,77 +7337,175 @@ function Start-Upload {
         Set-Status 'No robot code downloaded yet. Click Get latest code first.' 'error'
         return
     }
-    $mode = $script:Modes[$script:Ui.ModeBox.SelectedIndex]
-    if (-not (Test-HaveMode $mode)) {
-        Set-Status ('The selected build has no ' + $mode.Label + ' version. Click Get latest code, pick another build, or ask the programmer.') 'error'
+    $rows = @(Get-BuildSlots)
+    $todo = @($rows | Where-Object { $_.Present } | ForEach-Object { $_.Mode })
+    if ($todo.Count -eq 0) {
+        Set-Status 'The downloaded build is missing its programs. Click Get latest code, then try again.' 'error'
         return
     }
-    # Check the program name first and explain any problem next to the box.
-    $name = $script:Ui.NameBox.Text.Trim()
-    if (-not (Test-ProgramName $name)) {
-        Update-NameError
-        Set-Status 'Fix the program name, then click Upload to robot.' 'error'
-        [void]$script:Ui.NameBox.Focus()
-        return
+    $skipped = @($rows | Where-Object { -not $_.Present } | ForEach-Object { Get-SkippedSlotText $_.Mode })
+    # Remembered now: the picker is locked during the upload, but the messages are built after it.
+    $script:UploadRun = @{
+        Tag     = $script:InstalledTag
+        Build   = (Get-BuildDisplayName $script:InstalledTag)
+        Project = $script:ProjectDir
+        Todo    = $todo
+        Skipped = $skipped
+        Done    = (New-Object System.Collections.Generic.List[int])
+        Index   = 0
+        Retried = $false
+        Removed = $false
+        Retry   = $false
+        Deadline = (Get-Date)
     }
-    $script:UploadSlot = [int]$script:Ui.SlotBox.SelectedItem
-    $script:UploadMode = $mode.Label
-    # Remembered now: the picker is locked during the upload, but the message is built after it.
-    $script:UploadTag = $script:InstalledTag
+    Add-LogText ('[' + (Get-Date).ToString('HH:mm:ss') + '] Uploading ' + $script:InstalledTag + ' to ' + (Format-SlotList @($todo | ForEach-Object { [int]$_.Slot })))
+    foreach ($t in $skipped) { Add-LogText $t }
+    Start-UploadStep
+}
 
-    # Competition uploads the downloaded folder as is. A test mode uploads a
-    # staging copy with its own hot file swapped in.
-    $uploadDir = $script:ProjectDir
+# Uploads the program at the run's current index. Competition goes up as the downloaded folder is; every
+# other mode uploads a staging copy with its own hot file swapped in.
+function Start-UploadStep {
+    try { Start-UploadStepBody } catch { Stop-UploadOnError $_ }
+}
+
+# An error inside a run step would leave Busy set with nothing running, so the window stays locked.
+# This ends the run as a failure of the current slot, which clears Busy and re-enables the button.
+function Stop-UploadOnError {
+    param($ErrorRecord)
+    $msg = [string]$ErrorRecord.Exception.Message
+    try { Add-LogText ('Error: ' + ($ErrorRecord | Out-String)) } catch { }
+    $run = $script:UploadRun
+    if ($null -eq $run) { return }
+    $i = [math]::Min([int]$run.Index, $run.Todo.Count - 1)
+    Stop-UploadRun -Failed $run.Todo[$i] -Reason ('Something went wrong: ' + $msg)
+}
+
+function Start-UploadStepBody {
+    $run = $script:UploadRun
+    $mode = $run.Todo[$run.Index]
+    $count = $run.Todo.Count
+    $uploadDir = $run.Project
     if ($mode.Asset -ne 'hot.package.bin') {
         try {
-            $uploadDir = New-ModeProject -ProjectDir $script:ProjectDir -ModeAsset $mode.Asset -StageDir (Join-Path $InstallDir 'project.mode')
+            $uploadDir = New-ModeProject -ProjectDir $run.Project -ModeAsset $mode.Asset -StageDir (Join-Path $InstallDir 'project.mode')
         } catch {
-            Set-Status ('Could not prepare the ' + $mode.Label + ' files. ' + $_.Exception.Message) 'error'
+            Stop-UploadRun -Failed $mode -Reason ('Could not prepare the ' + $mode.Label + ' files. ' + $_.Exception.Message)
             return
         }
     }
-
-    Set-Busy $true 'upload' ('Uploading ' + $mode.Label + ' to slot ' + $script:UploadSlot + '. Keep the cable plugged in.')
-    Add-LogText ('[' + (Get-Date).ToString('HH:mm:ss') + '] Uploading ' + $script:InstalledTag + ' (' + $mode.Label + ') to slot ' + $script:UploadSlot)
+    if ($run.Retry) {
+        Set-Busy $true 'upload' ('Retrying ' + $mode.Name + ' (slot ' + $mode.Slot + ')... Keep the cable plugged in.')
+        Add-LogText ('[' + (Get-Date).ToString('HH:mm:ss') + '] Retrying ' + $mode.Label + ' to slot ' + $mode.Slot)
+    } else {
+        Set-Busy $true 'upload' (Get-UploadProgressText -Build $run.Build -Index ($run.Index + 1) -Count $count -Mode $mode)
+        Add-LogText ('[' + (Get-Date).ToString('HH:mm:ss') + '] ' + ($run.Index + 1) + ' of ' + $count + ': ' + $mode.Label + ' to slot ' + $mode.Slot)
+    }
     $jobArgs = @{
         ProsExe    = $script:ProsExe
         ProjectDir = $uploadDir
-        Slot       = $script:UploadSlot
-        Name       = $name
+        Slot       = [int]$mode.Slot
+        Name       = [string]$mode.Name
         Timeout    = $script:UploadTimeoutSec
     }
     Start-BgJob $UploadBody $jobArgs {
         param($r)
-        Set-Busy $false
-        $outcome = Get-UploadOutcome -Run $r -Slot $script:UploadSlot
-        # Name the build, so a swap to an older one shows in the message afterwards.
-        $message = $outcome.Message -replace '^Uploaded to slot', ('Uploaded ' + $script:UploadMode + (Get-UploadBuildText $script:UploadTag) + ' to slot')
-        # PROS asked to clean up old libraries (we answered yes): say so plainly.
-        if ([string]$r.Output -match 'There are too many files on the V5') {
-            $evictNote = 'PROS removed old libraries (and programs that used them) to make room.'
-            Add-LogText $evictNote
-            $message = $message + ' ' + $evictNote
-        }
-        if ($outcome.Ok) {
-            Set-Status $message 'success'
-        } else {
-            Set-Status $message 'error'
-            if ($outcome.Detail -and ($outcome.Kind -eq 'NoPros')) { Add-LogText $outcome.Detail }
-            if ($outcome.Kind -eq 'Failed') { Set-DetailsVisible $true }
-        }
-        Start-ConnectionCheck
+        Complete-UploadStep $r
     }
 }
 
-# The build in the upload message: "Uploaded Competition build 308 to slot 1", or for a kept build
-# "Uploaded Competition from Practice auton (Build 308) to slot 1".
-function Get-UploadBuildText {
-    param([string]$Tag)
-    if (-not $Tag) { return '' }
-    if ($script:Kept.ContainsKey($Tag)) { return (' from ' + (Get-BuildDisplayName $Tag)) }
-    $label = Get-BuildTagLabel $Tag
-    if ($label -notlike 'build *') { $label = 'build ' + $label }
-    return (' ' + $label)
+# One slot finished (or failed). Moves on, retries once after a dropped link, or stops the run.
+function Complete-UploadStep {
+    param($Result)
+    try { Complete-UploadStepBody $Result } catch { Stop-UploadOnError $_ }
+}
+
+function Complete-UploadStepBody {
+    param($Result)
+    $run = $script:UploadRun
+    $mode = $run.Todo[$run.Index]
+    $outcome = Get-UploadOutcome -Run $Result -Slot $mode.Slot
+    # PROS asked to clean up old libraries (we answered yes): say so plainly, once.
+    if (([string]$Result.Output -match 'There are too many files on the V5') -and (-not $run.Removed)) {
+        $run.Removed = $true
+        Add-LogText 'PROS removed old libraries (and programs that used them) to make room.'
+    }
+    if ($outcome.Ok) {
+        $run.Done.Add([int]$mode.Slot)
+        $run.Index++
+        $run.Retry = $false
+        $run.Retried = $false
+        if ($run.Index -ge $run.Todo.Count) { Stop-UploadRun; return }
+        # Through a controller the radio drops for a few seconds after each upload.
+        if ($script:ConnState -ne 'brain') { Start-LinkWait } else { Start-UploadStep }
+        return
+    }
+    # A dropped link is usually the radio still coming back, so wait for it and try this slot once more.
+    if ((@('NoLink', 'LinkLost') -contains [string]$outcome.Kind) -and (-not $run.Retried)) {
+        $run.Retried = $true
+        $run.Retry = $true
+        Start-LinkWait
+        return
+    }
+    if ($outcome.Detail -and ($outcome.Kind -eq 'NoPros')) { Add-LogText $outcome.Detail }
+    if ($outcome.Kind -eq 'Failed') { Set-DetailsVisible $true }
+    Stop-UploadRun -Failed $mode -Reason ([string]$outcome.Message)
+}
+
+# Waits up to LinkWaitSec for the brain to answer over the radio before the next slot, then goes on anyway.
+function Start-LinkWait {
+    $run = $script:UploadRun
+    $slot = [int]$run.Todo[$run.Index].Slot
+    $run.Deadline = (Get-Date).AddSeconds($script:LinkWaitSec)
+    Set-Busy $true 'upload' ("Waiting for the robot's radio to reconnect before slot " + $slot + '...')
+    Add-LogText ('[' + (Get-Date).ToString('HH:mm:ss') + '] Waiting for the brain to answer before slot ' + $slot)
+    Start-LinkProbe
+}
+
+function Start-LinkProbe {
+    # Each probe sleeps 1 s and may run up to its timeout, so the timeout is cut to what is left of the
+    # wait (10 s at most, as on the Mac) and the whole wait stays near LinkWaitSec.
+    $left = [int][math]::Floor(($script:UploadRun.Deadline - (Get-Date)).TotalSeconds) - 1
+    $probeSec = [math]::Max(2, [math]::Min(10, $left))
+    Start-BgJob $LinkProbeBody @{ ProsExe = $script:ProsExe; WorkDir = $InstallDir; Timeout = $probeSec } {
+        param($r)
+        try {
+            $run = $script:UploadRun
+            $slot = [int]$run.Todo[$run.Index].Slot
+            $answered = ((-not $r.StartError) -and (-not $r.TimedOut) -and ($r.ExitCode -eq 0) -and ([string]$r.Output -match 'System version:'))
+            if ($answered) {
+                Add-LogText ('[' + (Get-Date).ToString('HH:mm:ss') + '] Brain answered')
+                Start-UploadStep
+            } elseif ((Get-Date) -lt $run.Deadline) {
+                Start-LinkProbe
+            } else {
+                Add-LogText ('[' + (Get-Date).ToString('HH:mm:ss') + '] No answer from the brain after ' + $script:LinkWaitSec + ' s. Trying slot ' + $slot + ' anyway.')
+                Start-UploadStep
+            }
+        } catch { Stop-UploadOnError $_ }
+    }
+}
+
+# Ends the run: all slots done, or the first failure.
+function Stop-UploadRun {
+    param($Failed = $null, [string]$Reason = '')
+    $run = $script:UploadRun
+    $script:UploadRun = $null
+    Set-Busy $false
+    if ($null -eq $Failed) {
+        $text = Get-UploadSuccessText -Build $run.Build -Done $run.Done.ToArray() -Skipped $run.Skipped -RemovedLibraries $run.Removed
+        # Full success only when every slot got this build.
+        $kind = 'success'
+        if (@($run.Skipped).Count -gt 0) { $kind = 'info' }
+        Set-Status $text $kind
+    } else {
+        $notUploaded = @()
+        for ($i = $run.Index + 1; $i -lt $run.Todo.Count; $i++) { $notUploaded += [int]$run.Todo[$i].Slot }
+        $text = Get-UploadFailureText -Done $run.Done.ToArray() -Failed ([int]$Failed.Slot) -Reason $Reason -NotUploaded $notUploaded -Skipped $run.Skipped
+        if ($run.Removed) { $text += ' PROS removed old libraries (and programs that used them) to make room.' }
+        Set-Status $text 'error'
+    }
+    Start-ConnectionCheck
 }
 
 function Start-TesterUpload {
@@ -8751,6 +8928,64 @@ if ($SelfTest) {
             $r2 = & $getLatest $inst1 $t313
             & $expectB (($r2.Status -eq 'current') -and (@($r2.Downloaded).Count -eq 0) -and ((& $fileHits) -eq $hitsBefore)) ('download: a second run should fetch no file, got ' + $r2.Status + ' with ' + ((& $fileHits) - $hitsBefore) + ' file requests')
 
+            # Slot 4 resolves per release: Cascade Only when the release lists it, else Auto Pathing, else none.
+            # Both listed means Cascade Only, and the Auto Pathing file is not even asked for.
+            $instSlot4 = Join-Path $buildRoot 'dl-slot4'
+            New-Item -ItemType Directory -Path $instSlot4 -Force | Out-Null
+            $slot4Cases = @(
+                @{ Tag = 'build-330-3030303'; Lists = @('cascade-hot.package.bin'); Want = 'Cascade Only' },
+                @{ Tag = 'build-331-3131313'; Lists = @('cascade-hot.package.bin', 'autopath-hot.package.bin'); Want = 'Cascade Only' },
+                @{ Tag = 'build-332-3232323'; Lists = @('autopath-hot.package.bin'); Want = 'Auto Pathing' },
+                @{ Tag = 'build-333-3333333'; Lists = @(); Want = '' })
+            foreach ($case in $slot4Cases) {
+                $tg = $case.Tag
+                $fpS = @{}
+                foreach ($f in @($script:AssetNames + @('auton-test-hot.package.bin', 'drive-test-hot.package.bin', 'cascade-hot.package.bin', 'autopath-hot.package.bin'))) {
+                    $good = $utf8.GetBytes($tg + '|' + $f)
+                    $hostState.Routes['/releases/download/' + $tg + '/' + $f] = $good
+                    if (($script:AssetNames -contains $f) -or ($f -like '*-test-hot.package.bin') -or ($case.Lists -contains $f)) { $fpS[$f] = & $sha256Of $good }
+                }
+                $relS = @{ Tag = $tg; Name = $tg; Notes = 'Built from abc1234: test'; BuiltAt = '2026-11-12T00:00:00Z'; Sha256 = $fpS }
+                $gotRes = Save-ReleaseBuild -Release $relS -ReleasesUrl $relUrl -InstallDir $instSlot4 -AssetNames $script:AssetNames
+                $dirS = Join-Path $instSlot4 ('builds\' + $tg)
+                $hasC = Test-Path (Get-ReleaseAssetPath -Root $dirS -AssetName 'cascade-hot.package.bin')
+                $hasA = Test-Path (Get-ReleaseAssetPath -Root $dirS -AssetName 'autopath-hot.package.bin')
+                $resolved = Resolve-SlotFour -Names @($fpS.Keys | ForEach-Object { [string]$_ }) -Tag $tg
+                $gotLabel = ''
+                if ($null -ne $resolved) { $gotLabel = [string]$resolved.Label }
+                $slotsS = @(Get-BuildSlots -Root $dirS)
+                $diskLabel = ''
+                if ($slotsS[3].Present) { $diskLabel = [string]$slotsS[3].Mode.Label }
+                & $expectB (($gotRes.Status -eq 'downloaded') -and ($gotLabel -eq $case.Want) -and ($diskLabel -eq $case.Want)) ('slot 4 ' + $tg + ': expected "' + $case.Want + '", release says "' + $gotLabel + '", folder says "' + $diskLabel + '" (' + $gotRes.Status + ' ' + $gotRes.Error + ')')
+                $wantC = ($case.Lists -contains 'cascade-hot.package.bin')
+                $wantA = (($case.Lists -contains 'autopath-hot.package.bin') -and (-not $wantC))
+                & $expectB (($hasC -eq $wantC) -and ($hasA -eq $wantA)) ('slot 4 ' + $tg + ': cascade stored ' + $hasC + ' (want ' + $wantC + '), autopath stored ' + $hasA + ' (want ' + $wantA + ')')
+                if ($wantC) { & $expectB ((Test-Path (Join-Path $dirS 'modes\cascade-hot.package.bin')) -and (-not (Test-Path (Join-Path $dirS 'bin\cascade-hot.package.bin')))) ('slot 4 ' + $tg + ': the Cascade Only file belongs in modes, not bin') }
+            }
+            & $expectB (@(@($hostState.Hits) | Where-Object { $_ -like '*build-331-3131313/autopath-hot.package.bin*' }).Count -eq 0) 'slot 4: a release that lists Cascade Only should not download the Auto Pathing file'
+            & $expectB (($null -eq (Resolve-SlotFour)) -and ($null -eq (Resolve-SlotFour -Names @() -Tag 'build-500-5050505'))) 'slot 4: a release with no slot 4 file has none'
+            # Build 437 onward ships the Cascade Only program under the old autopath file name.
+            $r436 = Resolve-SlotFour -Names @('autopath-hot.package.bin') -Tag 'build-436-4364364'
+            $r437 = Resolve-SlotFour -Names @('autopath-hot.package.bin') -Tag 'build-437-a4bd37d'
+            $r437c = Resolve-SlotFour -Names @('autopath-hot.package.bin', 'cascade-hot.package.bin') -Tag 'build-437-a4bd37d'
+            $rOdd = Resolve-SlotFour -Names @('autopath-hot.package.bin') -Tag 'not-a-build-tag'
+            & $expectB (($r436.Label -ceq 'Auto Pathing') -and ($r436.Name -ceq 'Scourge Auto Pathing') -and ($r436.Asset -ceq 'autopath-hot.package.bin')) 'slot 4: build 436 with the autopath file is the real Auto Pathing'
+            & $expectB (($r437.Label -ceq 'Cascade Only') -and ($r437.Name -ceq 'Scourge Cascade') -and ($r437.Asset -ceq 'autopath-hot.package.bin')) 'slot 4: build 437 with the autopath file is Cascade Only, using that file'
+            & $expectB (($r437c.Label -ceq 'Cascade Only') -and ($r437c.Asset -ceq 'cascade-hot.package.bin')) 'slot 4: the Cascade Only file wins when both are there'
+            & $expectB ($rOdd.Label -ceq 'Auto Pathing') 'slot 4: a tag with no build number keeps Auto Pathing'
+            # Download and folder slots go through the same rule: build 437 stores the autopath file and shows Cascade Only.
+            $t437 = 'build-437-a4bd37d'
+            $fp437 = @{}
+            foreach ($f in @($script:AssetNames + @('auton-test-hot.package.bin', 'drive-test-hot.package.bin', 'autopath-hot.package.bin'))) {
+                $good = $utf8.GetBytes($t437 + '|' + $f)
+                $hostState.Routes['/releases/download/' + $t437 + '/' + $f] = $good
+                $fp437[$f] = & $sha256Of $good
+            }
+            $rel437 = @{ Tag = $t437; Name = $t437; Notes = 'Built from abc1234: test'; BuiltAt = '2026-11-12T00:00:00Z'; Sha256 = $fp437 }
+            $got437 = Save-ReleaseBuild -Release $rel437 -ReleasesUrl $relUrl -InstallDir $instSlot4 -AssetNames $script:AssetNames
+            $slots437 = @(Get-BuildSlots -Root (Join-Path $instSlot4 ('builds\' + $t437)))
+            & $expectB (($got437.Status -eq 'downloaded') -and $slots437[3].Present -and ($slots437[3].Mode.Label -ceq 'Cascade Only') -and ($slots437[3].Mode.Asset -ceq 'autopath-hot.package.bin')) ('slot 4: build 437 should download the autopath file as Cascade Only, got ' + $got437.Status + ' / ' + $slots437[3].Mode.Label)
+
             # Four more pushes in one session (320 to 323); the session's last build, 323, is not listed yet.
             # Only the newest comes down. A build left from 2.7.0 (299) that nothing lists goes; the picked one stays.
             $t320 = 'build-320-2020202'; $t321 = 'build-321-2121212'; $t322 = 'build-322-2222222'; $t323 = 'build-323-2323232'; $t299 = 'build-299-9999999'
@@ -9040,9 +9275,8 @@ if ($SelfTest) {
                 & $expectP ((@($script:PickerEntries | ForEach-Object { $_.Header }) -join '|') -eq 'NEWEST|FULL BUILDS|||KEPT|ON THIS COMPUTER|') 'each group should be named above its first row'
             }
             & $expectP ($ui.BuildBox.SelectedIndex -eq 0) 'the picked build should show selected'
-            # Same left edge and height as the Mode box below, and clear of the Get latest code button.
-            & $expectP (($ui.BuildBox.Left -eq $ui.ModeBox.Left) -and ($ui.BuildBox.Height -eq $ui.ModeBox.Height) -and ($ui.BuildBox.Right -le $ui.GetButton.Left)) ('drop-down box ' + $ui.BuildBox.Bounds + ' should line up with the Mode box ' + $ui.ModeBox.Bounds + ' and stop before the button ' + $ui.GetButton.Bounds)
-            & $expectP (($ui.BuildBox.Font.Name -eq $ui.ModeBox.Font.Name) -and ($ui.BuildBox.Font.Size -eq $ui.ModeBox.Font.Size) -and ($ui.BuildBox.DropDownStyle -eq $ui.ModeBox.DropDownStyle)) 'the drop-down should use the Mode box''s font and style'
+            # Same left edge as the slot list below, and clear of the Get latest code button.
+            & $expectP (($ui.BuildBox.Left -eq $ui.SlotRows[0].Slot.Left) -and ($ui.BuildBox.Right -le $ui.GetButton.Left)) ('drop-down box ' + $ui.BuildBox.Bounds + ' should line up with the slot list ' + $ui.SlotRows[0].Slot.Bounds + ' and stop before the button ' + $ui.GetButton.Bounds)
             & $expectP ((& $ownVisible $ui.KeepLink) -and (-not (& $ownVisible $ui.RenameLink)) -and (-not (& $ownVisible $ui.UnkeepLink))) 'a build that is not kept should offer Keep this build... only'
             & $expectP (($ui.KeepLink.Top -ge $ui.BuildMeta.Bottom) -and ($ui.KeepLink.Bottom -le $ui.MidLine.Top)) ('the keep link ' + $ui.KeepLink.Bounds + ' should sit under the details ' + $ui.BuildMeta.Bounds + ' and above the line ' + $ui.MidLine.Bounds)
             & $expectP (-not $script:NoticeShown) 'the newest build is here, so there should be no newer-code notice'
@@ -9072,7 +9306,7 @@ if ($SelfTest) {
                 & $expectP (((Get-MapEmptyText) -like 'No prediction for Practice auton (Build 308) yet.*') -and ((Get-CloudNote) -like '*no prediction for Practice auton (Build 308)*')) ('the Route Map should name the kept build, got: ' + (Get-MapEmptyText) + ' / ' + (Get-CloudNote))
             } finally { $script:Cloud = $savedCloudUi }
             & $expectP ($ui.UnkeepLink.Left -gt $ui.RenameLink.Right) 'Stop keeping should sit to the right of Rename...'
-            & $expectP (((Get-UploadBuildText 'build-308-2808722') -eq ' from Practice auton (Build 308)') -and ((Get-UploadBuildText 'build-313-3c15a66') -eq ' build 313') -and ((Get-UploadBuildText 'odd-tag') -eq ' build odd-tag') -and ((Get-UploadBuildText '') -eq '')) ('the upload message should name the build, a kept one by name, got ' + (Get-UploadBuildText 'build-308-2808722'))
+            & $expectP (((Get-BuildDisplayName 'build-308-2808722') -eq 'Practice auton (Build 308)') -and ((Get-BuildDisplayName 'build-313-3c15a66') -eq 'Build 313')) 'the upload messages should name the build, a kept one by its name and number'
             # Rename, with the dialog replaced by an answer.
             $script:NameAsk = $null
             ${function:Show-NameDialog} = { param([string]$Title, [string]$Prompt, [string]$Default, [string]$Action) $script:NameAsk = @{ Title = $Title; Default = $Default; Action = $Action }; return 'Auton v2' }
@@ -9211,12 +9445,194 @@ if ($SelfTest) {
             & $expectP (($script:SelectedTag -eq 'build-308-2808722') -and ($ui.BuildBox.SelectedIndex -eq (Get-PickerIndex 'build-308-2808722'))) 'a pick while busy should be undone'
             Set-Busy $false
             & $expectP ($ui.BuildBox.Enabled -and $ui.RenameLink.Enabled) 'the drop-down should unlock after busy'
-            # A build without the picked mode says so.
+            # A build without a mode lists that slot as not in the build, and the idle line names only the slots it has.
             Remove-Item -LiteralPath (Join-Path $uiRoot 'builds\build-304-497d4f7\modes') -Recurse -Force
-            $ui.ModeBox.SelectedIndex = 1
             $ui.BuildBox.SelectedIndex = Get-PickerIndex 'build-304-497d4f7'
-            & $expectP ($ui.Status.Text -like 'Build 304 has no Auton Test version*') ('a build without the picked mode should say so, got: ' + $ui.Status.Text)
-            $ui.ModeBox.SelectedIndex = 0
+            & $expectP ($ui.Status.Text -eq 'Using Build 304. Ready to upload.') ('picking a build should say it is ready, got: ' + $ui.Status.Text)
+            & $expectP (($ui.SlotRows[1].Name.Text -eq 'Not in this build') -and ($ui.SlotRows[2].Name.Text -eq 'Not in this build') -and ($ui.SlotRows[3].Name.Text -eq 'Not in this build') -and ($ui.SlotRows[0].Name.Text -eq 'Scourge')) ('a build with only Competition should show the other slots as not in this build, got: ' + (@($ui.SlotRows | ForEach-Object { $_.Name.Text }) -join ' | '))
+            & $expectP ($ui.SlotHint.Text -eq 'Ready to upload Build 304 to slot 1.') ('the idle line should name only slot 1, got: ' + $ui.SlotHint.Text)
+            # The slot list and the upload-everything run. Four stored builds: slot 4 as Cascade Only, as Auto Pathing,
+            # and a Competition-only one. Start-BgJob is replaced by a queue, so each step can be answered by hand.
+            $slotMake = {
+                param([string]$Tag, [string[]]$Assets)
+                $dir = Join-Path (Join-Path $uiRoot 'builds') $Tag
+                foreach ($n in (@($script:AssetNames) + $Assets)) {
+                    $p = Get-ReleaseAssetPath -Root $dir -AssetName $n
+                    New-Item -ItemType Directory -Path (Split-Path $p -Parent) -Force | Out-Null
+                    [System.IO.File]::WriteAllText($p, ($Tag + '|' + $n), $utf8Ui)
+                }
+                $ver = @{ tag = $Tag; name = $Tag; notes = 'Built from abc1234: test'; built_at = '2026-11-12T00:00:00Z'; downloaded_at = '2026-11-12T00:00:00Z' }
+                [System.IO.File]::WriteAllText((Join-Path $dir 'version.json'), ($ver | ConvertTo-Json), $utf8Ui)
+            }
+            $tNew = 'build-340-4040404'; $tOld = 'build-341-4141414'; $tOne = 'build-342-4242424'
+            & $slotMake $tNew @('auton-test-hot.package.bin', 'drive-test-hot.package.bin', 'cascade-hot.package.bin')
+            & $slotMake $tOld @('auton-test-hot.package.bin', 'drive-test-hot.package.bin', 'autopath-hot.package.bin')
+            & $slotMake $tOne @()
+            $rowText = { (@($ui.SlotRows | ForEach-Object { $_.Slot.Text + ' ' + $_.Mode.Text + ' ' + $_.Name.Text }) -join ' | ') }
+            $savedSelSlot = $script:SelectedTag
+            $savedBgSlot = ${function:Start-BgJob}; $savedConnChk = ${function:Start-ConnectionCheck}
+            $savedProsSlot = $script:ProsExe; $savedConnSlot = $script:ConnState; $savedWaitSlot = $script:LinkWaitSec
+            try {
+                $script:ProsExe = 'selftest-pros.exe'
+                ${function:Start-ConnectionCheck} = { }
+                # New release: Slot 1 to 3 as always, slot 4 is Cascade Only.
+                Set-SelectedBuild $tNew; Update-BuildInfo
+                & $expectP ((& $rowText) -ceq 'Slot 1 Competition Scourge | Slot 2 Auton Test Scourge Auton Test | Slot 3 Drive Test Scourge Drive Test | Slot 4 Cascade Only Scourge Cascade') ('slot list for a new build was: ' + (& $rowText))
+                & $expectP (($ui.SlotHint.Text -ceq 'Ready to upload Build 340 to slots 1, 2, 3, and 4.') -and (& $ownVisible $ui.SlotHint)) ('idle line for a full build was: ' + $ui.SlotHint.Text)
+                # Old release: slot 4 is Auto Pathing, as it really is there.
+                Set-SelectedBuild $tOld; Update-BuildInfo
+                & $expectP ((& $rowText) -ceq 'Slot 1 Competition Scourge | Slot 2 Auton Test Scourge Auton Test | Slot 3 Drive Test Scourge Drive Test | Slot 4 Auto Pathing Scourge Auto Pathing') ('slot list for an old build was: ' + (& $rowText))
+                # Neither: slot 4 reads as not in this build.
+                Set-SelectedBuild $tOne; Update-BuildInfo
+                & $expectP ((& $rowText) -ceq 'Slot 1 Competition Scourge | Slot 2 Auton Test Not in this build | Slot 3 Drive Test Not in this build | Slot 4 Cascade Only Not in this build') ('slot list for a Competition-only build was: ' + (& $rowText))
+                & $expectP (($ui.SlotRows[2].Name.ForeColor -eq $script:Colors.Muted) -and ($ui.SlotRows[0].Name.ForeColor -eq $script:Colors.Text)) 'a mode the build lacks should be greyed out'
+                # The form is gone: no mode, slot, or program name controls, and the list sits inside the window above the button.
+                & $expectP (-not (($ui.ContainsKey('ModeBox')) -or ($ui.ContainsKey('SlotBox')) -or ($ui.ContainsKey('NameBox')))) 'the Mode, Slot, and Program name controls should be gone'
+                & $expectP (($ui.SlotRows[0].Slot.Top -ge $ui.UploadLabel.Bottom) -and ($ui.SlotRows[3].Name.Bottom -le $ui.SlotHint.Top) -and ($ui.SlotHint.Bottom -le $ui.UploadButton.Top) -and ($ui.SlotRows[3].Name.Right -le $testForm.ClientSize.Width) -and ($ui.UploadButton.Bottom -lt $ui.TestsLine.Top)) ('the slot list should sit between the Upload heading and the button: rows ' + $ui.SlotRows[0].Slot.Bounds + ' to ' + $ui.SlotRows[3].Name.Bounds + ', hint ' + $ui.SlotHint.Bounds + ', button ' + $ui.UploadButton.Bounds)
+
+                # Message wording.
+                & $expectP (((Format-SlotList @(1)) -ceq 'slot 1') -and ((Format-SlotList @(1, 2)) -ceq 'slots 1 and 2') -and ((Format-SlotList @(1, 2, 3)) -ceq 'slots 1, 2, and 3') -and ((Format-SlotList @(1, 2, 3, 4)) -ceq 'slots 1, 2, 3, and 4')) 'slot lists should read "slot 1", "slots 1 and 2", "slots 1, 2, and 3"'
+                & $expectP ((Get-SkippedSlotText $script:Modes[3]) -ceq 'Slot 4 skipped: this build has no Cascade Only version, so slot 4 still has its old program.') ('the skipped-slot line was: ' + (Get-SkippedSlotText $script:Modes[3]))
+                & $expectP ((Get-UploadProgressText -Build 'Build 340' -Index 2 -Count 4 -Mode $script:Modes[1]) -ceq 'Uploading Build 340, 2 of 4: Scourge Auton Test (slot 2)... Keep the cable plugged in.') ('the progress line was: ' + (Get-UploadProgressText -Build 'Build 340' -Index 2 -Count 4 -Mode $script:Modes[1]))
+                & $expectP ((Get-UploadFailureText -Done @(1) -Failed 2 -Reason 'Upload failed. PROS said: boom' -NotUploaded @(3, 4) -Skipped @()) -ceq 'Slot 1 done. Slot 2 failed: PROS said: boom. Slots 3 and 4 not uploaded. Upload again to finish.') ('the failure line was: ' + (Get-UploadFailureText -Done @(1) -Failed 2 -Reason 'Upload failed. PROS said: boom' -NotUploaded @(3, 4) -Skipped @()))
+                & $expectP ((Get-UploadFailureText -Done @() -Failed 1 -Reason 'No brain found.' -NotUploaded @() -Skipped @('Slot 4 skipped: x.')) -ceq 'Slot 1 failed: No brain found. Slot 4 skipped: x. Upload again to finish.') 'a first-slot failure should skip the done and not-uploaded parts'
+
+                # A fake PROS answer for each kind of step.
+                $okRun = { param([string]$Extra = '') @{ ExitCode = 0; Output = ($Extra + "`nFinished uploading"); TimedOut = $false; StartError = '' } }
+                $badRun = { param([string]$Text) @{ ExitCode = 1; Output = $Text; TimedOut = $false; StartError = '' } }
+                $heard = @{ ExitCode = 0; Output = 'System version: 1.1.4'; TimedOut = $false; StartError = '' }
+                $silent = @{ ExitCode = 1; Output = 'no answer'; TimedOut = $false; StartError = '' }
+                ${function:Start-BgJob} = {
+                    param([scriptblock]$Body, [hashtable]$JobArgs, [scriptblock]$OnDone)
+                    $kind = 'other'
+                    if ([object]::ReferenceEquals($Body, $UploadBody)) { $kind = 'upload' } elseif ([object]::ReferenceEquals($Body, $LinkProbeBody)) { $kind = 'probe' }
+                    $hot = ''
+                    if ($kind -eq 'upload') { try { $hot = [System.IO.File]::ReadAllText((Join-Path $JobArgs.ProjectDir 'bin\hot.package.bin')) } catch { $hot = '(unreadable)' } }
+                    [void]$script:FakeJobs.Add(@{ Kind = $kind; Args = $JobArgs; OnDone = $OnDone; Status = $script:Ui.Status.Text; Hot = $hot; Busy = $script:Busy })
+                }
+                # Starts an upload and answers every queued job with $Answer (a script block taking the job). Returns a summary.
+                $runUpload = {
+                    param([scriptblock]$Answer)
+                    $script:FakeJobs = New-Object System.Collections.ArrayList
+                    $steps = New-Object System.Collections.Generic.List[object]
+                    $script:Busy = $false
+                    Start-Upload
+                    $guard = 0
+                    while (($script:FakeJobs.Count -gt 0) -and ($guard++ -lt 40)) {
+                        $j = $script:FakeJobs[0]; $script:FakeJobs.RemoveAt(0)
+                        $steps.Add($j)
+                        $res = & $Answer $j $steps.Count
+                        & $j.OnDone $res
+                    }
+                    return @{ Steps = $steps.ToArray(); Status = $ui.Status.Text; Busy = $script:Busy; Kinds = ((@($steps | ForEach-Object { $_.Kind })) -join ' ') }
+                }
+                $script:LinkWaitSec = 30
+
+                # Through a controller, new release: every slot in order, with the radio wait before each next one.
+                $script:ConnState = 'controller'
+                Set-SelectedBuild $tNew; Update-BuildInfo
+                $r = & $runUpload { param($j, $n) if ($j.Kind -eq 'probe') { $heard } else { & $okRun } }
+                & $expectP ($r.Kinds -ceq 'upload probe upload probe upload probe upload') ('a controller upload should wait for the radio before each next slot, steps were: ' + $r.Kinds)
+                & $expectP (($r.Steps[0].Status -ceq 'Uploading Build 340, 1 of 4: Scourge (slot 1)... Keep the cable plugged in.') -and ($r.Steps[2].Status -ceq 'Uploading Build 340, 2 of 4: Scourge Auton Test (slot 2)... Keep the cable plugged in.') -and ($r.Steps[6].Status -ceq 'Uploading Build 340, 4 of 4: Scourge Cascade (slot 4)... Keep the cable plugged in.')) ('progress lines were: ' + (@($r.Steps | ForEach-Object { $_.Status }) -join ' / '))
+                & $expectP (($r.Steps[1].Status -ceq "Waiting for the robot's radio to reconnect before slot 2...") -and ($r.Steps[5].Status -ceq "Waiting for the robot's radio to reconnect before slot 4...")) ('wait lines were: ' + $r.Steps[1].Status + ' / ' + $r.Steps[5].Status)
+                & $expectP (((@($r.Steps | Where-Object { $_.Kind -eq 'upload' } | ForEach-Object { $_.Args.Slot }) -join ',') -eq '1,2,3,4') -and ((@($r.Steps | Where-Object { $_.Kind -eq 'upload' } | ForEach-Object { $_.Args.Name }) -join '|') -ceq 'Scourge|Scourge Auton Test|Scourge Drive Test|Scourge Cascade')) 'slots and names go up in slot order'
+                & $expectP (((@($r.Steps | Where-Object { $_.Kind -eq 'upload' } | ForEach-Object { $_.Hot }) -join '|') -ceq ($tNew + '|hot.package.bin|' + $tNew + '|auton-test-hot.package.bin|' + $tNew + '|drive-test-hot.package.bin|' + $tNew + '|cascade-hot.package.bin'))) ('each slot should upload its own hot file, got: ' + (@($r.Steps | Where-Object { $_.Kind -eq 'upload' } | ForEach-Object { $_.Hot }) -join ' / '))
+                & $expectP (($r.Status -ceq 'Uploaded Build 340 to slots 1, 2, 3, and 4. Run them from the brain screen.') -and (-not $r.Busy) -and ($null -eq $script:UploadRun)) ('the success line was: ' + $r.Status)
+                & $expectP ($ui.UploadButton.Enabled -and (& $ownVisible $ui.SlotHint)) 'after an upload the button and the idle line should be back'
+
+                # Straight into the brain: no radio wait. Old release: slot 4 is Auto Pathing. PROS made room: said once.
+                $script:ConnState = 'brain'
+                Set-SelectedBuild $tOld; Update-BuildInfo
+                $r = & $runUpload { param($j, $n) if ($n -eq 1) { & $okRun 'There are too many files on the V5' } else { & $okRun } }
+                & $expectP ($r.Kinds -ceq 'upload upload upload upload') ('a brain upload should not wait, steps were: ' + $r.Kinds)
+                & $expectP (($r.Steps[3].Args.Name -ceq 'Scourge Auto Pathing') -and ($r.Steps[3].Hot -ceq ($tOld + '|autopath-hot.package.bin')) -and ($r.Steps[3].Status -ceq 'Uploading Build 341, 4 of 4: Scourge Auto Pathing (slot 4)... Keep the cable plugged in.')) ('an old build should upload Auto Pathing to slot 4, got: ' + $r.Steps[3].Args.Name + ' / ' + $r.Steps[3].Status)
+                & $expectP ($r.Status -ceq 'Uploaded Build 341 to slots 1, 2, 3, and 4. Run them from the brain screen. PROS removed old libraries (and programs that used them) to make room.') ('the made-room note was: ' + $r.Status)
+
+                # A build with only Competition: one slot goes up, the rest are named as skipped.
+                Set-SelectedBuild $tOne; Update-BuildInfo
+                $r = & $runUpload { param($j, $n) & $okRun }
+                & $expectP (($r.Kinds -ceq 'upload') -and ($r.Steps[0].Status -ceq 'Uploading Build 342, 1 of 1: Scourge (slot 1)... Keep the cable plugged in.')) ('a Competition-only build should upload one slot, steps: ' + $r.Kinds + ' / ' + $r.Steps[0].Status)
+                $want = 'Uploaded Build 342 to slot 1. Run them from the brain screen. Slot 2 skipped: this build has no Auton Test version, so slot 2 still has its old program. Slot 3 skipped: this build has no Drive Test version, so slot 3 still has its old program. Slot 4 skipped: this build has no Cascade Only version, so slot 4 still has its old program.'
+                & $expectP ($r.Status -ceq $want) ('the skipped lines were: ' + $r.Status)
+
+                # First failure stops the run: slot 1 done, slot 2 failed, 3 and 4 not uploaded.
+                $script:ConnState = 'controller'
+                Set-SelectedBuild $tNew; Update-BuildInfo
+                $r = & $runUpload { param($j, $n) if ($j.Kind -eq 'probe') { $heard } elseif ($j.Args.Slot -eq 2) { & $badRun "starting`nboom" } else { & $okRun } }
+                & $expectP ($r.Kinds -ceq 'upload probe upload') ('a failure should stop the run, steps: ' + $r.Kinds)
+                & $expectP (($r.Status -ceq 'Slot 1 done. Slot 2 failed: PROS said: boom. Slots 3 and 4 not uploaded. Upload again to finish.') -and (-not $r.Busy) -and ($null -eq $script:UploadRun)) ('the failure line was: ' + $r.Status)
+                Set-DetailsVisible $false
+
+                # A dropped link: wait, try the slot once more, and carry on when it works.
+                $dropped = "Error: This controller doesn't appear to be connected to a V5 Brain"
+                $seenDrop = @{ Done = $false }
+                $r = & $runUpload { param($j, $n)
+                    if ($j.Kind -eq 'probe') { $heard }
+                    elseif (($j.Args.Slot -eq 2) -and (-not $seenDrop.Done)) { $seenDrop.Done = $true; & $badRun $dropped }
+                    else { & $okRun } }
+                & $expectP ($r.Kinds -ceq 'upload probe upload probe upload probe upload probe upload') ('a dropped link should wait and retry that slot once, steps: ' + $r.Kinds)
+                & $expectP (($r.Steps[3].Status -ceq "Waiting for the robot's radio to reconnect before slot 2...") -and ($r.Steps[4].Status -ceq 'Retrying Scourge Auton Test (slot 2)... Keep the cable plugged in.')) ('the wait and retry lines were: ' + $r.Steps[3].Status + ' / ' + $r.Steps[4].Status)
+                & $expectP ($r.Status -ceq 'Uploaded Build 340 to slots 1, 2, 3, and 4. Run them from the brain screen.') ('after a retry the run should finish, got: ' + $r.Status)
+                # The same slot dropping twice is a failure.
+                $r = & $runUpload { param($j, $n) if ($j.Kind -eq 'probe') { $heard } elseif ($j.Args.Slot -eq 2) { & $badRun $dropped } else { & $okRun } }
+                & $expectP ($r.Kinds -ceq 'upload probe upload probe upload') ('a second drop should not retry again, steps: ' + $r.Kinds)
+                & $expectP ($r.Status -ceq 'Slot 1 done. Slot 2 failed: The controller is plugged in but is not linked to the brain. Plug the cable into the brain instead. Slots 3 and 4 not uploaded. Upload again to finish.') ('the second-drop line was: ' + $r.Status)
+                # A link that never comes back: waits out the time limit, then tries the slot anyway.
+                $script:LinkWaitSec = 0
+                $r = & $runUpload { param($j, $n) if ($j.Kind -eq 'probe') { $silent } else { & $okRun } }
+                & $expectP (($r.Kinds -ceq 'upload probe upload probe upload probe upload') -and ($r.Status -ceq 'Uploaded Build 340 to slots 1, 2, 3, and 4. Run them from the brain screen.')) ('with no answer the next slot should be tried anyway, steps: ' + $r.Kinds + ' / ' + $r.Status)
+                $script:LinkWaitSec = 30
+                # An error inside a step must not leave the window locked: the run ends as a failure and Busy clears.
+                $savedOutcome = ${function:Get-UploadOutcome}; $savedProgress = ${function:Get-UploadProgressText}; $savedLog = ${function:Add-LogText}
+                try {
+                    $script:ConnState = 'brain'
+                    Set-SelectedBuild $tNew; Update-BuildInfo
+                    ${function:Get-UploadOutcome} = { throw 'injected outcome error' }
+                    $r = & $runUpload { param($j, $n) & $okRun }
+                    & $expectP ((-not $r.Busy) -and ($null -eq $script:UploadRun) -and $ui.UploadButton.Enabled -and ($r.Status -like 'Slot 1 failed: Something went wrong: injected outcome error*')) ('a throw while finishing a step should clear Busy, status: ' + $r.Status + ' busy ' + $r.Busy)
+                    ${function:Get-UploadOutcome} = $savedOutcome
+                    ${function:Get-UploadProgressText} = { throw 'injected progress error' }
+                    $r = & $runUpload { param($j, $n) & $okRun }
+                    & $expectP ((-not $r.Busy) -and ($null -eq $script:UploadRun) -and $ui.UploadButton.Enabled -and ($r.Status -like '*injected progress error*')) ('a throw while starting a step should clear Busy, status: ' + $r.Status + ' busy ' + $r.Busy)
+                    ${function:Get-UploadProgressText} = $savedProgress
+                    $script:ConnState = 'controller'
+                    ${function:Add-LogText} = { param([string]$Text) if ($Text -like '*Brain answered*') { throw 'injected probe error' } }
+                    $r = & $runUpload { param($j, $n) if ($j.Kind -eq 'probe') { $heard } else { & $okRun } }
+                    & $expectP ((-not $r.Busy) -and ($null -eq $script:UploadRun) -and $ui.UploadButton.Enabled -and ($r.Status -like 'Slot 1 done. Slot 2 failed: Something went wrong: injected probe error*')) ('a throw in the link probe callback should clear Busy, status: ' + $r.Status + ' busy ' + $r.Busy)
+                } finally {
+                    ${function:Get-UploadOutcome} = $savedOutcome; ${function:Get-UploadProgressText} = $savedProgress; ${function:Add-LogText} = $savedLog
+                }
+                # The link probe never waits past what is left of the wait, and never longer than the Mac's 10 s.
+                $script:FakeJobs = New-Object System.Collections.ArrayList
+                $script:ConnState = 'controller'
+                Set-SelectedBuild $tNew; Update-BuildInfo
+                $script:Busy = $false
+                Start-Upload
+                & $script:FakeJobs[0].OnDone (& $okRun)
+                $probeJob = $script:FakeJobs[1]
+                & $expectP (($probeJob.Kind -eq 'probe') -and ($probeJob.Args.Timeout -le 10) -and ($probeJob.Args.Timeout -ge 2)) ('the first probe should have a timeout of 10 s at most, got ' + $probeJob.Args.Timeout)
+                $script:UploadRun.Deadline = (Get-Date).AddSeconds(4)
+                $script:FakeJobs = New-Object System.Collections.ArrayList
+                Start-LinkProbe
+                & $expectP ($script:FakeJobs[0].Args.Timeout -le 3) ('a probe near the deadline should be cut short, got ' + $script:FakeJobs[0].Args.Timeout)
+                $script:UploadRun = $null; $script:Busy = $false; $script:FakeJobs = New-Object System.Collections.ArrayList
+                $script:ConnState = 'controller'
+                # A slot that dropped partway through PROS is read as a lost link too.
+                & $expectP ((Get-UploadOutcome -Run (& $badRun "Couldn't find the response header") -Slot 2).Kind -eq 'LinkLost') 'a missing response header should read as a lost link'
+                # Closing during any step still asks first.
+                $script:FakeJobs = New-Object System.Collections.ArrayList
+                $script:Busy = $false
+                Start-Upload
+                & $expectP ($script:Busy -and ($script:BusyKind -eq 'upload')) 'the upload should count as running, so closing the window asks first'
+                $script:FakeJobs.Clear(); $script:UploadRun = $null; Set-Busy $false
+            } finally {
+                ${function:Start-BgJob} = $savedBgSlot; ${function:Start-ConnectionCheck} = $savedConnChk
+                $script:ProsExe = $savedProsSlot; $script:ConnState = $savedConnSlot; $script:LinkWaitSec = $savedWaitSlot
+                $script:UploadRun = $null; Set-Busy $false
+                Set-SelectedBuild $savedSelSlot
+                foreach ($t in @($tNew, $tOld, $tOne)) { Remove-Item -LiteralPath (Join-Path $uiRoot ('builds\' + $t)) -Recurse -Force -ErrorAction SilentlyContinue }
+                Update-BuildInfo
+            }
             # A damaged kept.json: no crash, no kept builds, left alone, noted for Details, and saved as .bak on the next change.
             $badKept = '{ "version": 1, "kept": { "build-308-2808722": { "name": "Practice'
             [System.IO.File]::WriteAllText((Join-Path $uiRoot 'kept.json'), $badKept, $utf8Ui)

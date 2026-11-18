@@ -10,6 +10,8 @@ const SHELL = [
   './styles.css',
   './transport.js',
   './releases.js',
+  './record.js',
+  './recordui.js',
   './map.html',
   './mapdata.js',
   './mapstore.js',

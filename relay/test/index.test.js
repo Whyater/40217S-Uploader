@@ -726,12 +726,12 @@ test("other methods on /plans are refused", async () => {
   assert.equal(response.status, 405);
 });
 
-test("adding /plans leaves /map's CORS and /results' lack of it alone", async () => {
+test("adding /plans leaves /map's CORS alone, and /results has its own", async () => {
   const map = await worker.fetch(new Request(mapUrl, { method: "OPTIONS" }), {});
   assert.equal(map.headers.get("Access-Control-Allow-Methods"), "GET, OPTIONS");
   assert.equal(map.headers.get("Access-Control-Allow-Headers"), "X-Team-Code");
   const { response } = await sendWith({}, env);
-  assert.equal(response.headers.get("Access-Control-Allow-Origin"), null);
+  assert.equal(response.headers.get("Access-Control-Allow-Methods"), "POST, OPTIONS");
 });
 
 function simPut(tag, body, headers = { Authorization: "Bearer ingest-1234" }, method = "PUT") {
@@ -1066,4 +1066,123 @@ test("partner changes use the stricter limit, the list read the read limit, befo
   assert.equal((await worker.fetch(partnersCall("DELETE", { code: "wrong", query: "?name=a" }), env)).status, 429);
   assert.equal((await worker.fetch(partnersCall("GET", { code: "wrong" }), env)).status, 429);
   assert.deepEqual(used, ["write", "write", "read"]);
+});
+
+test("OPTIONS /results allows exactly the Pages origin, POST, and the three headers", async () => {
+  const response = await worker.fetch(new Request(endpoint, { method: "OPTIONS", headers: { Origin: "https://evil.example" } }), {});
+  assert.equal(response.status, 204);
+  assert.equal(response.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+  assert.equal(response.headers.get("Access-Control-Allow-Methods"), "POST, OPTIONS");
+  assert.equal(response.headers.get("Access-Control-Allow-Headers"), "X-Team-Code, X-Scourge-Client, Content-Type");
+});
+
+test("POST /results from the web uploader can read the answer", async () => {
+  const response = await withGitHub(async () => Response.json({ number: 51 }, { status: 201 }),
+    () => worker.fetch(request(undefined, { "X-Scourge-Client": "web-uploader 1.0.0", Origin: pagesOrigin }), env));
+  assert.equal(response.status, 201);
+  assert.equal(response.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+  assert.deepEqual(await response.json(), { ok: true, issues: [51], on_map: false });
+});
+
+test("POST /results refusals carry the CORS headers so the browser can show the reason", async () => {
+  const cases = [
+    [new Request(endpoint, { method: "POST", body: "{}" }), env, 403],
+    [new Request(endpoint, { method: "GET", headers: { "X-Scourge-Client": "x" } }), env, 405],
+    [request(), {}, 500],
+    [request({ title: "bad", body }), env, 400],
+    [new Request(endpoint, { method: "POST", headers: { "X-Scourge-Client": "x", "Content-Length": "1000001" }, body: "{}" }), env, 413],
+  ];
+  for (const [req, testEnv, status] of cases) {
+    const response = await worker.fetch(req, testEnv);
+    assert.equal(response.status, status);
+    assert.equal(response.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+    assert.equal((await response.json()).ok, false);
+  }
+  const failed = await withGitHub(async () => new Response("no", { status: 500 }), () => worker.fetch(request(), env));
+  assert.equal(failed.status, 502);
+  assert.equal(failed.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+});
+
+test("adding CORS to /results leaves other routes as they were", async () => {
+  const other = await worker.fetch(new Request("https://relay.example/other", { method: "OPTIONS" }), env);
+  assert.equal(other.status, 404);
+  assert.equal(other.headers.get("Access-Control-Allow-Origin"), null);
+  const recorded = await worker.fetch(new Request("https://relay.example/map/recorded", { method: "OPTIONS" }), env);
+  assert.equal(recorded.headers.get("Access-Control-Allow-Origin"), null);
+});
+
+/* ----- GET /asset ----- */
+
+const assetUrl = (tag, name) => `https://relay.example/asset?tag=${encodeURIComponent(tag)}&name=${encodeURIComponent(name)}`;
+
+test("GET /asset fetches the release file from GitHub and answers with CORS for the Pages origin", async () => {
+  const calls = [];
+  const bytes = new Uint8Array([1, 2, 3, 4]);
+  const response = await withGitHub(async (url, options) => {
+    calls.push({ url, options });
+    return new Response(bytes, { status: 200, headers: { "Content-Length": "4" } });
+  }, () => worker.fetch(new Request(assetUrl("build-432-53fdd69", "cold.package.bin")), {}));
+  assert.equal(response.status, 200);
+  assert.deepEqual(new Uint8Array(await response.arrayBuffer()), bytes);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://github.com/Whyater/40217S-Uploader/releases/download/build-432-53fdd69/cold.package.bin");
+  assert.equal(calls[0].options.headers.Authorization, undefined, "public releases, no token sent");
+  assert.equal(response.headers.get("Access-Control-Allow-Origin"), "https://whyater.github.io");
+  assert.equal(response.headers.get("Content-Type"), "application/octet-stream");
+  assert.match(response.headers.get("Cache-Control"), /max-age=\d+/);
+});
+
+test("OPTIONS /asset allows GET from the Pages origin only", async () => {
+  const response = await worker.fetch(new Request("https://relay.example/asset", { method: "OPTIONS" }), {});
+  assert.equal(response.status, 204);
+  assert.equal(response.headers.get("Access-Control-Allow-Origin"), "https://whyater.github.io");
+  assert.equal(response.headers.get("Access-Control-Allow-Methods"), "GET, OPTIONS");
+});
+
+for (const [why, tag, name] of [
+  ["a tag with a short hash", "build-432-53fdd6", "hot.package.bin"],
+  ["a tag with upper case", "build-432-53FDD69", "hot.package.bin"],
+  ["a path in the tag", "build-432-53fdd69/../x", "hot.package.bin"],
+  ["the latest tag", "latest", "hot.package.bin"],
+  ["a ten-digit build number", "build-1234567890-53fdd69", "hot.package.bin"],
+  ["a file not on the list", "build-432-53fdd69", "secrets.txt"],
+  ["a path in the name", "build-432-53fdd69", "../hot.package.bin"],
+  ["no name", "build-432-53fdd69", ""],
+]) {
+  test(`GET /asset refuses ${why} without asking GitHub`, async () => {
+    let calls = 0;
+    const response = await withGitHub(async () => { calls += 1; return new Response("x"); },
+      () => worker.fetch(new Request(assetUrl(tag, name)), {}));
+    assert.equal(response.status, 400);
+    assert.equal(calls, 0);
+    assert.equal(response.headers.get("Access-Control-Allow-Origin"), "https://whyater.github.io");
+  });
+}
+
+test("GET /asset passes a GitHub 404 through, with CORS so the page can read it", async () => {
+  const response = await withGitHub(async () => new Response("Not Found", { status: 404 }),
+    () => worker.fetch(new Request(assetUrl("build-999-0000000", "release.json")), {}));
+  assert.equal(response.status, 404);
+  assert.equal(response.headers.get("Access-Control-Allow-Origin"), "https://whyater.github.io");
+  assert.equal((await response.json()).ok, false);
+});
+
+test("GET /asset answers 502 when GitHub fails or the file is too large", async () => {
+  const down = await withGitHub(async () => { throw new TypeError("network"); },
+    () => worker.fetch(new Request(assetUrl("build-432-53fdd69", "hot.package.bin")), {}));
+  assert.equal(down.status, 502);
+  const error = await withGitHub(async () => new Response("oops", { status: 500 }),
+    () => worker.fetch(new Request(assetUrl("build-432-53fdd69", "hot.package.bin")), {}));
+  assert.equal(error.status, 502);
+  const huge = await withGitHub(async () => new Response("x", { status: 200, headers: { "Content-Length": "9000000" } }),
+    () => worker.fetch(new Request(assetUrl("build-432-53fdd69", "hot.package.bin")), {}));
+  assert.equal(huge.status, 502);
+  const unlabelled = await withGitHub(async () => new Response(new Uint8Array(8_000_001)),
+    () => worker.fetch(new Request(assetUrl("build-432-53fdd69", "hot.package.bin")), {}));
+  assert.equal(unlabelled.status, 502);
+});
+
+test("other methods on /asset are refused", async () => {
+  const response = await worker.fetch(new Request(assetUrl("build-432-53fdd69", "hot.package.bin"), { method: "POST", body: "x" }), {});
+  assert.equal(response.status, 405);
 });

@@ -279,6 +279,7 @@ input:focus-visible { outline-offset: 0; }
 .disc-body { padding-top: 6px; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .btn-row { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; }
 .btn-row .btn { border-radius: 8px; }
+.rec { display: flex; flex-direction: column; gap: 8px; align-self: stretch; }
 .disc ol { padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
 
 .log {
@@ -481,3 +482,72 @@ input:focus-visible { outline-offset: 0; }
   .status.enter, .spin, .view:not([hidden]) { animation: none; }
   .disc summary::before, .seg-thumb { transition: none; }
 }
+
+/* Build picker and slot list */
+.pick-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* The picker gets its own full line so a long row like "Build 438 · full build · Not downloaded" fits on a phone. */
+.pick-row select { max-width: 100%; min-width: 0; flex: 1 1 100%; text-overflow: ellipsis; }
+.menu-wrap { position: relative; flex: none; }
+.menu {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 180px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  background: var(--window);
+  border: 0.5px solid var(--sep);
+  border-radius: 10px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+}
+.menu-item {
+  font: inherit;
+  color: var(--text);
+  text-align: left;
+  min-height: var(--hit);
+  padding: 0 10px;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.menu-item:hover, .menu-item:focus-visible { background: var(--seg-bg); }
+.menu-item[hidden] { display: none; }
+#catalog-msg .link { padding-left: 2px; min-height: 0; }
+
+.slots { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.slots li { display: flex; gap: var(--gap); align-items: baseline; }
+.slots .slot-n { flex: none; width: 3.6em; font-weight: 600; font-variant-numeric: tabular-nums; }
+.slots .slot-what { min-width: 0; overflow-wrap: anywhere; }
+.slots li[data-present="false"] { color: var(--text-2); }
+.slots li[data-present="false"] .slot-n { font-weight: 400; }
+
+/* Dialogs */
+.dlg {
+  width: min(420px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  padding: var(--panel-inset);
+  color: var(--text);
+  background: var(--window);
+  border: 0.5px solid var(--sep);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+}
+.dlg::backdrop { background: rgba(0, 0, 0, 0.35); }
+.dlg[open], .dlg form { display: flex; flex-direction: column; gap: var(--panel-stack); }
+.dlg-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.dlg-actions .btn.prominent { width: auto; min-height: var(--hit); margin: 0; padding: 0 18px; }
+.older-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; max-height: 50vh; }
+.older-list li {
+  display: flex;
+  gap: var(--gap);
+  align-items: center;
+  padding: 8px 0;
+  border-top: 0.5px solid var(--sep);
+}
+.older-list li:first-child { border-top: 0; }
+.older-list .older-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
+.older-list .btn { flex: none; border-radius: 8px; }

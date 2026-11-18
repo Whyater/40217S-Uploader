@@ -1,7 +1,7 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { MODES, validateName, checkLatest, downloadLatest, loadBuild, modeAvailable, storedTag } from '../releases.js';
+import { MODES, validateName, checkLatest, downloadLatest, loadBuild, modeAvailable, storedTag, listStored } from '../releases.js';
 
 // Minimal in-memory Cache Storage.
 function makeCaches() {
@@ -17,6 +17,7 @@ function makeCaches() {
     stores,
     async open(name) { if (!stores.has(name)) stores.set(name, new Map()); return make(stores.get(name)); },
     async has(name) { return stores.has(name); },
+    async keys() { return [...stores.keys()]; },
     async delete(name) { return stores.delete(name); },
   };
 }
@@ -87,12 +88,16 @@ test('modeAvailable depends on the mode hot file', () => {
   assert.equal(modeAvailable(null, 'competition'), false);
   build.files['drive-test-hot.package.bin'] = new Uint8Array(1);
   assert.equal(modeAvailable(build, 'drive'), true);
+  assert.equal(modeAvailable(build, 'cascade'), false);
   assert.equal(modeAvailable(build, 'autopath'), false);
   build.files['autopath-hot.package.bin'] = new Uint8Array(1);
   assert.equal(modeAvailable(build, 'autopath'), true);
+  assert.equal(modeAvailable(build, 'cascade'), false);
+  build.files['cascade-hot.package.bin'] = new Uint8Array(1);
+  assert.equal(modeAvailable(build, 'cascade'), true);
   assert.equal(MODES.length, 4);
   assert.deepEqual(MODES.map((m) => m.slot), [1, 2, 3, 4]);
-  assert.deepEqual(MODES.map((m) => m.name), ['Scourge', 'Scourge Auton Test', 'Scourge Drive Test', 'Scourge Auto Pathing']);
+  assert.deepEqual(MODES.map((m) => m.name), ['Scourge', 'Scourge Auton Test', 'Scourge Drive Test', 'Scourge Cascade']);
 });
 
 test('checkLatest offline returns offline without throwing', async () => {
@@ -182,7 +187,7 @@ test('interrupted swap before the pointer flip keeps the old build', async () =>
   const real = globalThis.caches.open.bind(globalThis.caches);
   globalThis.caches.open = async (name) => {
     const c = await real(name);
-    if (name !== 'scourge-build-pointer') return c;
+    if (name !== 'scourge-meta') return c;
     return { ...c, put: async () => { throw new Error('tab died'); } };
   };
   await assert.rejects(downloadLatest(), /Couldn't save the download/);
@@ -202,20 +207,16 @@ test('a half-written inactive cache is ignored', async () => {
   assert.equal(await activeTag(), 'v1');
 });
 
-test('pointer flip makes the new build load and removes the old cache', async () => {
+test('picking the new build is the last write, and the old one stays stored', async () => {
   const f1 = baseFiles('v1');
   stubFetch(makeRelease('v1', f1), f1);
   await downloadLatest();
-  const first = globalThis.caches.stores.has('scourge-build-a') ? 'scourge-build-a' : 'scourge-build-b';
   const f2 = baseFiles('v2');
   stubFetch(makeRelease('v2', f2), f2);
   await downloadLatest();
   assert.equal(await activeTag(), 'v2');
-  assert.equal(globalThis.caches.stores.has(first), false);
-  const f3 = baseFiles('v3');
-  stubFetch(makeRelease('v3', f3), f3);
-  await downloadLatest();
-  assert.equal(await activeTag(), 'v3');
+  // No full-builds list was ever fetched, so cleanup is not allowed to delete v1.
+  assert.deepEqual((await listStored()).sort(), ['v1', 'v2']);
 });
 
 test('legacy cache is read when there is no pointer, then replaced by a download', async () => {

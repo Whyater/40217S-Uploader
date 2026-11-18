@@ -46,31 +46,35 @@
       <div class="build">
         <div class="build-text">
           <p class="headline" id="build-title">No build downloaded yet</p>
+          <div class="pick-row">
+            <label class="sr-only" for="build-pick">Build</label>
+            <select id="build-pick" name="build"></select>
+            <div class="menu-wrap">
+              <button type="button" class="btn bordered" id="keep-btn" aria-haspopup="menu" aria-expanded="false">Keep</button>
+              <div class="menu" id="keep-menu" role="menu" hidden>
+                <button type="button" role="menuitem" class="menu-item" id="keep-add">Keep This Build…</button>
+                <button type="button" role="menuitem" class="menu-item" id="keep-rename">Rename…</button>
+                <button type="button" role="menuitem" class="menu-item" id="keep-remove">Stop Keeping</button>
+              </div>
+            </div>
+            <button type="button" class="btn bordered accent-text" id="get-latest">Get Latest</button>
+          </div>
           <p class="callout secondary" id="build-detail">Tap Get Latest to download it.</p>
         </div>
-        <button type="button" class="btn bordered accent-text" id="get-latest">Get Latest</button>
       </div>
       <p class="line" id="newer" data-kind="accent" hidden>
         <svg class="ico" aria-hidden="true"><use href="#i-down"/></svg>
         <span id="newer-text"></span>
       </p>
+      <p class="line" id="catalog-msg" data-kind="warn" hidden>
+        <svg class="ico" aria-hidden="true"><use href="#i-warn"/></svg>
+        <span id="catalog-msg-text"></span>
+        <button type="button" class="link" id="catalog-retry">Try Again</button>
+      </p>
     </section>
 
-    <section class="panel" aria-label="Upload settings">
-      <div class="form">
-        <label for="mode">Mode</label>
-        <select id="mode" name="mode"></select>
-
-        <p class="hint" id="mode-hint" data-kind="warn" hidden></p>
-
-        <label for="slot">Slot</label>
-        <select id="slot" name="slot"></select>
-
-        <label for="name">Program name</label>
-        <input id="name" name="name" type="text" placeholder="Scourge" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="done" aria-describedby="name-error">
-
-        <p class="hint" id="name-error" data-kind="bad" hidden></p>
-      </div>
+    <section class="panel" aria-label="Slots">
+      <ul class="slots" id="slots"></ul>
     </section>
 
     <button type="button" class="btn prominent" id="upload"><span class="spin" aria-hidden="true"></span><span id="upload-label">Upload to Robot</span></button>
@@ -86,11 +90,19 @@
     <details class="disc" id="tests">
       <summary>Robot Tests</summary>
       <div class="disc-body">
-        <div class="btn-row">
-          <button type="button" class="btn bordered" id="put-tester">Put Tester on Robot</button>
+        <div id="robot-tests-record" class="rec">
+          <p class="caption secondary" id="rec-help"></p>
+          <div class="btn-row">
+            <button type="button" class="btn bordered" id="put-tester">Put Tester on Robot</button>
+            <button type="button" class="btn bordered" id="rec-record">Record Results</button>
+            <button type="button" class="btn bordered" id="rec-send">Send Results</button>
+          </div>
+          <p class="caption secondary" id="tester-note" hidden></p>
+          <div class="status" id="rec-status" role="status" aria-live="polite" data-kind="idle">
+            <svg class="ico" aria-hidden="true"><use href="#i-info"/></svg>
+            <p id="rec-text">No results yet</p>
+          </div>
         </div>
-        <p class="caption secondary" id="tester-note" hidden></p>
-        <p class="caption secondary">Recording results needs the laptop app.</p>
       </div>
     </details>
 
@@ -197,6 +209,30 @@
       </div>
     </div>
   </div>
+
+  <dialog class="dlg" id="older-dlg" aria-labelledby="older-title">
+    <h2 class="headline" id="older-title">Older Build</h2>
+    <p class="caption secondary" id="older-msg" hidden></p>
+    <ul class="older-list" id="older-list"></ul>
+    <div class="dlg-actions">
+      <button type="button" class="btn bordered" id="older-retry" hidden>Try Again</button>
+      <button type="button" class="btn bordered" id="older-cancel">Cancel</button>
+    </div>
+  </dialog>
+
+  <dialog class="dlg" id="keep-dlg" aria-labelledby="keep-title">
+    <form id="keep-form" autocomplete="off" novalidate>
+      <h2 class="headline" id="keep-title">Keep This Build</h2>
+      <label class="sr-only" for="keep-name">Name</label>
+      <input id="keep-name" name="keep-name" type="text" maxlength="40" placeholder="A name, like Skills backup" autocomplete="off" autocapitalize="sentences" autocorrect="off" spellcheck="false" enterkeyhint="done">
+      <p class="caption secondary" id="keep-preview"></p>
+      <p class="hint" id="keep-error" data-kind="bad" hidden></p>
+      <div class="dlg-actions">
+        <button type="button" class="btn bordered" id="keep-cancel">Cancel</button>
+        <button type="submit" class="btn prominent" id="keep-save">Save</button>
+      </div>
+    </form>
+  </dialog>
   <script type="module" src="app.js"></script>
   <script type="module" src="maptab.js"></script>
 </body>

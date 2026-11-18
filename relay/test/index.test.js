@@ -726,12 +726,12 @@ test("other methods on /plans are refused", async () => {
   assert.equal(response.status, 405);
 });
 
-test("adding /plans leaves /map's CORS and /results' lack of it alone", async () => {
+test("adding /plans leaves /map's CORS alone, and /results has its own", async () => {
   const map = await worker.fetch(new Request(mapUrl, { method: "OPTIONS" }), {});
   assert.equal(map.headers.get("Access-Control-Allow-Methods"), "GET, OPTIONS");
   assert.equal(map.headers.get("Access-Control-Allow-Headers"), "X-Team-Code");
   const { response } = await sendWith({}, env);
-  assert.equal(response.headers.get("Access-Control-Allow-Origin"), null);
+  assert.equal(response.headers.get("Access-Control-Allow-Methods"), "POST, OPTIONS");
 });
 
 function simPut(tag, body, headers = { Authorization: "Bearer ingest-1234" }, method = "PUT") {
@@ -1066,4 +1066,47 @@ test("partner changes use the stricter limit, the list read the read limit, befo
   assert.equal((await worker.fetch(partnersCall("DELETE", { code: "wrong", query: "?name=a" }), env)).status, 429);
   assert.equal((await worker.fetch(partnersCall("GET", { code: "wrong" }), env)).status, 429);
   assert.deepEqual(used, ["write", "write", "read"]);
+});
+
+test("OPTIONS /results allows exactly the Pages origin, POST, and the three headers", async () => {
+  const response = await worker.fetch(new Request(endpoint, { method: "OPTIONS", headers: { Origin: "https://evil.example" } }), {});
+  assert.equal(response.status, 204);
+  assert.equal(response.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+  assert.equal(response.headers.get("Access-Control-Allow-Methods"), "POST, OPTIONS");
+  assert.equal(response.headers.get("Access-Control-Allow-Headers"), "X-Team-Code, X-Scourge-Client, Content-Type");
+});
+
+test("POST /results from the web uploader can read the answer", async () => {
+  const response = await withGitHub(async () => Response.json({ number: 51 }, { status: 201 }),
+    () => worker.fetch(request(undefined, { "X-Scourge-Client": "web-uploader 1.0.0", Origin: pagesOrigin }), env));
+  assert.equal(response.status, 201);
+  assert.equal(response.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+  assert.deepEqual(await response.json(), { ok: true, issues: [51], on_map: false });
+});
+
+test("POST /results refusals carry the CORS headers so the browser can show the reason", async () => {
+  const cases = [
+    [new Request(endpoint, { method: "POST", body: "{}" }), env, 403],
+    [new Request(endpoint, { method: "GET", headers: { "X-Scourge-Client": "x" } }), env, 405],
+    [request(), {}, 500],
+    [request({ title: "bad", body }), env, 400],
+    [new Request(endpoint, { method: "POST", headers: { "X-Scourge-Client": "x", "Content-Length": "1000001" }, body: "{}" }), env, 413],
+  ];
+  for (const [req, testEnv, status] of cases) {
+    const response = await worker.fetch(req, testEnv);
+    assert.equal(response.status, status);
+    assert.equal(response.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+    assert.equal((await response.json()).ok, false);
+  }
+  const failed = await withGitHub(async () => new Response("no", { status: 500 }), () => worker.fetch(request(), env));
+  assert.equal(failed.status, 502);
+  assert.equal(failed.headers.get("Access-Control-Allow-Origin"), pagesOrigin);
+});
+
+test("adding CORS to /results leaves other routes as they were", async () => {
+  const other = await worker.fetch(new Request("https://relay.example/other", { method: "OPTIONS" }), env);
+  assert.equal(other.status, 404);
+  assert.equal(other.headers.get("Access-Control-Allow-Origin"), null);
+  const recorded = await worker.fetch(new Request("https://relay.example/map/recorded", { method: "OPTIONS" }), env);
+  assert.equal(recorded.headers.get("Access-Control-Allow-Origin"), null);
 });

@@ -17,6 +17,9 @@ This Cloudflare Worker does four jobs for the uploaders:
   more issues. With the right `X-Team-Code` header the relay also adds the `team`
   label and answers `on_map: true`. A wrong or missing code still files, with no
   label and `on_map: false`. Senders can't set labels themselves.
+- `OPTIONS /results`: CORS preflight. The browser may only send results from
+  `https://whyater.github.io`; every `/results` answer carries the CORS headers so
+  the page can read the error.
 - `GET /map?build=<tag>`, with an `X-Team-Code` header: returns the stored data
   for that build, and the recorded data.
 - `GET /map`, with an `X-Team-Code` header: same, for the newest published build.

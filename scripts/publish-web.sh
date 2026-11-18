@@ -42,6 +42,10 @@ tag="$(jq -r .tag "$site/build/release.json")"
 for f in hot.package.bin cold.package.bin project.pros; do
   [ -f "$site/build/$f" ] || { echo "Release $tag is missing $f." >&2; exit 1; }
 done
+# Slot 4 ships as cascade-hot.package.bin (older releases: autopath-hot.package.bin); both are optional like the other test modes.
+for f in auton-test-hot.package.bin drive-test-hot.package.bin cascade-hot.package.bin autopath-hot.package.bin; do
+  [ -f "$site/build/$f" ] && echo "  $tag includes $f"
+done
 jq -r '.sha256 // {} | to_entries[] | "\(.value | ascii_downcase)  \(.key)"' "$site/build/release.json" > "$site/build.sha256"
 (cd "$site/build" && shasum -a 256 -c ../build.sha256 > /dev/null) || {
   echo "A file in $tag failed its SHA-256 check." >&2; exit 1; }

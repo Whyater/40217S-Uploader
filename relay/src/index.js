@@ -11,6 +11,11 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Methods": "GET, OPTIONS",
   "Access-Control-Allow-Headers": "X-Team-Code",
 };
+const RESULTS_CORS_HEADERS = {
+  "Access-Control-Allow-Origin": PAGES_ORIGIN,
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "X-Team-Code, X-Scourge-Client, Content-Type",
+};
 const BUILD_TAG = /^(?!latest$)[\w.-]{1,100}$/;
 const PLAN_KIND = "proposed-auto-plan";
 const PLAN_LABEL = "proposed-auto-plan";
@@ -595,6 +600,122 @@ async function handlePartnerMap(request, env) {
   return partnerResponse({ ok: true, team: team.name, ...partnerView(text, pinned) }, 200);
 }
 
+// The web uploader posts results from the Pages origin, so every answer here carries the CORS headers and the
+// browser can read the error. Laptop uploaders send no Origin and see the same answers as before.
+function resultsResponse(payload, status) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json", ...RESULTS_CORS_HEADERS },
+  });
+}
+
+async function handleResults(request, env) {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: RESULTS_CORS_HEADERS });
+  }
+  if (request.method !== "POST") {
+    return resultsResponse({ ok: false, error: "method not allowed" }, 405);
+  }
+  if (!request.headers.get("X-Scourge-Client")) {
+    return resultsResponse({ ok: false, error: "missing X-Scourge-Client" }, 403);
+  }
+  // The client is public, so anyone can call this. A per-address limit keeps a spammer to a
+  // trickle of issues; a whole team sending from one school address stays far under it.
+  if (env?.LIMITER) {
+    const { success } = await env.LIMITER.limit({ key: request.headers.get("CF-Connecting-IP") || "unknown" });
+    if (!success) return resultsResponse({ ok: false, error: "too many sends, try again in a minute" }, 429);
+  }
+  if (!env?.GITHUB_TOKEN) {
+    return resultsResponse({ ok: false, error: "relay not configured" }, 500);
+  }
+
+  const bodyRead = await readRequestBody(request);
+  if (bodyRead.error) return resultsResponse({ ok: false, error: "request too large" }, 413);
+
+  let payload;
+  try {
+    payload = JSON.parse(bodyRead.text);
+  } catch {
+    return resultsResponse({ ok: false, error: "invalid JSON" }, 400);
+  }
+
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return resultsResponse({ ok: false, error: "JSON must be an object" }, 400);
+  }
+  if (typeof payload.title !== "string" || !/^Robot data \d{4}-\d{2}-\d{2}$/.test(payload.title)) {
+    return resultsResponse({ ok: false, error: "invalid title" }, 400);
+  }
+  if (typeof payload.body !== "string") {
+    return resultsResponse({ ok: false, error: "body must be a string" }, 400);
+  }
+  if (payload.body.length > MAX_BODY_CHARS) {
+    return resultsResponse({ ok: false, error: "body too large" }, 413);
+  }
+
+  const firstBreak = payload.body.search(/\r?\n/);
+  if (firstBreak < 0) {
+    return resultsResponse({ ok: false, error: "body needs a header and data" }, 400);
+  }
+  const lineEnding = payload.body[firstBreak] === "\r" ? "\r\n" : "\n";
+  const header = payload.body.slice(0, firstBreak);
+  if (!header.startsWith("Uploader ") || header.length > 300) {
+    return resultsResponse({ ok: false, error: "invalid body header" }, 400);
+  }
+  const afterHeader = payload.body.slice(firstBreak + lineEnding.length);
+  if (!afterHeader.startsWith(lineEnding)) {
+    return resultsResponse({ ok: false, error: "body needs a blank line after header" }, 400);
+  }
+  const data = afterHeader.slice(lineEnding.length);
+  if (!splitDataLines(data).some((line) => line.replace(/\r?\n$/, "").length > 0)) {
+    return resultsResponse({ ok: false, error: "body needs data" }, 400);
+  }
+
+  let issues = [{ titleSuffix: "", body: payload.body }];
+  if (payload.body.length > MAX_ISSUE_CHARS) {
+    issues = makeParts(header, data, lineEnding) ?? [];
+    if (issues.length === 0) {
+      return resultsResponse({ ok: false, error: "body cannot be split into issue-sized parts" }, 413);
+    }
+  }
+
+  // Only the relay sets the label: a sender can only earn it with the team code, and a wrong code still files.
+  const onMap = Boolean(env.TEAM_CODE) && sameSecret(request.headers.get("X-Team-Code"), env.TEAM_CODE);
+  const labels = onMap ? { labels: [TEAM_LABEL] } : {};
+
+  const numbers = [];
+  let allLabelled = onMap;
+  for (const issue of issues) {
+    const fields = { title: payload.title + issue.titleSuffix, body: issue.body };
+    let response;
+    try {
+      response = await createIssue(env, { ...fields, ...labels });
+      // A label problem must never lose the results: file them unlabelled, and say they won't reach the map.
+      if (onMap && response.status === 422) {
+        allLabelled = false;
+        response = await createIssue(env, fields);
+      }
+    } catch {
+      return resultsResponse({ ok: false, error: "GitHub unavailable", issues: numbers }, 502);
+    }
+    if (!response.ok) {
+      return resultsResponse({ ok: false, error: `GitHub answered ${response.status}`, issues: numbers }, 502);
+    }
+    let created;
+    try {
+      created = await response.json();
+    } catch {
+      return resultsResponse({ ok: false, error: "GitHub answered with invalid JSON", issues: numbers }, 502);
+    }
+    if (!Number.isInteger(created?.number)) {
+      return resultsResponse({ ok: false, error: "GitHub answered with invalid JSON", issues: numbers }, 502);
+    }
+    if (!created.labels?.some((label) => label?.name === TEAM_LABEL)) allLabelled = false;
+    numbers.push(created.number);
+  }
+
+  return resultsResponse({ ok: true, issues: numbers, on_map: allLabelled }, 201);
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -606,109 +727,7 @@ export default {
       return handleSim(request, env, decodeURIComponent(url.pathname.slice("/map/sim/".length)));
     }
     if (url.pathname === "/plans") return handlePlans(request, env);
-    if (url.pathname !== "/results") {
-      return jsonResponse({ ok: false, error: "not found" }, 404);
-    }
-    if (request.method !== "POST") {
-      return jsonResponse({ ok: false, error: "method not allowed" }, 405);
-    }
-    if (!request.headers.get("X-Scourge-Client")) {
-      return jsonResponse({ ok: false, error: "missing X-Scourge-Client" }, 403);
-    }
-    // The client is public, so anyone can call this. A per-address limit keeps a spammer to a
-    // trickle of issues; a whole team sending from one school address stays far under it.
-    if (env?.LIMITER) {
-      const { success } = await env.LIMITER.limit({ key: request.headers.get("CF-Connecting-IP") || "unknown" });
-      if (!success) return jsonResponse({ ok: false, error: "too many sends, try again in a minute" }, 429);
-    }
-    if (!env?.GITHUB_TOKEN) {
-      return jsonResponse({ ok: false, error: "relay not configured" }, 500);
-    }
-
-    const bodyRead = await readRequestBody(request);
-    if (bodyRead.error) return bodyRead.error;
-
-    let payload;
-    try {
-      payload = JSON.parse(bodyRead.text);
-    } catch {
-      return jsonResponse({ ok: false, error: "invalid JSON" }, 400);
-    }
-
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-      return jsonResponse({ ok: false, error: "JSON must be an object" }, 400);
-    }
-    if (typeof payload.title !== "string" || !/^Robot data \d{4}-\d{2}-\d{2}$/.test(payload.title)) {
-      return jsonResponse({ ok: false, error: "invalid title" }, 400);
-    }
-    if (typeof payload.body !== "string") {
-      return jsonResponse({ ok: false, error: "body must be a string" }, 400);
-    }
-    if (payload.body.length > MAX_BODY_CHARS) {
-      return jsonResponse({ ok: false, error: "body too large" }, 413);
-    }
-
-    const firstBreak = payload.body.search(/\r?\n/);
-    if (firstBreak < 0) {
-      return jsonResponse({ ok: false, error: "body needs a header and data" }, 400);
-    }
-    const lineEnding = payload.body[firstBreak] === "\r" ? "\r\n" : "\n";
-    const header = payload.body.slice(0, firstBreak);
-    if (!header.startsWith("Uploader ") || header.length > 300) {
-      return jsonResponse({ ok: false, error: "invalid body header" }, 400);
-    }
-    const afterHeader = payload.body.slice(firstBreak + lineEnding.length);
-    if (!afterHeader.startsWith(lineEnding)) {
-      return jsonResponse({ ok: false, error: "body needs a blank line after header" }, 400);
-    }
-    const data = afterHeader.slice(lineEnding.length);
-    if (!splitDataLines(data).some((line) => line.replace(/\r?\n$/, "").length > 0)) {
-      return jsonResponse({ ok: false, error: "body needs data" }, 400);
-    }
-
-    let issues = [{ titleSuffix: "", body: payload.body }];
-    if (payload.body.length > MAX_ISSUE_CHARS) {
-      issues = makeParts(header, data, lineEnding) ?? [];
-      if (issues.length === 0) {
-        return jsonResponse({ ok: false, error: "body cannot be split into issue-sized parts" }, 413);
-      }
-    }
-
-    // Only the relay sets the label: a sender can only earn it with the team code, and a wrong code still files.
-    const onMap = Boolean(env.TEAM_CODE) && sameSecret(request.headers.get("X-Team-Code"), env.TEAM_CODE);
-    const labels = onMap ? { labels: [TEAM_LABEL] } : {};
-
-    const numbers = [];
-    let allLabelled = onMap;
-    for (const issue of issues) {
-      const fields = { title: payload.title + issue.titleSuffix, body: issue.body };
-      let response;
-      try {
-        response = await createIssue(env, { ...fields, ...labels });
-        // A label problem must never lose the results: file them unlabelled, and say they won't reach the map.
-        if (onMap && response.status === 422) {
-          allLabelled = false;
-          response = await createIssue(env, fields);
-        }
-      } catch {
-        return jsonResponse({ ok: false, error: "GitHub unavailable", issues: numbers }, 502);
-      }
-      if (!response.ok) {
-        return jsonResponse({ ok: false, error: `GitHub answered ${response.status}`, issues: numbers }, 502);
-      }
-      let created;
-      try {
-        created = await response.json();
-      } catch {
-        return jsonResponse({ ok: false, error: "GitHub answered with invalid JSON", issues: numbers }, 502);
-      }
-      if (!Number.isInteger(created?.number)) {
-        return jsonResponse({ ok: false, error: "GitHub answered with invalid JSON", issues: numbers }, 502);
-      }
-      if (!created.labels?.some((label) => label?.name === TEAM_LABEL)) allLabelled = false;
-      numbers.push(created.number);
-    }
-
-    return jsonResponse({ ok: true, issues: numbers, on_map: allLabelled }, 201);
+    if (url.pathname === "/results") return handleResults(request, env);
+    return jsonResponse({ ok: false, error: "not found" }, 404);
   },
 };

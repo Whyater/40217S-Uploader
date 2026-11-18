@@ -1218,3 +1218,36 @@ test("GET /asset serves a cached copy without asking GitHub again", async () => 
     delete globalThis.caches;
   }
 });
+
+test("GET /asset falls back to the API with the relay's token when downloads stay rate-limited", async () => {
+  const calls = [];
+  const response = await withGitHub(async (url, options) => {
+    calls.push({ url: String(url), auth: options?.headers?.Authorization ?? null });
+    if (String(url).startsWith("https://github.com/")) return new Response("slow down", { status: 429 });
+    if (String(url).endsWith("/releases/tags/build-432-53fdd69")) {
+      return new Response(JSON.stringify({ assets: [{ id: 11, name: "release.json" }, { id: 12, name: "hot.package.bin" }] }), { status: 200 });
+    }
+    if (String(url).endsWith("/releases/assets/12")) {
+      return new Response(null, { status: 302, headers: { Location: "https://release-assets.example/signed/12" } });
+    }
+    if (String(url) === "https://release-assets.example/signed/12") return new Response(new Uint8Array([9, 9]), { status: 200 });
+    return new Response("unexpected", { status: 500 });
+  }, () => worker.fetch(new Request(assetUrl("build-432-53fdd69", "hot.package.bin")), { GITHUB_TOKEN: "t0ken" }));
+  assert.equal(response.status, 200);
+  assert.deepEqual(new Uint8Array(await response.arrayBuffer()), new Uint8Array([9, 9]));
+  assert.equal(calls.length, 5);
+  assert.equal(calls[0].auth, null);
+  assert.equal(calls[3].auth, "Bearer t0ken");
+  assert.ok(calls[3].url.endsWith("/releases/assets/12"));
+  // The signed download address never sees the token.
+  assert.equal(calls[4].url, "https://release-assets.example/signed/12");
+  assert.equal(calls[4].auth, null);
+});
+
+test("GET /asset without a token reports the 429 instead of retrying forever", async () => {
+  let calls = 0;
+  const response = await withGitHub(async () => { calls += 1; return new Response("slow down", { status: 429 }); },
+    () => worker.fetch(new Request(assetUrl("build-432-53fdd69", "hot.package.bin")), {}));
+  assert.equal(response.status, 502);
+  assert.equal(calls, 2);
+});

@@ -40,8 +40,10 @@ This Cloudflare Worker does five jobs for the uploaders:
   of the release files (`release.json`, the hot, cold and project files for each
   mode, and the tester's three). Anything else is a 400, a missing file a 404, a
   GitHub failure or a file over 8 MB a 502. A 429 or 5xx from GitHub is retried
-  once. A good file is kept in Cloudflare's cache, so repeat downloads don't ask
-  GitHub again (it rate-limits downloads from shared Cloudflare addresses).
+  once, then asked through the GitHub API with the relay's `GITHUB_TOKEN` (the
+  token only goes to api.github.com, never to the download address). A good
+  file is kept in Cloudflare's cache, so repeat downloads don't ask GitHub
+  again (it rate-limits downloads from shared Cloudflare addresses).
 - `OPTIONS /asset`: CORS preflight.
 
 `GET /map` answers `{ok, sim, recorded, recorded_updated, sim_is_latest}`. `sim`

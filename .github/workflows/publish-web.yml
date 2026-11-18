@@ -1,7 +1,7 @@
 name: Publish web uploader
 
 # Puts the web uploader on GitHub Pages (gh-pages) with the latest release, so the web
-# app never lags behind a build. Runs after every new release, after a change to web/
+# app never lags behind a build. Runs after every new release, after a change to web/ or full-builds.json
 # on main, and by hand. scripts/publish-web.sh does the work and refuses to publish if
 # the web tests or a release hash fail.
 on:
@@ -13,6 +13,7 @@ on:
     paths:
       - 'web/**'
       - 'scripts/publish-web.sh'
+      - 'full-builds.json'
   workflow_dispatch:
 
 permissions:

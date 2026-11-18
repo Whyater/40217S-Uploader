@@ -1,7 +1,10 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { MODES, validateName, checkLatest, downloadLatest, loadBuild, modeAvailable, storedTag, listStored } from '../releases.js';
+import {
+  MODES, validateName, checkLatest, downloadLatest, loadBuild, modeAvailable, storedTag, listStored, loadBuildByTag,
+  slotModes, loadFullBuilds, cleanupStored, getPicked,
+} from '../releases.js';
 
 // Minimal in-memory Cache Storage.
 function makeCaches() {
@@ -197,14 +200,16 @@ test('interrupted swap before the pointer flip keeps the old build', async () =>
   assert.deepEqual(b.files['hot.package.bin'], f1['hot.package.bin']);
 });
 
-test('a half-written inactive cache is ignored', async () => {
+test('a half-written build cache (files but no release.json) is not a build', async () => {
   const f1 = baseFiles('v1');
   stubFetch(makeRelease('v1', f1), f1);
   await downloadLatest();
-  const inactive = (await globalThis.caches.has('scourge-build-a')) ? 'scourge-build-b' : 'scourge-build-a';
-  const c = await globalThis.caches.open(inactive);
-  await c.put('release.json', new Response(JSON.stringify(makeRelease('v2', baseFiles('v2')))));
+  // What a tab killed in the middle of writing v2 leaves behind: files, no release.json yet.
+  const c = await globalThis.caches.open('scourge-bt-v2');
+  await c.put('hot.package.bin', new Response(enc('hot-v2')));
   assert.equal(await activeTag(), 'v1');
+  assert.deepEqual(await listStored(), ['v1']);
+  assert.equal(await loadBuildByTag('v2'), null);
 });
 
 test('picking the new build is the last write, and the old one stays stored', async () => {
@@ -227,6 +232,52 @@ test('legacy cache is read when there is no pointer, then replaced by a download
   await downloadLatest();
   assert.equal(await activeTag(), 'v2');
   assert.equal(globalThis.caches.stores.has('scourge-build-v1'), false);
+  // The old build moved into the library instead of being lost.
+  assert.deepEqual((await listStored()).sort(), ['old', 'v2']);
+  const old = await loadBuildByTag('old');
+  assert.deepEqual(old.files['hot.package.bin'], baseFiles('old')['hot.package.bin']);
+});
+
+test('an old-layout phone (A/B caches and pointer) loads offline, then migrates and keeps the build', async () => {
+  const oldTag = 'build-414-aaaaaaa';
+  const oldFiles = { ...baseFiles(oldTag), 'cascade-hot.package.bin': enc('x' + oldTag) };
+  const cache = await globalThis.caches.open('scourge-build-b');
+  for (const [n, b] of Object.entries(oldFiles)) await cache.put(n, new Response(b));
+  await cache.put('release.json', new Response(JSON.stringify(makeRelease(oldTag, oldFiles))));
+  const p = await globalThis.caches.open('scourge-build-pointer');
+  await p.put('active', new Response('scourge-build-b'));
+
+  // Offline: the old build is still the upload source, with all four slots it had.
+  stubFetch(null, {}, { offline: true });
+  const b = await loadBuild();
+  assert.equal(b.release.tag, oldTag);
+  assert.deepEqual(slotModes(b).map((m) => m.present), [true, false, false, true]);
+  assert.deepEqual(await listStored(), [oldTag]);
+  assert.equal(await storedTag(), oldTag);
+
+  // Online: an empty full-builds list is refused, the newest downloads, and the old build survives cleanup.
+  const newTag = 'build-437-bbbbbbb';
+  const f2 = baseFiles(newTag);
+  const rel2 = makeRelease(newTag, f2);
+  globalThis.fetch = async (url) => {
+    url = String(url);
+    if (url.includes('full-builds.json')) return new Response(JSON.stringify({ version: 1, builds: [] }));
+    const name = url.replace('./build/', '');
+    if (name === 'release.json') return new Response(JSON.stringify(rel2));
+    return f2[name] ? new Response(f2[name]) : new Response('no', { status: 404 });
+  };
+  assert.equal((await loadFullBuilds()).builds, null);
+  await downloadLatest();
+  assert.equal(await getPicked(), newTag);
+  for (const n of ['scourge-build-a', 'scourge-build-b', 'scourge-build-pointer']) assert.equal(globalThis.caches.stores.has(n), false);
+  assert.deepEqual(await cleanupStored({ newestTag: newTag }), []);
+  assert.deepEqual((await listStored()).sort(), [oldTag, newTag]);
+  assert.deepEqual((await loadBuildByTag(oldTag)).files['cascade-hot.package.bin'], oldFiles['cascade-hot.package.bin']);
+
+  // And offline again, both are still there.
+  stubFetch(null, {}, { offline: true });
+  assert.equal((await loadBuild()).release.tag, newTag);
+  assert.ok(await loadBuildByTag(oldTag));
 });
 
 test('an incomplete active cache falls back to the other valid one', async () => {

@@ -1110,3 +1110,79 @@ test("adding CORS to /results leaves other routes as they were", async () => {
   const recorded = await worker.fetch(new Request("https://relay.example/map/recorded", { method: "OPTIONS" }), env);
   assert.equal(recorded.headers.get("Access-Control-Allow-Origin"), null);
 });
+
+/* ----- GET /asset ----- */
+
+const assetUrl = (tag, name) => `https://relay.example/asset?tag=${encodeURIComponent(tag)}&name=${encodeURIComponent(name)}`;
+
+test("GET /asset fetches the release file from GitHub and answers with CORS for the Pages origin", async () => {
+  const calls = [];
+  const bytes = new Uint8Array([1, 2, 3, 4]);
+  const response = await withGitHub(async (url, options) => {
+    calls.push({ url, options });
+    return new Response(bytes, { status: 200, headers: { "Content-Length": "4" } });
+  }, () => worker.fetch(new Request(assetUrl("build-432-53fdd69", "cold.package.bin")), {}));
+  assert.equal(response.status, 200);
+  assert.deepEqual(new Uint8Array(await response.arrayBuffer()), bytes);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://github.com/Whyater/40217S-Uploader/releases/download/build-432-53fdd69/cold.package.bin");
+  assert.equal(calls[0].options.headers.Authorization, undefined, "public releases, no token sent");
+  assert.equal(response.headers.get("Access-Control-Allow-Origin"), "https://whyater.github.io");
+  assert.equal(response.headers.get("Content-Type"), "application/octet-stream");
+  assert.match(response.headers.get("Cache-Control"), /max-age=\d+/);
+});
+
+test("OPTIONS /asset allows GET from the Pages origin only", async () => {
+  const response = await worker.fetch(new Request("https://relay.example/asset", { method: "OPTIONS" }), {});
+  assert.equal(response.status, 204);
+  assert.equal(response.headers.get("Access-Control-Allow-Origin"), "https://whyater.github.io");
+  assert.equal(response.headers.get("Access-Control-Allow-Methods"), "GET, OPTIONS");
+});
+
+for (const [why, tag, name] of [
+  ["a tag with a short hash", "build-432-53fdd6", "hot.package.bin"],
+  ["a tag with upper case", "build-432-53FDD69", "hot.package.bin"],
+  ["a path in the tag", "build-432-53fdd69/../x", "hot.package.bin"],
+  ["the latest tag", "latest", "hot.package.bin"],
+  ["a ten-digit build number", "build-1234567890-53fdd69", "hot.package.bin"],
+  ["a file not on the list", "build-432-53fdd69", "secrets.txt"],
+  ["a path in the name", "build-432-53fdd69", "../hot.package.bin"],
+  ["no name", "build-432-53fdd69", ""],
+]) {
+  test(`GET /asset refuses ${why} without asking GitHub`, async () => {
+    let calls = 0;
+    const response = await withGitHub(async () => { calls += 1; return new Response("x"); },
+      () => worker.fetch(new Request(assetUrl(tag, name)), {}));
+    assert.equal(response.status, 400);
+    assert.equal(calls, 0);
+    assert.equal(response.headers.get("Access-Control-Allow-Origin"), "https://whyater.github.io");
+  });
+}
+
+test("GET /asset passes a GitHub 404 through, with CORS so the page can read it", async () => {
+  const response = await withGitHub(async () => new Response("Not Found", { status: 404 }),
+    () => worker.fetch(new Request(assetUrl("build-999-0000000", "release.json")), {}));
+  assert.equal(response.status, 404);
+  assert.equal(response.headers.get("Access-Control-Allow-Origin"), "https://whyater.github.io");
+  assert.equal((await response.json()).ok, false);
+});
+
+test("GET /asset answers 502 when GitHub fails or the file is too large", async () => {
+  const down = await withGitHub(async () => { throw new TypeError("network"); },
+    () => worker.fetch(new Request(assetUrl("build-432-53fdd69", "hot.package.bin")), {}));
+  assert.equal(down.status, 502);
+  const error = await withGitHub(async () => new Response("oops", { status: 500 }),
+    () => worker.fetch(new Request(assetUrl("build-432-53fdd69", "hot.package.bin")), {}));
+  assert.equal(error.status, 502);
+  const huge = await withGitHub(async () => new Response("x", { status: 200, headers: { "Content-Length": "9000000" } }),
+    () => worker.fetch(new Request(assetUrl("build-432-53fdd69", "hot.package.bin")), {}));
+  assert.equal(huge.status, 502);
+  const unlabelled = await withGitHub(async () => new Response(new Uint8Array(8_000_001)),
+    () => worker.fetch(new Request(assetUrl("build-432-53fdd69", "hot.package.bin")), {}));
+  assert.equal(unlabelled.status, 502);
+});
+
+test("other methods on /asset are refused", async () => {
+  const response = await worker.fetch(new Request(assetUrl("build-432-53fdd69", "hot.package.bin"), { method: "POST", body: "x" }), {});
+  assert.equal(response.status, 405);
+});

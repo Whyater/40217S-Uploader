@@ -2,6 +2,8 @@
 // one is picked, what is published, and downloads that are verified before
 // they replace anything.
 
+import { MANIFEST_URL, relayBase } from './mapcloud.js';
+
 export const MODES = [
   { id: 'competition', label: 'Competition', slot: 1, name: 'Scourge', hot: 'hot.package.bin' },
   { id: 'auton', label: 'Auton Test', slot: 2, name: 'Scourge Auton Test', hot: 'auton-test-hot.package.bin' },
@@ -35,17 +37,28 @@ function listedFiles(build) {
   return Object.keys(build.files || {});
 }
 
-// Cascade Only if the release lists it, else Auto Pathing if it lists that,
-// else the build has no slot 4 (the Cascade Only entry, marked absent).
+// Build 437 put Cascade Only in slot 4 but still shipped it as autopath-hot.package.bin.
+const CASCADE_IN_AUTOPATH_FROM = 437;
+
+// Cascade Only if the release lists it, else the autopath file (Cascade Only
+// from Build 437 on, Auto Pathing before), else the build has no slot 4 (the
+// Cascade Only entry, marked absent).
 export function slot4Mode(build) {
   const names = listedFiles(build);
   if (names.includes(MODES[3].hot)) return MODES[3];
-  if (names.includes(LEGACY_SLOT4.hot)) return LEGACY_SLOT4;
+  if (names.includes(LEGACY_SLOT4.hot)) {
+    const n = buildNumber(build && build.release && build.release.tag);
+    return n != null && n >= CASCADE_IN_AUTOPATH_FROM ? { ...MODES[3], hot: LEGACY_SLOT4.hot } : LEGACY_SLOT4;
+  }
   return MODES[3];
 }
 
 export function modeById(build, modeId) {
   if (modeId === LEGACY_SLOT4.id) return LEGACY_SLOT4;
+  if (modeId === MODES[3].id) {
+    const m = slot4Mode(build);
+    return m.id === modeId ? m : MODES[3];
+  }
   return MODES.find((m) => m.id === modeId) || null;
 }
 
@@ -253,7 +266,9 @@ const BASE = './build/';
 const OWNER_REPO = 'Whyater/40217S-Uploader';
 const FULL_BUILDS_URL = `https://raw.githubusercontent.com/${OWNER_REPO}/main/full-builds.json`;
 const RELEASES_URL = `https://api.github.com/repos/${OWNER_REPO}/releases?per_page=100`;
-const ASSET_URL = (id) => `https://api.github.com/repos/${OWNER_REPO}/releases/assets/${id}`;
+const BUNDLE_INDEX = BASE + 'builds.json';
+const FULL_TAG = /^build-\d{1,9}-[0-9a-f]{7}$/;
+const RELAY_DOWN = "Older builds need the team's relay, which didn't answer. Full builds still work.";
 const CAPTIVE_MESSAGE = "Couldn't read the release info. If you're on public Wi-Fi, open a web page first to sign in, then try again.";
 const OFFLINE_DOWNLOAD = "Couldn't reach the download. Check your connection and try again.";
 
@@ -459,8 +474,23 @@ export async function getKept() {
   }
 }
 
+export const KEPT_RESET_TEXT = "The kept list couldn't be read, so it was started over. The old copy is saved as kept.bak.";
+export const KEPT_UNREADABLE_TEXT = "Couldn't read the kept builds, so nothing was changed.";
+
+// An unreadable kept list is only written over once a copy of it is saved as
+// kept.bak, like the Mac's kept.json.bak.
 export async function setKept(tag, name) {
-  const kept = (await getKept()) || {};
+  let kept = await getKept();
+  if (!kept) {
+    const old = await metaGet('kept');
+    try {
+      await metaPut('kept.bak', old === undefined ? '' : old);
+      if ((await metaGet('kept.bak')) !== (old === undefined ? '' : old)) throw new Error('not saved');
+    } catch (e) {
+      throw new Error(KEPT_UNREADABLE_TEXT);
+    }
+    kept = {};
+  }
   kept[tag] = name;
   await metaPut('kept', JSON.stringify(kept));
   return kept;
@@ -484,10 +514,22 @@ function githubError(res, what) {
   return new Error(`Couldn't load ${what} from GitHub (error ${res ? res.status : 'unknown'}). Try again.`);
 }
 
+// Same rules as the Mac: version 1, real build tags only, each tag once (the
+// first wins), highest number first. An empty result counts as unreadable: the
+// team never means to list no full builds, and taking it would let cleanup
+// delete every one.
 function parseFullBuilds(text) {
   const j = JSON.parse(text);
-  if (!j || !Array.isArray(j.builds)) throw new Error('bad shape');
-  return j.builds.filter((b) => b && typeof b.tag === 'string').map((b) => ({ tag: b.tag, note: typeof b.note === 'string' ? b.note.trim() : '' }));
+  if (!j || typeof j !== 'object' || j.version !== 1 || !Array.isArray(j.builds)) throw new Error('bad shape');
+  const seen = new Set();
+  const builds = [];
+  for (const b of j.builds) {
+    if (!b || typeof b.tag !== 'string' || !FULL_TAG.test(b.tag) || seen.has(b.tag)) continue;
+    seen.add(b.tag);
+    builds.push({ tag: b.tag, note: typeof b.note === 'string' ? b.note.trim() : '' });
+  }
+  if (!builds.length) throw new Error('no builds');
+  return builds.sort(byNumberDesc);
 }
 
 // { builds, stale } or { builds: null } when never fetched and offline.
@@ -639,26 +681,83 @@ export function downloadLatest(onProgress) {
   }, onProgress);
 }
 
-// Any other published build, from its GitHub release assets.
-// entry: { tag, assets: {name: id} } from loadPublished().
-export function downloadPublished(entry, onProgress) {
-  const get = async (name) => {
-    const id = entry.assets && entry.assets[name];
-    if (!id) throw new Error('Download was damaged (' + name + ' is missing from the release).');
-    let res;
-    try {
-      res = await fetch(ASSET_URL(id), { headers: { Accept: 'application/octet-stream' } });
-    } catch (e) {
-      throw new Error("Couldn't finish the download (" + name + '). Check your connection and try again.');
-    }
-    if (!res.ok) throw githubError(res, name);
-    return new Uint8Array(await res.arrayBuffer());
-  };
+// The builds this site carries besides the newest, from build/builds.json
+// (written by scripts/publish-web.sh). Empty when the site has none or the
+// index can't be read.
+export async function bundledTags() {
+  try {
+    const res = await fetch(BUNDLE_INDEX, { cache: 'no-store' });
+    if (!res.ok) return [];
+    const j = await res.json();
+    if (!j || j.version !== 1 || !Array.isArray(j.builds)) return [];
+    return j.builds.filter((t) => typeof t === 'string' && FULL_TAG.test(t));
+  } catch (e) {
+    return [];
+  }
+}
+
+// Bytes from a fetch, or a plain error. A 404 means the file is not there.
+async function fetchBytes(url, name, offlineText) {
+  let res;
+  try {
+    res = await fetch(url, { cache: 'no-store' });
+  } catch (e) {
+    throw new Error(offlineText);
+  }
+  if (res.status === 404) throw new Error('Download was damaged (' + name + ' is missing from the release).');
+  if (!res.ok) throw new Error(offlineText);
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+// One of the full builds bundled with this site, from build/<tag>/.
+function downloadBundled(tag, onProgress) {
+  const base = `${BASE}${encodeURIComponent(tag)}/`;
+  const get = (name) => fetchBytes(base + name, name, "Couldn't finish the download (" + name + '). Check your connection and try again.');
   return downloadBuild({
-    expectTag: entry.tag,
+    expectTag: tag,
     getMeta: async () => new TextDecoder().decode(await get('release.json')),
     getFile: get,
   }, onProgress);
+}
+
+// The relay's address, from the manifest the laptop app reads. Throws a plain message.
+async function findRelay() {
+  let res;
+  try {
+    res = await fetch(`${MANIFEST_URL}?t=${Date.now()}`, { cache: 'no-store' });
+  } catch (e) {
+    throw new Error(OFFLINE_DOWNLOAD);
+  }
+  let base = '';
+  try { if (res.ok) base = relayBase((JSON.parse(await res.text()) || {}).results_url); } catch (e) { base = ''; }
+  if (!base) throw new Error(RELAY_DOWN);
+  return base;
+}
+
+// Any other published build, through the relay's /asset route: GitHub's
+// release downloads send no CORS headers, so a page can't read them directly.
+async function downloadViaRelay(tag, onProgress) {
+  const relay = await findRelay();
+  const url = (name) => `${relay}/asset?tag=${encodeURIComponent(tag)}&name=${encodeURIComponent(name)}`;
+  return downloadBuild({
+    expectTag: tag,
+    // A relay without the /asset route answers without CORS, which reads as no answer.
+    getMeta: async () => new TextDecoder().decode(await fetchBytes(url('release.json'), 'release.json', RELAY_DOWN)),
+    getFile: (name) => fetchBytes(url(name), name, "Couldn't finish the download (" + name + '). Check your connection and try again.'),
+  }, onProgress);
+}
+
+/**
+ * Downloads, verifies and picks the build `tag`: the newest from build/, a
+ * bundled full build from build/<tag>/, anything else through the relay.
+ * onSource('newest' | 'bundled' | 'relay') says which, before it starts.
+ */
+export async function downloadByTag(tag, { newestTag = null, onProgress, onSource } = {}) {
+  const say = typeof onSource === 'function' ? onSource : () => {};
+  if (tag === newestTag) { say('newest'); return downloadLatest(onProgress); }
+  if ((await bundledTags()).includes(tag)) { say('bundled'); return downloadBundled(tag, onProgress); }
+  say('relay');
+  return downloadViaRelay(tag, onProgress);
 }
 
 // Run only after a good download. Never deletes while a list is unknown.

@@ -248,3 +248,36 @@ test('WebUSB: a brain uses its second CDC pair, a controller its only one', () =
   const ctrl = { productId: CONTROLLER_PRODUCT_ID, configurations: one.configurations };
   assert.equal(usbUserPort(ctrl, StubPort).controlInterface_.interfaceNumber, 0);
 });
+
+test('a Stop tapped while the port was still being found ends the recording as soon as it opens', async () => {
+  const { r, statuses } = recorder();
+  r.stop(); // the second tap, before start() ran
+  const port = fakePort();
+  const result = await r.start({ via: 'usb', product: 'brain', port });
+  assert.equal(result.kind, 'stopped');
+  assert.equal(port.opened, true);
+  assert.equal(port.written.length, 0, 'never started reading');
+  assert.equal(r.state, 'idle');
+  assert.equal(statuses.at(-1).text, TEXT.stoppedEarly);
+  // It was used up: the next recording runs normally.
+  const next = fakePort();
+  const done = r.start({ via: 'usb', product: 'brain', port: next });
+  await tick();
+  assert.equal(r.state, 'recording');
+  r.stop();
+  assert.equal((await done).kind, 'stopped');
+});
+
+test('a Stop for a recording that never started is cleared and does not end the next one', async () => {
+  const { r, statuses } = recorder();
+  r.stop();
+  r.clearEarlyStop(); // the picker was cancelled, so start() never ran
+  const port = fakePort();
+  const done = r.start({ via: 'usb', product: 'brain', port });
+  await tick();
+  assert.equal(r.state, 'recording');
+  for (const l of autopath(2)) port.push(packet('sout', `${l}\n`));
+  await done;
+  assert.ok(!statuses.some((s) => s.text === TEXT.stoppedEarly));
+  assert.equal(r.file.lines.length, autopath(2).length);
+});

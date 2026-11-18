@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import {
   MODES, slot4Mode, slotModes, modeAvailable, buildCatalog, olderList, cleanupPlan, validateKeepName, buildTitle,
   slotList, progressText, skippedText, idleUploadText, resultText, runSlotUploads,
-  downloadPublished, downloadLatest, cleanupStored, loadBuild, listStored, getPicked, setPicked,
+  downloadByTag, downloadLatest, cleanupStored, KEPT_UNREADABLE_TEXT, loadBuild, listStored, getPicked, setPicked,
   setKept, getKept, removeKept, loadFullBuilds, loadPublished, loadBuildByTag,
 } from '../releases.js';
 
@@ -49,6 +49,19 @@ test('slot 4 resolves to Cascade Only, else Auto Pathing, else absent', () => {
   const none = makeBuild('build-300-aaaaaaa');
   assert.equal(slotModes(none)[3].present, false);
   assert.equal(slotModes(none)[3].label, 'Cascade Only');
+});
+
+test('from Build 437 an autopath file is the Cascade Only program', () => {
+  const b437 = makeBuild('build-437-a4bd37d', ['autopath-hot.package.bin']);
+  const m = slot4Mode(b437);
+  assert.deepEqual([m.id, m.label, m.name, m.hot], ['cascade', 'Cascade Only', 'Scourge Cascade', 'autopath-hot.package.bin']);
+  assert.deepEqual(slotModes(b437)[3].present, true);
+  assert.equal(modeAvailable(b437, 'cascade'), true);
+  const b436 = makeBuild('build-436-aaaaaaa', ['autopath-hot.package.bin']);
+  assert.equal(slot4Mode(b436).id, 'autopath');
+  assert.equal(slot4Mode(makeBuild('build-1000-aaaaaaa', ['autopath-hot.package.bin'])).id, 'cascade');
+  // A cascade file still wins, and its own file is used.
+  assert.equal(slot4Mode(makeBuild('build-437-a4bd37d', ['autopath-hot.package.bin', 'cascade-hot.package.bin'])).hot, 'cascade-hot.package.bin');
 });
 
 test('cascade wins when a release lists both slot 4 files', () => {
@@ -182,10 +195,23 @@ test('cleanup deletes nothing while any list is unknown', () => {
 
 /* ----- storage and downloads ----- */
 
-function serveRelease(builds, { rate = false } = {}) {
-  // builds: [{tag, files, release}] published newest first; ids are 'tag/name'.
-  globalThis.fetch = async (url, opts = {}) => {
+const RELAY = 'https://relay.example';
+const MANIFEST = 'https://raw.githubusercontent.com/Whyater/40217S-Uploader/main/uploader.json';
+
+// builds: [{release, files}] published newest first. newest is served at ./build/, the
+// tags in bundled at ./build/<tag>/ (listed in ./build/builds.json), and every build
+// through the relay's /asset route. calls records each URL asked for.
+function serveRelease(builds, { rate = false, bundled = [], newest = null, relay = true, fullBody = null } = {}) {
+  const calls = [];
+  const byTag = (t) => builds.find((x) => x.release.tag === t);
+  const fileOf = (b, name) => {
+    if (!b) return new Response('no', { status: 404 });
+    if (name === 'release.json') return new Response(JSON.stringify(b.release));
+    return b.files[name] ? new Response(b.files[name]) : new Response('no', { status: 404 });
+  };
+  globalThis.fetch = async (url) => {
     url = String(url);
+    calls.push(url);
     if (url.includes('/releases?per_page=100')) {
       if (rate) return new Response('{}', { status: 403, headers: { 'x-ratelimit-remaining': '0' } });
       return new Response(JSON.stringify(builds.map((b, i) => ({
@@ -193,40 +219,84 @@ function serveRelease(builds, { rate = false } = {}) {
         assets: [...Object.keys(b.files), 'release.json'].map((n) => ({ name: n, id: `${b.release.tag}~${n}` })),
       }))));
     }
-    const m = /releases\/assets\/(.+)$/.exec(url);
-    if (m) {
-      assert.equal(opts.headers.Accept, 'application/octet-stream');
-      const [tag, name] = m[1].split('~');
-      const b = builds.find((x) => x.release.tag === tag);
-      if (name === 'release.json') return new Response(JSON.stringify(b.release));
-      return b.files[name] ? new Response(b.files[name]) : new Response('no', { status: 404 });
+    if (url.includes('full-builds.json')) return new Response(fullBody != null ? fullBody : JSON.stringify({ version: 1, builds: full }));
+    if (url.startsWith(MANIFEST)) return new Response(JSON.stringify({ version: '2.9.0', results_url: `${RELAY}/results` }));
+    if (url.startsWith(`${RELAY}/asset?`)) {
+      if (!relay) throw new TypeError('Failed to fetch');
+      const q = new URL(url).searchParams;
+      return fileOf(byTag(q.get('tag')), q.get('name'));
     }
-    if (url.includes('full-builds.json')) return new Response(JSON.stringify({ version: 1, builds: full }));
+    if (url === './build/builds.json') return new Response(JSON.stringify({ version: 1, newest, builds: bundled }));
+    const m = /^\.\/build\/(build-[^/]+)\/(.+)$/.exec(url);
+    if (m) return bundled.includes(m[1]) ? fileOf(byTag(m[1]), m[2]) : new Response('no', { status: 404 });
+    if (url.startsWith('./build/') && newest) return fileOf(byTag(newest), url.slice('./build/'.length));
     return new Response('no', { status: 404 });
   };
+  return calls;
 }
 
-test('published build downloads, verifies, and becomes the picked build', async () => {
-  const b = makeBuild('build-430-ddddddd', ['cascade-hot.package.bin']);
-  serveRelease([b]);
-  const list = await loadPublished();
-  assert.equal(list[0].tag, 'build-430-ddddddd');
-  assert.ok(list[0].assets['release.json']);
+test('the newest comes from build/, a bundled full build from build/<tag>/, anything else from the relay', async () => {
+  const newest = makeBuild('build-437-1111111');
+  const fullB = makeBuild('build-435-eeeeeee', ['cascade-hot.package.bin']);
+  const older = makeBuild('build-300-aaaaaaa', ['autopath-hot.package.bin']);
+  const opts = { newest: 'build-437-1111111', bundled: ['build-435-eeeeeee'] };
+  const src = [];
+  const onSource = (s) => src.push(s);
+
+  let calls = serveRelease([newest, fullB, older], opts);
+  await downloadByTag('build-437-1111111', { newestTag: 'build-437-1111111', onSource });
+  assert.ok(calls.includes('./build/hot.package.bin'));
+  assert.ok(!calls.some((u) => u.startsWith('http')), 'the newest never leaves this site');
+
+  calls = serveRelease([newest, fullB, older], opts);
   const seen = [];
-  await downloadPublished(list[0], (p) => seen.push(p.done));
+  await downloadByTag('build-435-eeeeeee', { newestTag: 'build-437-1111111', onSource, onProgress: (p) => seen.push(p.done) });
   assert.deepEqual(seen, [1, 2, 3, 4]);
-  assert.equal(await getPicked(), 'build-430-ddddddd');
-  assert.deepEqual((await loadBuild()).files['cascade-hot.package.bin'], b.files['cascade-hot.package.bin']);
+  assert.ok(calls.includes('./build/build-435-eeeeeee/release.json'));
+  assert.ok(calls.includes('./build/build-435-eeeeeee/cascade-hot.package.bin'));
+  assert.ok(!calls.some((u) => u.startsWith('http')), 'a bundled build never leaves this site');
+  assert.equal(await getPicked(), 'build-435-eeeeeee');
+  assert.deepEqual((await loadBuild()).files['cascade-hot.package.bin'], fullB.files['cascade-hot.package.bin']);
+
+  calls = serveRelease([newest, fullB, older], opts);
+  await downloadByTag('build-300-aaaaaaa', { newestTag: 'build-437-1111111', onSource });
+  const relayCalls = calls.filter((u) => u.startsWith(`${RELAY}/asset?`));
+  assert.deepEqual(relayCalls.map((u) => new URL(u).searchParams.get('name')).sort(),
+    ['autopath-hot.package.bin', 'cold.package.bin', 'hot.package.bin', 'project.pros', 'release.json']);
+  assert.ok(relayCalls.every((u) => new URL(u).searchParams.get('tag') === 'build-300-aaaaaaa'));
+  assert.ok(!calls.some((u) => /api\.github\.com|releases\/assets|releases\/download/.test(u)), 'never asks GitHub for the files');
+  assert.equal(await getPicked(), 'build-300-aaaaaaa');
+
+  assert.deepEqual(src, ['newest', 'bundled', 'relay']);
+  assert.deepEqual((await listStored()).sort(), ['build-300-aaaaaaa', 'build-435-eeeeeee', 'build-437-1111111']);
 });
 
-test('a corrupted published file is rejected and the picked build is unchanged', async () => {
+test('a relay that does not answer gives the plain message and changes nothing', async () => {
+  const good = makeBuild('build-430-ddddddd');
+  serveRelease([good], { bundled: ['build-430-ddddddd'] });
+  await downloadByTag('build-430-ddddddd');
+  serveRelease([makeBuild('build-300-aaaaaaa')], { relay: false });
+  await assert.rejects(downloadByTag('build-300-aaaaaaa'),
+    { message: "Older builds need the team's relay, which didn't answer. Full builds still work." });
+  assert.equal(await getPicked(), 'build-430-ddddddd');
+  assert.deepEqual(await listStored(), ['build-430-ddddddd']);
+});
+
+test('a build not bundled on this site goes to the relay even if it is a full build', async () => {
+  const b = makeBuild('build-420-bbbbbbb');
+  const calls = serveRelease([b], { bundled: [] });
+  await downloadByTag('build-420-bbbbbbb', { newestTag: 'build-437-1111111' });
+  assert.ok(calls.some((u) => u.startsWith(`${RELAY}/asset?tag=build-420-bbbbbbb&name=release.json`)));
+});
+
+test('a corrupted file is rejected and the picked build is unchanged', async () => {
   const good = makeBuild('build-430-ddddddd');
   serveRelease([good]);
-  await downloadPublished((await loadPublished())[0]);
+  await downloadByTag('build-430-ddddddd');
   const bad = makeBuild('build-420-bbbbbbb');
   const served = { release: bad.release, files: { ...bad.files, 'cold.package.bin': enc('corrupt') } };
   serveRelease([served]);
-  await assert.rejects(downloadPublished((await loadPublished())[0]), /cold\.package\.bin failed its SHA-256 check/);
+  await assert.rejects(downloadByTag('build-420-bbbbbbb'), /cold\.package\.bin failed its SHA-256 check/);
   assert.equal((await loadBuild()).release.tag, 'build-430-ddddddd');
   assert.deepEqual(await listStored(), ['build-430-ddddddd']);
 });
@@ -234,8 +304,20 @@ test('a corrupted published file is rejected and the picked build is unchanged',
 test('release.json for another tag is refused', async () => {
   const b = makeBuild('build-430-ddddddd');
   serveRelease([b]);
-  const entry = { ...(await loadPublished())[0], tag: 'build-999-0000000' };
-  await assert.rejects(downloadPublished(entry), /different build/);
+  const real = globalThis.fetch;
+  // Asked for build-999, the relay answers with build-430's release.json.
+  globalThis.fetch = async (url) => (String(url).includes('tag=build-999-0000000&name=release.json')
+    ? new Response(JSON.stringify(b.release)) : real(url));
+  await assert.rejects(downloadByTag('build-999-0000000'), /different build/);
+  assert.deepEqual(await listStored(), []);
+});
+
+test('a missing file on the relay says which', async () => {
+  const b = makeBuild('build-430-ddddddd');
+  const thin = { release: b.release, files: { ...b.files } };
+  delete thin.files['project.pros'];
+  serveRelease([thin]);
+  await assert.rejects(downloadByTag('build-430-ddddddd'), /project\.pros is missing from the release/);
 });
 
 test('rate limit gives a plain message', async () => {
@@ -258,6 +340,58 @@ test('full-builds list is kept for offline use', async () => {
   assert.equal((await loadFullBuilds()).builds, null);
 });
 
+test('full-builds lists the app cannot trust are refused and the saved copy stays', async () => {
+  serveRelease([]);
+  await loadFullBuilds();
+  for (const body of [
+    JSON.stringify({ version: 1, builds: [] }),
+    JSON.stringify({ builds: full }),
+    JSON.stringify({ version: 2, builds: full }),
+    JSON.stringify({ version: 1, builds: [{ tag: 'latest' }, { tag: 'build-1-ABCDEFG' }, { tag: 'v2' }, { note: 'x' }] }),
+    JSON.stringify({ version: 1 }),
+    '<html>sign in</html>',
+  ]) {
+    serveRelease([], { fullBody: body });
+    const r = await loadFullBuilds();
+    assert.equal(r.stale, true, body);
+    assert.equal(r.builds.length, 5, body);
+  }
+  // Offline afterwards, the good copy is what is left.
+  globalThis.fetch = async () => { throw new TypeError('Failed to fetch'); };
+  assert.equal((await loadFullBuilds()).builds.length, 5);
+});
+
+test('full-builds entries: bad tags skipped, each tag once (first wins), highest first', async () => {
+  serveRelease([], { fullBody: JSON.stringify({ version: 1, builds: [
+    { tag: 'build-300-aaaaaaa', note: ' first ' }, { tag: 'build-12-abcdef' }, { tag: 'build-420-bbbbbbb' },
+    { tag: 'build-300-aaaaaaa', note: 'second' }, { tag: 'build-1234567890-aaaaaaa' },
+  ] }) });
+  const r = await loadFullBuilds();
+  assert.deepEqual(r.builds, [{ tag: 'build-420-bbbbbbb', note: '' }, { tag: 'build-300-aaaaaaa', note: 'first' }]);
+});
+
+test('an unreadable kept list is backed up before it is written over', async () => {
+  const c = await caches.open('scourge-meta');
+  await c.put('kept', new Response('{"build-1-aaaaaaa": "One"'));
+  assert.equal(await getKept(), null);
+  await setKept('build-2-bbbbbbb', 'Two');
+  assert.equal(await (await c.match('kept.bak')).text(), '{"build-1-aaaaaaa": "One"');
+  assert.deepEqual(await getKept(), { 'build-2-bbbbbbb': 'Two' });
+});
+
+test('an unreadable kept list that cannot be backed up is not written over', async () => {
+  const c = await caches.open('scourge-meta');
+  await c.put('kept', new Response('???'));
+  const real = caches.open.bind(caches);
+  caches.open = async (n) => {
+    const x = await real(n);
+    return { ...x, put: async (k, v) => { if (String(k) === 'kept.bak') throw new Error('full'); return x.put(k, v); } };
+  };
+  await assert.rejects(setKept('build-2-bbbbbbb', 'Two'), { message: KEPT_UNREADABLE_TEXT });
+  caches.open = real;
+  assert.equal(await (await c.match('kept')).text(), '???');
+});
+
 test('kept names persist and can be removed', async () => {
   assert.deepEqual(await getKept(), {});
   await setKept('build-1-aaaaaaa', 'One');
@@ -274,8 +408,7 @@ test('kept names persist and can be removed', async () => {
 async function storeAll(tags) {
   const builds = tags.map((t) => makeBuild(t));
   serveRelease(builds);
-  const list = await loadPublished();
-  for (const t of [...tags].reverse()) await downloadPublished(list.find((p) => p.tag === t));
+  for (const t of [...tags].reverse()) await downloadByTag(t);
 }
 
 test('cleanupStored removes only unprotected builds after lists are known', async () => {

@@ -2,8 +2,8 @@ import { support, requestBrain, knownBrain, openBrain, closeBrain } from './tran
 import {
   slotModes, shortTag, buildTitle, buildCatalog, olderList, validateKeepName, idleUploadText, progressText,
   runSlotUploads, resultText, lostText, erasedSlots,
-  checkLatest, downloadLatest, downloadPublished, loadBuild, loadBuildByTag, listStored, setPicked,
-  getKept, setKept, removeKept, loadFullBuilds, loadPublished, cleanupStored,
+  checkLatest, downloadByTag, loadBuild, loadBuildByTag, listStored, setPicked,
+  getKept, setKept, removeKept, KEPT_RESET_TEXT, KEPT_UNREADABLE_TEXT, loadFullBuilds, loadPublished, cleanupStored,
 } from './releases.js';
 import { queryBrain, uploadProgram } from './protocol/index.js';
 import { Recorder, requestRecordPort, knownRecordPort } from './record.js';
@@ -345,16 +345,12 @@ async function downloadTag(tag) {
   S.catalogError = '';
   render();
   try {
-    let b;
-    if (tag === S.newestTag) {
-      log(`Downloading ${shortTag(tag)} (bundled)`);
-      b = await downloadLatest(({ file, done, total }) => log(`Downloaded ${file} (${done} of ${total})`));
-    } else {
-      const entry = (await publishedList()).find((p) => p.tag === tag);
-      if (!entry) throw new Error(`${shortTag(tag)} is not in the published list.`);
-      log(`Downloading ${shortTag(tag)} from GitHub`);
-      b = await downloadPublished(entry, ({ file, done, total }) => log(`Downloaded ${file} (${done} of ${total})`));
-    }
+    const from = { newest: 'the newest build on this site', bundled: 'a full build on this site', relay: "the team's relay" };
+    const b = await downloadByTag(tag, {
+      newestTag: S.newestTag,
+      onSource: (src) => log(`Downloading ${shortTag(tag)} from ${from[src]}`),
+      onProgress: ({ file, done, total }) => log(`Downloaded ${file} (${done} of ${total})`),
+    });
     S.build = b;
     S.offline = false;
     renderNet();
@@ -543,11 +539,13 @@ el.keepForm.addEventListener('submit', async (e) => {
   const v = validateKeepName(el.keepName.value);
   if (!v.ok) { el.keepError.textContent = v.message; el.keepError.hidden = false; return; }
   try {
+    const damaged = (await getKept()) === null;
     S.kept = await setKept(S.build.release.tag, v.value);
     log(`Kept ${shortTag(S.build.release.tag)} as "${v.value}"`);
+    if (damaged) { S.result = { kind: 'warn', text: KEPT_RESET_TEXT }; log(KEPT_RESET_TEXT, 'error'); }
     el.keepDlg.close();
   } catch (err) {
-    el.keepError.textContent = "Couldn't save the name on this device.";
+    el.keepError.textContent = err && err.message === KEPT_UNREADABLE_TEXT ? err.message : "Couldn't save the name on this device.";
     el.keepError.hidden = false;
   }
   render();
@@ -594,8 +592,8 @@ function projectInfo(bytes) {
 // One place to adapt if the protocol module's options change.
 // Matches the desktop apps: `pros upload --after screen`, and say yes when
 // PROS wants to clear out old libraries to make room.
-function doUpload(port, job, slot, name, onProgress, onErased) {
-  const f = S.build.files;
+function doUpload(port, build, job, slot, name, onProgress, onErased) {
+  const f = build.files;
   const project = projectInfo(f[job.pros]);
   return uploadProgram(port, {
     bin: f[job.hot],
@@ -712,7 +710,7 @@ async function onUpload() {
   await withBrain(`Uploading ${label}. Keep the cable plugged in.`, label, async (port) => {
     const res = await runSlotUploads(build, async (mode, ctx) => {
       log(`Slot ${mode.slot}: ${mode.label}, name "${mode.name}"`);
-      await doUpload(port, { hot: mode.hot, cold: 'cold.package.bin', pros: 'project.pros' }, mode.slot, mode.name, onStage, (programs) => {
+      await doUpload(port, build, { hot: mode.hot, cold: 'cold.package.bin', pros: 'project.pros' }, mode.slot, mode.name, onStage, (programs) => {
         log(`PROS removed: ${programs.join(', ')}`);
         ctx.erased(programs);
       });
@@ -732,12 +730,13 @@ el.upload.addEventListener('click', onUpload);
 
 async function onTester() {
   if (S.busy || S.downloading || S.recording || !testerOk()) return;
+  const build = S.build;
   el.tests.open = true;
   const label = 'Scourge Tester';
   await withBrain(`Uploading the Scourge Tester to slot ${TESTER.slot}. Keep the cable plugged in.`, `${label}, slot ${TESTER.slot}`, async (port) => {
     const erased = [];
     try {
-      await doUpload(port, { hot: TESTER.files[0], cold: TESTER.files[1], pros: TESTER.files[2] }, TESTER.slot, TESTER.name, onStage, (programs) => {
+      await doUpload(port, build, { hot: TESTER.files[0], cold: TESTER.files[1], pros: TESTER.files[2] }, TESTER.slot, TESTER.name, onStage, (programs) => {
         log(`PROS removed: ${programs.join(', ')}`);
         erased.push(...programs);
       });
@@ -805,6 +804,7 @@ async function onRecord() {
     setRecLine('bad', (e && e.message) || 'Could not start recording.');
     log(`Recording failed: ${(e && e.message) || e}`, 'error');
   } finally {
+    recorder.clearEarlyStop(); // a Stop that never reached start() must not end the next recording
     await releaseAwake();
     S.recording = false;
     S.stopping = false;

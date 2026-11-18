@@ -382,6 +382,62 @@ async function handleSim(request, env, tag) {
   return jsonResponse({ ok: true, tag }, 200);
 }
 
+/* ---------- release files for the web uploader ---------- */
+
+// GitHub's release downloads send no CORS headers, so the web uploader gets older builds through here. Releases
+// are public, so no code is needed; the uploader checks every file against the build's own release.json.
+const ASSET_REPOSITORY = "Whyater/40217S-Uploader";
+const ASSET_TAG = /^build-\d{1,9}-[0-9a-f]{7}$/;
+const ASSET_NAMES = new Set([
+  "release.json", "hot.package.bin", "cold.package.bin", "project.pros",
+  "tester-hot.package.bin", "tester-cold.package.bin", "tester-project.pros",
+  "auton-test-hot.package.bin", "drive-test-hot.package.bin", "autopath-hot.package.bin", "cascade-hot.package.bin",
+]);
+const MAX_ASSET_BYTES = 8_000_000; // the largest file, a cold package, is about 2.3 MB
+const ASSET_CORS_HEADERS = {
+  "Access-Control-Allow-Origin": PAGES_ORIGIN,
+  "Access-Control-Allow-Methods": "GET, OPTIONS",
+};
+
+function assetError(payload, status, cache = "no-store") {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json", "Cache-Control": cache, ...ASSET_CORS_HEADERS },
+  });
+}
+
+async function handleAsset(request, url) {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: { ...ASSET_CORS_HEADERS, "Access-Control-Max-Age": "86400" } });
+  }
+  if (request.method !== "GET") return assetError({ ok: false, error: "method not allowed" }, 405);
+  const tag = url.searchParams.get("tag") ?? "";
+  const name = url.searchParams.get("name") ?? "";
+  if (!ASSET_TAG.test(tag) || !ASSET_NAMES.has(name)) return assetError({ ok: false, error: "bad tag or file name" }, 400);
+
+  let upstream;
+  try {
+    upstream = await fetch(`https://github.com/${ASSET_REPOSITORY}/releases/download/${tag}/${name}`, {
+      headers: { "User-Agent": "scourge-results-relay" },
+      redirect: "follow",
+    });
+  } catch {
+    return assetError({ ok: false, error: "GitHub did not answer" }, 502);
+  }
+  // A missing build or file stays missing for a while; a short cache keeps retries cheap.
+  if (upstream.status === 404) return assetError({ ok: false, error: "no such file" }, 404, "public, max-age=60");
+  if (!upstream.ok) return assetError({ ok: false, error: `GitHub answered ${upstream.status}` }, 502);
+  const length = Number(upstream.headers.get("Content-Length"));
+  if (Number.isFinite(length) && length > MAX_ASSET_BYTES) return assetError({ ok: false, error: "file too large" }, 502);
+  const bytes = await upstream.arrayBuffer();
+  if (bytes.byteLength > MAX_ASSET_BYTES) return assetError({ ok: false, error: "file too large" }, 502);
+  // Release files rarely change, and the uploader hash-checks each one, so a stale copy can fail but never slip in.
+  return new Response(bytes, {
+    status: 200,
+    headers: { "Content-Type": "application/octet-stream", "Cache-Control": "public, max-age=3600", ...ASSET_CORS_HEADERS },
+  });
+}
+
 /* ---------- alliance partners ---------- */
 
 function corsJson(payload, status, cors) {
@@ -728,6 +784,7 @@ export default {
     }
     if (url.pathname === "/plans") return handlePlans(request, env);
     if (url.pathname === "/results") return handleResults(request, env);
+    if (url.pathname === "/asset") return handleAsset(request, url);
     return jsonResponse({ ok: false, error: "not found" }, 404);
   },
 };

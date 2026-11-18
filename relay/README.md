@@ -1,6 +1,6 @@
 # Results relay
 
-This Cloudflare Worker does four jobs for the uploaders:
+This Cloudflare Worker does five jobs for the uploaders:
 
 - `POST /results` accepts robot test results and files them as GitHub issues in
   the team's data repository. The GitHub token stays in the Worker secret store,
@@ -10,6 +10,8 @@ This Cloudflare Worker does four jobs for the uploaders:
   team code. A plan never changes a route, the map data, or robot code.
 - `/partners` and `/partner/map` share the match autonomous prediction with
   alliance partners, each with their own password.
+- `GET /asset` passes release files to the web uploader, which can't read
+  GitHub's release downloads directly (they send no CORS headers).
 
 ## Routes
 
@@ -30,6 +32,15 @@ This Cloudflare Worker does four jobs for the uploaders:
   titled `Proposed auto plan: <name>`, labelled `proposed-auto-plan` when the label
   exists. Answers `201 {ok, issue}`.
 - `OPTIONS /plans`: CORS preflight.
+- `GET /asset?tag=<tag>&name=<file>`: fetches
+  `https://github.com/Whyater/40217S-Uploader/releases/download/<tag>/<file>` and
+  returns it to `https://whyater.github.io`. No code is needed, since releases are
+  public, and the web uploader checks every file against that build's
+  `release.json`. `tag` must look like `build-432-53fdd69` and `name` must be one of
+  the release files (`release.json`, the hot, cold and project files for each
+  mode, and the tester's three). Anything else is a 400, a missing file a 404, a
+  GitHub failure or a file over 8 MB a 502. Files are cached for an hour.
+- `OPTIONS /asset`: CORS preflight.
 
 `GET /map` answers `{ok, sim, recorded, recorded_updated, sim_is_latest}`. `sim`
 and `recorded` are null when nothing is stored. A wrong or missing team code gets

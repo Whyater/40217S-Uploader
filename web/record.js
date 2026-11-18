@@ -576,6 +576,7 @@ export class Recorder {
     this.sending = false;
     this.live = null;
     this.timers = new Set();
+    this.earlyStop = false; // Stop tapped while the page was still finding the port
   }
 
   get tally() { return this.live ? this.live.tally : (this.file ? this.file.tally : new ResultsTally()); }
@@ -625,7 +626,9 @@ export class Recorder {
   async start(link) {
     if (this.state !== 'idle') return null;
     this.state = 'recording';
-    this.stopRequested = false;
+    // A Stop tapped before start() still counts: it ends the recording as soon as the port opens.
+    this.stopRequested = this.earlyStop;
+    this.earlyStop = false;
     this.live = { id: fileId(new Date(this.now())), lines: [], tally: new ResultsTally() };
     this.baseText = TEXT.neutral;
     this.lineText = null;
@@ -651,12 +654,16 @@ export class Recorder {
   }
 
   stop() {
+    if (this.state === 'idle') { this.earlyStop = true; return; }
     if (this.state !== 'recording') return;
     this.state = 'stopping';
     this.stopRequested = true;
     this.status(TEXT.stopping, 'working');
     if (this.cancelRead) this.cancelRead();
   }
+
+  // The page calls this when a recording it was setting up never reached start().
+  clearEarlyStop() { this.earlyStop = false; }
 
   async readStream(port, hintIfQuiet) {
     const reader = port.readable.getReader();

@@ -1,0 +1,17 @@
+{
+  "tag": "build-440-78a97ee",
+  "title": "Build 440 (78a97ee)",
+  "notes": "Built from 78a97ee: Build 440",
+  "built_at": "2026-11-18T19:53:49Z",
+  "sha256": {
+    "hot.package.bin": "c5e3ea8314bc60afd7d4c3d0d660121736920879aef219a57e2f09d58915c681",
+    "cold.package.bin": "b28fcf607e274ac602351fa15b6dec116d64da9863784c7d623d07cbca4e31ad",
+    "project.pros": "3334ee11d05552c44076bd6a7b41db6058a44761af0fd01a6d67eedcc6868294",
+    "tester-hot.package.bin": "ff81b3c65a1fdeefe8c8f3307c5b73ebe50bc04e1231730219c6505f3c1cfe27",
+    "tester-cold.package.bin": "b28fcf607e274ac602351fa15b6dec116d64da9863784c7d623d07cbca4e31ad",
+    "tester-project.pros": "b3895679e64c30a5e99ed0787b4d8808ed263a8d706730221e6f7f5f9cc904da",
+    "auton-test-hot.package.bin": "f018c67989bbb00b5d9e320f3740e84e42afd8120b65095dde1f8550973e8be5",
+    "drive-test-hot.package.bin": "d29010c63640f14371767b55fb0dbbda6e28ed2ba852ef3394dfe4e32fa370fe",
+    "cascade-hot.package.bin": "87303402df31a44521ae71c6750691f94cd8b29d0ba5d2a565f41832b268708c"
+  }
+}

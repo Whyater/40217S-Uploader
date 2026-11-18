@@ -393,6 +393,7 @@ const ASSET_NAMES = new Set([
   "tester-hot.package.bin", "tester-cold.package.bin", "tester-project.pros",
   "auton-test-hot.package.bin", "drive-test-hot.package.bin", "autopath-hot.package.bin", "cascade-hot.package.bin",
 ]);
+const ASSET_RETRY_MS = 800;
 const MAX_ASSET_BYTES = 8_000_000; // the largest file, a cold package, is about 2.3 MB
 const ASSET_CORS_HEADERS = {
   "Access-Control-Allow-Origin": PAGES_ORIGIN,
@@ -415,12 +416,24 @@ async function handleAsset(request, url) {
   const name = url.searchParams.get("name") ?? "";
   if (!ASSET_TAG.test(tag) || !ASSET_NAMES.has(name)) return assetError({ ok: false, error: "bad tag or file name" }, 400);
 
+  // A release file never changes under its tag, so a copy kept in Cloudflare's cache answers repeat
+  // downloads without asking GitHub again (GitHub rate-limits anonymous downloads from shared IPs).
+  const cacheKey = new Request(`https://asset-cache.invalid/${tag}/${name}`);
+  const cache = typeof caches !== "undefined" ? caches.default : null;
+  if (cache) {
+    const hit = await cache.match(cacheKey).catch(() => undefined);
+    if (hit) return hit;
+  }
+
+  const source = `https://github.com/${ASSET_REPOSITORY}/releases/download/${tag}/${name}`;
   let upstream;
   try {
-    upstream = await fetch(`https://github.com/${ASSET_REPOSITORY}/releases/download/${tag}/${name}`, {
-      headers: { "User-Agent": "scourge-results-relay" },
-      redirect: "follow",
-    });
+    upstream = await fetchAssetOnce(source);
+    // One retry after a short pause when GitHub says too many requests or has a hiccup.
+    if (upstream.status === 429 || upstream.status >= 500) {
+      await new Promise((r) => setTimeout(r, ASSET_RETRY_MS));
+      upstream = await fetchAssetOnce(source);
+    }
   } catch {
     return assetError({ ok: false, error: "GitHub did not answer" }, 502);
   }
@@ -432,10 +445,16 @@ async function handleAsset(request, url) {
   const bytes = await upstream.arrayBuffer();
   if (bytes.byteLength > MAX_ASSET_BYTES) return assetError({ ok: false, error: "file too large" }, 502);
   // Release files rarely change, and the uploader hash-checks each one, so a stale copy can fail but never slip in.
-  return new Response(bytes, {
+  const response = new Response(bytes, {
     status: 200,
-    headers: { "Content-Type": "application/octet-stream", "Cache-Control": "public, max-age=3600", ...ASSET_CORS_HEADERS },
+    headers: { "Content-Type": "application/octet-stream", "Cache-Control": "public, max-age=86400", ...ASSET_CORS_HEADERS },
   });
+  if (cache) await cache.put(cacheKey, response.clone()).catch(() => {});
+  return response;
+}
+
+function fetchAssetOnce(source) {
+  return fetch(source, { headers: { "User-Agent": "scourge-results-relay" }, redirect: "follow" });
 }
 
 /* ---------- alliance partners ---------- */

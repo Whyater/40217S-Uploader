@@ -1186,3 +1186,35 @@ test("other methods on /asset are refused", async () => {
   const response = await worker.fetch(new Request(assetUrl("build-432-53fdd69", "hot.package.bin"), { method: "POST", body: "x" }), {});
   assert.equal(response.status, 405);
 });
+
+test("GET /asset retries once when GitHub answers 429", async () => {
+  let calls = 0;
+  const response = await withGitHub(async () => {
+    calls += 1;
+    return calls === 1 ? new Response("slow down", { status: 429 }) : new Response(new Uint8Array([7]), { status: 200 });
+  }, () => worker.fetch(new Request(assetUrl("build-437-a4bd37d", "release.json")), {}));
+  assert.equal(response.status, 200);
+  assert.equal(calls, 2);
+});
+
+test("GET /asset serves a cached copy without asking GitHub again", async () => {
+  const store = new Map();
+  globalThis.caches = { default: {
+    match: async (req) => { const r = store.get(req.url); return r ? r.clone() : undefined; },
+    put: async (req, res) => { store.set(req.url, res); },
+  } };
+  try {
+    let calls = 0;
+    const github = async () => { calls += 1; return new Response(new Uint8Array([1, 2]), { status: 200 }); };
+    const url = assetUrl("build-437-a4bd37d", "hot.package.bin");
+    const first = await withGitHub(github, () => worker.fetch(new Request(url), {}));
+    const second = await withGitHub(github, () => worker.fetch(new Request(url), {}));
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.deepEqual(new Uint8Array(await second.arrayBuffer()), new Uint8Array([1, 2]));
+    assert.equal(second.headers.get("Access-Control-Allow-Origin"), "https://whyater.github.io");
+    assert.equal(calls, 1);
+  } finally {
+    delete globalThis.caches;
+  }
+});

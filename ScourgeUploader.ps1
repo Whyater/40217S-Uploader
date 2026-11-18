@@ -87,11 +87,12 @@ $script:TesterAssetNames = @('tester-hot.package.bin', 'tester-cold.package.bin'
 # cold.package.bin and project.pros are shared. Each mode has its own fixed
 # slot and program name so the four sit on the brain side by side, and one
 # click uploads every program the picked build has, in slot order.
-# Slot 4 is the Cascade Only (lift-only troubleshooting) program in newer
-# builds. Older builds publish autopath-hot.package.bin there instead, and in
-# those slot 4 really is Auto Pathing. Resolve-SlotFour picks one per release.
+# Slot 4 is the Cascade Only (lift-only troubleshooting) program in newer builds,
+# published as cascade-hot.package.bin. Build 437 onward that program is already
+# slot 4 even when the release still ships it as autopath-hot.package.bin. Builds
+# before 437 shipped the real Auto Pathing program under that file name. Resolve-SlotFour
+# (shared code) decides which one a release has; this entry is the default "not in this build" row.
 $script:SlotFourNew = @{ Label = 'Cascade Only'; Asset = 'cascade-hot.package.bin'; Slot = 4; Name = 'Scourge Cascade' }
-$script:SlotFourOld = @{ Label = 'Auto Pathing'; Asset = 'autopath-hot.package.bin'; Slot = 4; Name = 'Scourge Auto Pathing' }
 $script:Modes = @(
     @{ Label = 'Competition'; Asset = 'hot.package.bin';            Slot = 1; Name = 'Scourge' },
     @{ Label = 'Auton Test';  Asset = 'auton-test-hot.package.bin'; Slot = 2; Name = 'Scourge Auton Test' },
@@ -150,6 +151,25 @@ $SharedCode = {
         if (($AssetName -like '*-test-hot.package.bin') -or ($AssetName -eq 'cascade-hot.package.bin')) { return Join-Path $Root ('modes\' + $AssetName) }
         if ($fileName -eq 'project.pros') { return Join-Path $assetRoot $fileName }
         return Join-Path $assetRoot ('bin\' + $fileName)
+    }
+
+    # Which slot 4 program a release has, from the asset names it lists (or the files a build folder holds)
+    # and its tag. Returns a mode entry (its Asset is the file to use) or $null when slot 4 is not in this build.
+    # Cascade Only file present: Cascade Only. Else autopath-hot.package.bin from build 437 on: still the
+    # Cascade Only program (those releases kept the old file name). Else the same file before 437: the real Auto Pathing.
+    function Resolve-SlotFour {
+        param([string[]]$Names = @(), [string]$Tag = '')
+        $names = @($Names)
+        if ($names -contains 'cascade-hot.package.bin') {
+            return @{ Label = 'Cascade Only'; Asset = 'cascade-hot.package.bin'; Slot = 4; Name = 'Scourge Cascade' }
+        }
+        if ($names -contains 'autopath-hot.package.bin') {
+            if ((Get-BuildNumber $Tag) -ge 437) {
+                return @{ Label = 'Cascade Only'; Asset = 'autopath-hot.package.bin'; Slot = 4; Name = 'Scourge Cascade' }
+            }
+            return @{ Label = 'Auto Pathing'; Asset = 'autopath-hot.package.bin'; Slot = 4; Name = 'Scourge Auto Pathing' }
+        }
+        return $null
     }
 
     # Build a small project folder for a test mode: the shared files plus the
@@ -1234,11 +1254,14 @@ $SharedCode = {
 
         # Test-mode hot files are optional the same way: older releases do not
         # list them, and a bad one only turns that mode off.
-        $modeNames = @('auton-test-hot.package.bin', 'drive-test-hot.package.bin', 'cascade-hot.package.bin', 'autopath-hot.package.bin')
+        $modeNames = @('auton-test-hot.package.bin', 'drive-test-hot.package.bin')
         $listedModes = @()
-        if ($null -ne $rel.Sha256) { $listedModes = @($modeNames | Where-Object { $rel.Sha256.ContainsKey($_) }) }
-        # Slot 4 is one program: Cascade Only when the release lists it, else Auto Pathing.
-        if ($listedModes -contains 'cascade-hot.package.bin') { $listedModes = @($listedModes | Where-Object { $_ -ne 'autopath-hot.package.bin' }) }
+        if ($null -ne $rel.Sha256) {
+            $listedModes = @($modeNames | Where-Object { $rel.Sha256.ContainsKey($_) })
+            # Slot 4 is one program, so only the file Resolve-SlotFour picks is fetched.
+            $slotFourPick = Resolve-SlotFour -Names @($rel.Sha256.Keys | ForEach-Object { [string]$_ }) -Tag ([string]$rel.Tag)
+            if ($null -ne $slotFourPick) { $listedModes += $slotFourPick.Asset }
+        }
 
         $projectDir = Get-BuildFolder -InstallDir $InstallDir -Tag $rel.Tag
         $haveAll = $true
@@ -2767,7 +2790,7 @@ $UploadBody   = { Invoke-RobotUpload -ProsExe $A.ProsExe -ProjectDir $A.ProjectD
 $RecordBody  = { Invoke-ProsRecording -ProsExe $A.ProsExe -WorkDir $A.WorkDir -FilePath $A.FilePath -Sync $Sync -Retry $A.Retry -ScriptPath $A.ScriptPath }
 # Waits a second (the link may not have dropped yet), then asks the brain for its system version. Through a
 # controller that goes over the radio, so it fails while the link is down; lsusb cannot tell.
-$LinkProbeBody = { Start-Sleep -Seconds 1; Invoke-Pros -ProsExe $A.ProsExe -Arguments 'v5 status --no-analytics --no-sentry' -WorkDir $A.WorkDir -TimeoutSec 15 -Sync $Sync -Quiet }
+$LinkProbeBody = { Start-Sleep -Seconds 1; Invoke-Pros -ProsExe $A.ProsExe -Arguments 'v5 status --no-analytics --no-sentry' -WorkDir $A.WorkDir -TimeoutSec $A.Timeout -Sync $Sync -Quiet }
 $LsusbBody    = { Invoke-Pros -ProsExe $A.ProsExe -Arguments 'lsusb --target v5 --no-analytics --no-sentry' -WorkDir $A.WorkDir -TimeoutSec 20 -Sync $Sync -Quiet }
 # The startup check also reads the full-builds list, so the drop-down can label the builds before any download.
 $CheckBody    = {
@@ -2859,25 +2882,13 @@ function Test-HaveCode {
            (Test-Path (Join-Path $script:BinDir 'cold.package.bin'))
 }
 
-# Which slot 4 program a release has. $Sha256 is the release.json fingerprint table (a hashtable) or $null.
-# Cascade Only wins when the release lists it, else Auto Pathing, else $null (slot 4 is not in this build).
-function Resolve-SlotFour {
-    param($Sha256 = $null)
-    if ($null -eq $Sha256) { return $null }
-    if ($Sha256.ContainsKey($script:SlotFourNew.Asset)) { return $script:SlotFourNew }
-    if ($Sha256.ContainsKey($script:SlotFourOld.Asset)) { return $script:SlotFourOld }
-    return $null
-}
-
 # The four slots for a downloaded build, in slot order: @{ Mode; Present }. A mode the build lacks stays in
-# the list with Present false (shown as "Not in this build"). Slot 4 is whichever of its two programs
-# the build folder holds, Cascade Only first.
+# the list with Present false (shown as "Not in this build"). Slot 4 comes from Resolve-SlotFour, fed the
+# files the build folder holds (the folder is named for the tag).
 function Get-BuildSlots {
     param([string]$Root = $script:ProjectDir)
-    $slotFour = $null
-    foreach ($e in @($script:SlotFourNew, $script:SlotFourOld)) {
-        if (Test-Path (Get-ReleaseAssetPath -Root $Root -AssetName $e.Asset)) { $slotFour = $e; break }
-    }
+    $held = @('cascade-hot.package.bin', 'autopath-hot.package.bin' | Where-Object { Test-Path (Get-ReleaseAssetPath -Root $Root -AssetName $_) })
+    $slotFour = Resolve-SlotFour -Names $held -Tag (Split-Path $Root -Leaf)
     $rows = New-Object System.Collections.Generic.List[object]
     for ($i = 0; $i -lt 3; $i++) {
         $m = $script:Modes[$i]
@@ -7355,6 +7366,22 @@ function Start-Upload {
 # Uploads the program at the run's current index. Competition goes up as the downloaded folder is; every
 # other mode uploads a staging copy with its own hot file swapped in.
 function Start-UploadStep {
+    try { Start-UploadStepBody } catch { Stop-UploadOnError $_ }
+}
+
+# An error inside a run step would leave Busy set with nothing running, so the window stays locked.
+# This ends the run as a failure of the current slot, which clears Busy and re-enables the button.
+function Stop-UploadOnError {
+    param($ErrorRecord)
+    $msg = [string]$ErrorRecord.Exception.Message
+    try { Add-LogText ('Error: ' + ($ErrorRecord | Out-String)) } catch { }
+    $run = $script:UploadRun
+    if ($null -eq $run) { return }
+    $i = [math]::Min([int]$run.Index, $run.Todo.Count - 1)
+    Stop-UploadRun -Failed $run.Todo[$i] -Reason ('Something went wrong: ' + $msg)
+}
+
+function Start-UploadStepBody {
     $run = $script:UploadRun
     $mode = $run.Todo[$run.Index]
     $count = $run.Todo.Count
@@ -7389,6 +7416,11 @@ function Start-UploadStep {
 
 # One slot finished (or failed). Moves on, retries once after a dropped link, or stops the run.
 function Complete-UploadStep {
+    param($Result)
+    try { Complete-UploadStepBody $Result } catch { Stop-UploadOnError $_ }
+}
+
+function Complete-UploadStepBody {
     param($Result)
     $run = $script:UploadRun
     $mode = $run.Todo[$run.Index]
@@ -7431,20 +7463,26 @@ function Start-LinkWait {
 }
 
 function Start-LinkProbe {
-    Start-BgJob $LinkProbeBody @{ ProsExe = $script:ProsExe; WorkDir = $InstallDir } {
+    # Each probe sleeps 1 s and may run up to its timeout, so the timeout is cut to what is left of the
+    # wait (10 s at most, as on the Mac) and the whole wait stays near LinkWaitSec.
+    $left = [int][math]::Floor(($script:UploadRun.Deadline - (Get-Date)).TotalSeconds) - 1
+    $probeSec = [math]::Max(2, [math]::Min(10, $left))
+    Start-BgJob $LinkProbeBody @{ ProsExe = $script:ProsExe; WorkDir = $InstallDir; Timeout = $probeSec } {
         param($r)
-        $run = $script:UploadRun
-        $slot = [int]$run.Todo[$run.Index].Slot
-        $answered = ((-not $r.StartError) -and (-not $r.TimedOut) -and ($r.ExitCode -eq 0) -and ([string]$r.Output -match 'System version:'))
-        if ($answered) {
-            Add-LogText ('[' + (Get-Date).ToString('HH:mm:ss') + '] Brain answered')
-            Start-UploadStep
-        } elseif ((Get-Date) -lt $run.Deadline) {
-            Start-LinkProbe
-        } else {
-            Add-LogText ('[' + (Get-Date).ToString('HH:mm:ss') + '] No answer from the brain after ' + $script:LinkWaitSec + ' s. Trying slot ' + $slot + ' anyway.')
-            Start-UploadStep
-        }
+        try {
+            $run = $script:UploadRun
+            $slot = [int]$run.Todo[$run.Index].Slot
+            $answered = ((-not $r.StartError) -and (-not $r.TimedOut) -and ($r.ExitCode -eq 0) -and ([string]$r.Output -match 'System version:'))
+            if ($answered) {
+                Add-LogText ('[' + (Get-Date).ToString('HH:mm:ss') + '] Brain answered')
+                Start-UploadStep
+            } elseif ((Get-Date) -lt $run.Deadline) {
+                Start-LinkProbe
+            } else {
+                Add-LogText ('[' + (Get-Date).ToString('HH:mm:ss') + '] No answer from the brain after ' + $script:LinkWaitSec + ' s. Trying slot ' + $slot + ' anyway.')
+                Start-UploadStep
+            }
+        } catch { Stop-UploadOnError $_ }
     }
 }
 
@@ -8912,7 +8950,7 @@ if ($SelfTest) {
                 $dirS = Join-Path $instSlot4 ('builds\' + $tg)
                 $hasC = Test-Path (Get-ReleaseAssetPath -Root $dirS -AssetName 'cascade-hot.package.bin')
                 $hasA = Test-Path (Get-ReleaseAssetPath -Root $dirS -AssetName 'autopath-hot.package.bin')
-                $resolved = Resolve-SlotFour $fpS
+                $resolved = Resolve-SlotFour -Names @($fpS.Keys | ForEach-Object { [string]$_ }) -Tag $tg
                 $gotLabel = ''
                 if ($null -ne $resolved) { $gotLabel = [string]$resolved.Label }
                 $slotsS = @(Get-BuildSlots -Root $dirS)
@@ -8925,7 +8963,28 @@ if ($SelfTest) {
                 if ($wantC) { & $expectB ((Test-Path (Join-Path $dirS 'modes\cascade-hot.package.bin')) -and (-not (Test-Path (Join-Path $dirS 'bin\cascade-hot.package.bin')))) ('slot 4 ' + $tg + ': the Cascade Only file belongs in modes, not bin') }
             }
             & $expectB (@(@($hostState.Hits) | Where-Object { $_ -like '*build-331-3131313/autopath-hot.package.bin*' }).Count -eq 0) 'slot 4: a release that lists Cascade Only should not download the Auto Pathing file'
-            & $expectB (($null -eq (Resolve-SlotFour $null)) -and ($null -eq (Resolve-SlotFour @{}))) 'slot 4: a release with no fingerprint table, or neither file, has no slot 4'
+            & $expectB (($null -eq (Resolve-SlotFour)) -and ($null -eq (Resolve-SlotFour -Names @() -Tag 'build-500-5050505'))) 'slot 4: a release with no slot 4 file has none'
+            # Build 437 onward ships the Cascade Only program under the old autopath file name.
+            $r436 = Resolve-SlotFour -Names @('autopath-hot.package.bin') -Tag 'build-436-4364364'
+            $r437 = Resolve-SlotFour -Names @('autopath-hot.package.bin') -Tag 'build-437-a4bd37d'
+            $r437c = Resolve-SlotFour -Names @('autopath-hot.package.bin', 'cascade-hot.package.bin') -Tag 'build-437-a4bd37d'
+            $rOdd = Resolve-SlotFour -Names @('autopath-hot.package.bin') -Tag 'not-a-build-tag'
+            & $expectB (($r436.Label -ceq 'Auto Pathing') -and ($r436.Name -ceq 'Scourge Auto Pathing') -and ($r436.Asset -ceq 'autopath-hot.package.bin')) 'slot 4: build 436 with the autopath file is the real Auto Pathing'
+            & $expectB (($r437.Label -ceq 'Cascade Only') -and ($r437.Name -ceq 'Scourge Cascade') -and ($r437.Asset -ceq 'autopath-hot.package.bin')) 'slot 4: build 437 with the autopath file is Cascade Only, using that file'
+            & $expectB (($r437c.Label -ceq 'Cascade Only') -and ($r437c.Asset -ceq 'cascade-hot.package.bin')) 'slot 4: the Cascade Only file wins when both are there'
+            & $expectB ($rOdd.Label -ceq 'Auto Pathing') 'slot 4: a tag with no build number keeps Auto Pathing'
+            # Download and folder slots go through the same rule: build 437 stores the autopath file and shows Cascade Only.
+            $t437 = 'build-437-a4bd37d'
+            $fp437 = @{}
+            foreach ($f in @($script:AssetNames + @('auton-test-hot.package.bin', 'drive-test-hot.package.bin', 'autopath-hot.package.bin'))) {
+                $good = $utf8.GetBytes($t437 + '|' + $f)
+                $hostState.Routes['/releases/download/' + $t437 + '/' + $f] = $good
+                $fp437[$f] = & $sha256Of $good
+            }
+            $rel437 = @{ Tag = $t437; Name = $t437; Notes = 'Built from abc1234: test'; BuiltAt = '2026-11-12T00:00:00Z'; Sha256 = $fp437 }
+            $got437 = Save-ReleaseBuild -Release $rel437 -ReleasesUrl $relUrl -InstallDir $instSlot4 -AssetNames $script:AssetNames
+            $slots437 = @(Get-BuildSlots -Root (Join-Path $instSlot4 ('builds\' + $t437)))
+            & $expectB (($got437.Status -eq 'downloaded') -and $slots437[3].Present -and ($slots437[3].Mode.Label -ceq 'Cascade Only') -and ($slots437[3].Mode.Asset -ceq 'autopath-hot.package.bin')) ('slot 4: build 437 should download the autopath file as Cascade Only, got ' + $got437.Status + ' / ' + $slots437[3].Mode.Label)
 
             # Four more pushes in one session (320 to 323); the session's last build, 323, is not listed yet.
             # Only the newest comes down. A build left from 2.7.0 (299) that nothing lists goes; the picked one stays.
@@ -9523,6 +9582,41 @@ if ($SelfTest) {
                 $r = & $runUpload { param($j, $n) if ($j.Kind -eq 'probe') { $silent } else { & $okRun } }
                 & $expectP (($r.Kinds -ceq 'upload probe upload probe upload probe upload') -and ($r.Status -ceq 'Uploaded Build 340 to slots 1, 2, 3, and 4. Run them from the brain screen.')) ('with no answer the next slot should be tried anyway, steps: ' + $r.Kinds + ' / ' + $r.Status)
                 $script:LinkWaitSec = 30
+                # An error inside a step must not leave the window locked: the run ends as a failure and Busy clears.
+                $savedOutcome = ${function:Get-UploadOutcome}; $savedProgress = ${function:Get-UploadProgressText}; $savedLog = ${function:Add-LogText}
+                try {
+                    $script:ConnState = 'brain'
+                    Set-SelectedBuild $tNew; Update-BuildInfo
+                    ${function:Get-UploadOutcome} = { throw 'injected outcome error' }
+                    $r = & $runUpload { param($j, $n) & $okRun }
+                    & $expectP ((-not $r.Busy) -and ($null -eq $script:UploadRun) -and $ui.UploadButton.Enabled -and ($r.Status -like 'Slot 1 failed: Something went wrong: injected outcome error*')) ('a throw while finishing a step should clear Busy, status: ' + $r.Status + ' busy ' + $r.Busy)
+                    ${function:Get-UploadOutcome} = $savedOutcome
+                    ${function:Get-UploadProgressText} = { throw 'injected progress error' }
+                    $r = & $runUpload { param($j, $n) & $okRun }
+                    & $expectP ((-not $r.Busy) -and ($null -eq $script:UploadRun) -and $ui.UploadButton.Enabled -and ($r.Status -like '*injected progress error*')) ('a throw while starting a step should clear Busy, status: ' + $r.Status + ' busy ' + $r.Busy)
+                    ${function:Get-UploadProgressText} = $savedProgress
+                    $script:ConnState = 'controller'
+                    ${function:Add-LogText} = { param([string]$Text) if ($Text -like '*Brain answered*') { throw 'injected probe error' } }
+                    $r = & $runUpload { param($j, $n) if ($j.Kind -eq 'probe') { $heard } else { & $okRun } }
+                    & $expectP ((-not $r.Busy) -and ($null -eq $script:UploadRun) -and $ui.UploadButton.Enabled -and ($r.Status -like 'Slot 1 done. Slot 2 failed: Something went wrong: injected probe error*')) ('a throw in the link probe callback should clear Busy, status: ' + $r.Status + ' busy ' + $r.Busy)
+                } finally {
+                    ${function:Get-UploadOutcome} = $savedOutcome; ${function:Get-UploadProgressText} = $savedProgress; ${function:Add-LogText} = $savedLog
+                }
+                # The link probe never waits past what is left of the wait, and never longer than the Mac's 10 s.
+                $script:FakeJobs = New-Object System.Collections.ArrayList
+                $script:ConnState = 'controller'
+                Set-SelectedBuild $tNew; Update-BuildInfo
+                $script:Busy = $false
+                Start-Upload
+                & $script:FakeJobs[0].OnDone (& $okRun)
+                $probeJob = $script:FakeJobs[1]
+                & $expectP (($probeJob.Kind -eq 'probe') -and ($probeJob.Args.Timeout -le 10) -and ($probeJob.Args.Timeout -ge 2)) ('the first probe should have a timeout of 10 s at most, got ' + $probeJob.Args.Timeout)
+                $script:UploadRun.Deadline = (Get-Date).AddSeconds(4)
+                $script:FakeJobs = New-Object System.Collections.ArrayList
+                Start-LinkProbe
+                & $expectP ($script:FakeJobs[0].Args.Timeout -le 3) ('a probe near the deadline should be cut short, got ' + $script:FakeJobs[0].Args.Timeout)
+                $script:UploadRun = $null; $script:Busy = $false; $script:FakeJobs = New-Object System.Collections.ArrayList
+                $script:ConnState = 'controller'
                 # A slot that dropped partway through PROS is read as a lost link too.
                 & $expectP ((Get-UploadOutcome -Run (& $badRun "Couldn't find the response header") -Slot 2).Kind -eq 'LinkLost') 'a missing response header should read as a lost link'
                 # Closing during any step still asks first.

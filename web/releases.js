@@ -282,12 +282,15 @@ async function sha256(bytes) {
   return toHex(await crypto.subtle.digest('SHA-256', bytes));
 }
 
-async function metaGet(key) {
+// undefined means nothing is stored. With strict, a storage error throws instead, so a list that
+// couldn't be read is never mistaken for an empty one.
+async function metaGet(key, strict = false) {
   try {
     if (!(await caches.has(META_CACHE))) return undefined;
     const res = await (await caches.open(META_CACHE)).match(key);
     return res ? await res.text() : undefined;
   } catch (e) {
+    if (strict) throw e;
     return undefined;
   }
 }
@@ -465,7 +468,7 @@ export async function loadBuild() {
 // null means the kept list could not be read, which blocks cleanup.
 export async function getKept() {
   try {
-    const text = await metaGet('kept');
+    const text = await metaGet('kept', true);
     if (text === undefined) return {};
     const v = JSON.parse(text);
     return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
@@ -569,7 +572,8 @@ export async function loadPublished() {
   try { rows = await res.json(); } catch (e) { throw new Error(CAPTIVE_MESSAGE); }
   if (!Array.isArray(rows)) throw new Error(CAPTIVE_MESSAGE);
   return rows
-    .filter((r) => r && !r.draft && typeof r.tag_name === 'string')
+    // Only robot builds: the Mac uploader's own releases share this repo.
+    .filter((r) => r && !r.draft && typeof r.tag_name === 'string' && /^build-\d{1,9}-[0-9a-f]{7}$/.test(r.tag_name))
     .map((r) => ({
       tag: r.tag_name,
       date: r.published_at || r.created_at || '',

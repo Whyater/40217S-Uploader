@@ -65,16 +65,24 @@ jq -e '.version == 1 and (.builds | type == "array")' full-builds.json > /dev/nu
 fulls="$(jq -r --arg newest "$tag" '[.builds[] | objects | .tag | select(type == "string" and test("^build-[0-9]{1,9}-[0-9a-f]{7}$") and . != $newest)]
   | unique | sort_by(capture("^build-(?<n>[0-9]+)").n | tonumber) | reverse | .[0:3][]' full-builds.json)"
 bundled=()
+# A full build that fails here is left out with a warning instead of stopping the publish, so one
+# bad old build can never keep the newest off the site. The app then fetches it through the relay.
 for t in $fulls; do
   echo "Bundling full build $t"
-  mkdir -p "$site/build/$t"
-  gh release download "$t" -R "$repo" --pattern '*' --dir "$site/build/$t" --clobber
-  [ "$(jq -r .tag "$site/build/$t/release.json")" = "$t" ] || { echo "$t has a release.json for another build." >&2; exit 1; }
-  for f in hot.package.bin cold.package.bin project.pros; do
-    [ -f "$site/build/$t/$f" ] || { echo "Release $t is missing $f." >&2; exit 1; }
-  done
-  check_hashes "$site/build/$t" "$t"
-  bundled+=("$t")
+  if (
+    mkdir -p "$site/build/$t" || exit 1
+    gh release download "$t" -R "$repo" --pattern '*' --dir "$site/build/$t" --clobber || exit 1
+    [ "$(jq -r .tag "$site/build/$t/release.json")" = "$t" ] || { echo "$t has a release.json for another build." >&2; exit 1; }
+    for f in hot.package.bin cold.package.bin project.pros; do
+      [ -f "$site/build/$t/$f" ] || { echo "Release $t is missing $f." >&2; exit 1; }
+    done
+    check_hashes "$site/build/$t" "$t"
+  ); then
+    bundled+=("$t")
+  else
+    echo "::warning::Left full build $t off the site." >&2
+    rm -rf "${site:?}/build/$t"
+  fi
 done
 jq -n --arg newest "$tag" '{version: 1, newest: $newest, builds: $ARGS.positional}' \
   --args ${bundled[@]+"${bundled[@]}"} > "$site/build/builds.json"

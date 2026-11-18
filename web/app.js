@@ -238,7 +238,8 @@ function renderKeepMenu() {
   el.keepAdd.hidden = isKept;
   el.keepRename.hidden = !isKept;
   el.keepRemove.hidden = !isKept;
-  el.keepBtn.disabled = !tag || !S.kept || S.busy || S.downloading;
+  // An unreadable kept list still allows Keep: saving backs the old list up as kept.bak and starts over.
+  el.keepBtn.disabled = !tag || S.busy || S.downloading;
   if (el.keepBtn.disabled) closeKeepMenu();
 }
 
